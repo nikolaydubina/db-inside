@@ -93,26 +93,46 @@ const UNIT_BOX_PICK_GEO = (() => {
 
 /**
  * Fat lines (Line2 / LineSegments2) are rasterised as screen-space quads, which
- * is the fix for a 1 px GL line breaking into dashes at grazing angles. They
- * need the viewport size, so every LineMaterial registers here.
+ * is the fix for a 1 px GL line breaking into dashes at grazing angles.
+ *
+ * `LineMaterial.linewidth` is measured against `resolution`, so the two have to
+ * agree. If resolution is the CSS size while the drawing buffer is CSS × DPR,
+ * every line comes out DPR times too thin — at DPR 2 that is sub-pixel, and a
+ * sub-pixel quad rasterises as a dotted line. So we work in device pixels:
+ * resolution is the drawing buffer, and linewidth is scaled to match. Ask for a
+ * width in CSS pixels and you get that width on screen at any pixel ratio.
  */
-const lineMaterials: LineMaterial[] = []
+interface FatLine {
+  mat: LineMaterial
+  /** Width in CSS pixels, as authored. */
+  cssWidth: number
+}
 
-export function registerLineMaterial(m: LineMaterial) {
-  m.resolution.set(window.innerWidth, window.innerHeight)
-  lineMaterials.push(m)
+const lineMaterials: FatLine[] = []
+let lineDpr = 1
+
+function applyLineSize(entry: FatLine) {
+  entry.mat.resolution.set(window.innerWidth * lineDpr, window.innerHeight * lineDpr)
+  entry.mat.linewidth = entry.cssWidth * lineDpr
+}
+
+export function registerLineMaterial(m: LineMaterial, cssWidth: number) {
+  const entry = { mat: m, cssWidth }
+  lineMaterials.push(entry)
+  applyLineSize(entry)
   return m
 }
 
 export function releaseLineMaterial(m: LineMaterial) {
-  const i = lineMaterials.indexOf(m)
+  const i = lineMaterials.findIndex((e) => e.mat === m)
   if (i >= 0) lineMaterials.splice(i, 1)
   m.dispose()
 }
 
 /** Call on resize — otherwise fat lines render at the wrong width. */
-export function setLineResolution(w: number, h: number) {
-  for (const m of lineMaterials) m.resolution.set(w, h)
+export function setLineResolution(_w: number, _h: number, dpr = 1) {
+  lineDpr = dpr
+  for (const entry of lineMaterials) applyLineSize(entry)
 }
 
 /**
@@ -141,16 +161,20 @@ export class OutlineBox extends THREE.Group {
     this.baseColor = color
     this.baseOpacity = opacity
 
+    // A hairline: 0.9 CSS px is thin enough to read as an outline, and still
+    // lands on 1.8 device px at DPR 2, so it does not break into dots.
+    const glowWidth = 0.9
     this.glowMat = registerLineMaterial(
       new LineMaterial({
         color,
-        linewidth: 1.2,
+        linewidth: glowWidth,
         transparent: true,
         opacity,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         worldUnits: false,
       }),
+      glowWidth,
     )
     const glow = new LineSegments2(
       new LineSegmentsGeometry().setPositions(UNIT_BOX_EDGE_POINTS),

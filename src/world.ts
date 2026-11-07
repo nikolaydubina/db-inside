@@ -5,7 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
-import { neonEdges, rand } from './util'
+import { neonEdges, rand, setLineResolution } from './util'
 
 export interface World {
   renderer: THREE.WebGLRenderer
@@ -15,7 +15,8 @@ export interface World {
   controls: OrbitControls
   labelRenderer: CSS2DRenderer
   sun: THREE.DirectionalLight
-  render(dt: number): void
+  /** `dt` drives camera damping; `animDt` is the speed-scaled simulation clock. */
+  render(dt: number, animDt?: number): void
   resize(): void
 }
 
@@ -102,7 +103,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     const theta = rand(0, Math.PI * 2)
     const phi = Math.acos(rand(-0.15, 1))
     starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta)
-    starPos[i * 3 + 1] = r * Math.cos(phi) * 0.6 + 6
+    starPos[i * 3 + 1] = r * Math.cos(phi) * 0.6
     starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta)
   }
   const starGeo = new THREE.BufferGeometry()
@@ -120,7 +121,15 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
       blending: THREE.AdditiveBlending,
     }),
   )
-  scene.add(stars)
+  // The stars turn about a tilted pole, the way the real sky does: the parent
+  // holds the tilt, the points themselves spin about their own Y, which is now
+  // 23.4 degrees off vertical. They are centred on the origin so that spin has
+  // no wobble in it.
+  const celestial = new THREE.Group()
+  celestial.position.y = 6
+  celestial.rotation.z = THREE.MathUtils.degToRad(23.4)
+  celestial.add(stars)
+  scene.add(celestial)
 
   /* ---------------------------------- lights -------------------------------- */
 
@@ -273,7 +282,18 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     0.62,
   )
   const output = new OutputPass()
-  const composer = new EffectComposer(renderer)
+  // `antialias: true` on the renderer only affects the default framebuffer, and
+  // the composer never draws to it — every frame goes through a render target.
+  // Without `samples` that target has no MSAA at all, which is why every edge
+  // and every thin line stair-steps. Ask for it explicitly.
+  const composerTarget = new THREE.WebGLRenderTarget(1, 1, {
+    type: THREE.HalfFloatType,
+    // 2 samples is the sweet spot here: the device pixel ratio is already 2 on
+    // a retina screen, and 4 samples costs ~45% of the frame rate for a
+    // difference you cannot see.
+    samples: 2,
+  })
+  const composer = new EffectComposer(renderer, composerTarget)
   composer.addPass(renderPass)
   composer.addPass(bloom)
   composer.addPass(output)
@@ -314,15 +334,20 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     const dpr = Math.min(window.devicePixelRatio, w < 760 ? 1.5 : 2)
     renderer.setPixelRatio(dpr)
     renderer.setSize(w, h)
+    // fat lines measure their width against the drawing buffer, not the CSS size
+    setLineResolution(w, h, dpr)
     composer.setPixelRatio(dpr)
     composer.setSize(w, h)
     bloom.setSize(w, h)
     labelRenderer.setSize(w, h)
   }
 
-  function render(dt: number) {
+  function render(dt: number, animDt = dt) {
     renderer.info.reset()
-    stars.rotation.y += dt * 0.004
+    // The sky turns on the simulation clock. Slow on purpose: 0.002 rad/s is a
+    // 52-minute revolution, so at 1x it reads as a still sky and only the fast
+    // speeds (4x → ~13 min) show it actually turning.
+    stars.rotation.y += animDt * 0.002
     const k = performance.now() * 0.001
       ; (rimRing.material as THREE.MeshBasicMaterial).opacity = 0.72 + 0.22 * Math.sin(k * 0.9)
     controls.update(dt)

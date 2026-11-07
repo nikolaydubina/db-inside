@@ -830,6 +830,10 @@ export class PostgresInstance {
 
   /** Colour a page by how full it is; a table tint keeps the tables apart. */
   private fillHex(p: Page8K) {
+    // a page with nothing in it is not a dark page — it is not there at all
+    if (p.fill <= 0.001) {
+      return this.tmpColorA.setHex(BLOCK_FREE).multiplyScalar(p.shade).getHex()
+    }
     const ramp = this.tmpColorA.setHex(FILL_DARK).lerp(this.tmpColorB.setHex(FILL_BRIGHT), p.fill)
     if (p.table) ramp.lerp(this.tmpColorB.setHex(p.color), 0.28)
     if (p.hintAmt > 0) ramp.lerp(this.tmpColorB.setHex(p.hint), p.hintAmt)
@@ -905,19 +909,24 @@ export class PostgresInstance {
       const region = TABLE_REGIONS[randInt(0, TABLE_REGIONS.length - 1)]
       const blocks = this.tableBlocks.filter((b) => b.table === region.label && !b.busy)
       if (blocks.length === 0) continue
-      const partial = blocks.filter((b) => b.fill > 0 && b.fill < 1)
-      const fresh = blocks.filter((b) => b.fill === 0)
+      const empty = blocks.filter((b) => b.fill <= 0.001)
+      const partial = blocks.filter((b) => b.fill > 0.001 && b.fill < 1)
+      // the fuller the run, the likelier it appends a page to the file end
+      const live = blocks.length - empty.length
+      const pressure = live / blocks.length
+      const append = empty.length > 0 && Math.random() < 0.12 + pressure * 0.5
+
       let p: Page8K | undefined
-      if (partial.length > 0 && Math.random() < 0.7) {
-        p = partial[randInt(0, partial.length - 1)]
-        this.setFill(p, p.fill + rand(0.15, 0.45))
-      } else if (fresh.length > 0) {
-        // a new page is initialised for this heap
-        p = fresh[randInt(0, fresh.length - 1)]
-        this.setFill(p, rand(0.12, 0.3))
+      if (append) {
+        // a brand-new page is initialised for this heap and takes its place
+        p = empty[randInt(0, empty.length - 1)]
+        this.setFill(p, rand(0.08, 0.26))
       } else if (partial.length > 0) {
         p = partial[randInt(0, partial.length - 1)]
-        this.setFill(p, p.fill + 0.2)
+        this.setFill(p, p.fill + rand(0.15, 0.45))
+      } else if (empty.length > 0) {
+        p = empty[randInt(0, empty.length - 1)]
+        this.setFill(p, rand(0.08, 0.22))
       }
       if (p) touched.push(p)
     }
@@ -948,7 +957,7 @@ export class PostgresInstance {
 
   /** A page in some table that a read is about to touch. */
   pickBlockForRead(): Page8K | null {
-    const filled = this.tableBlocks.filter((b) => b.fill > 0 && !b.busy)
+    const filled = this.tableBlocks.filter((b) => b.fill > 0.001 && !b.busy)
     if (filled.length === 0) return null
     return filled[randInt(0, filled.length - 1)]
   }
@@ -966,7 +975,7 @@ export class PostgresInstance {
     if (blocks.length === 0) return { table: region.label, pages: 0 }
 
     const before = blocks.map((b) => b.fill)
-    const packed = before.filter((f) => f > 0).sort((a, b) => b - a)
+    const packed = before.filter((f) => f > 0.001).sort((a, b) => b - a)
     const after = blocks.map((_, i) => (i < packed.length ? packed[i] : 0))
 
     await this.ticker.add(0.9, (k) => {
@@ -985,10 +994,13 @@ export class PostgresInstance {
   deleteRows(n = 2): Page8K[] {
     const touched: Page8K[] = []
     for (let k = 0; k < n; k++) {
-      const filled = this.tableBlocks.filter((b) => b.fill > 0 && !b.busy)
+      const filled = this.tableBlocks.filter((b) => b.fill > 0.001 && !b.busy)
       if (filled.length === 0) break
       const p = filled[randInt(0, filled.length - 1)]
-      this.setFill(p, p.fill - rand(0.25, 0.6))
+      // a nearly-empty page can be drained completely — that is how a heap
+      // file gets a hole in it, and the page stops existing in the diagram
+      const drained = p.fill < 0.4 && Math.random() < 0.55
+      this.setFill(p, drained ? 0 : p.fill - rand(0.25, 0.6))
       touched.push(p)
     }
     // a delete makes them sag and dim
@@ -1897,13 +1909,14 @@ export class PostgresInstance {
       m.emissiveIntensity = 0.35 + 0.3 * breathe(time, 1.5, i * 0.9)
     })
 
-    // disks twinkle softly so the array looks powered
-    // motes drift upward and wrap
+    // motes drift upward and wrap, with a little lateral wander
     const attr = this.motes.geometry.getAttribute('position') as THREE.BufferAttribute
     for (let i = 0; i < attr.count; i++) {
-      let y = attr.getY(i) + dt * 0.35
+      let y = attr.getY(i) + dt * 1.15
       if (y > 9.6) y = 0.25
       attr.setY(i, y)
+      attr.setX(i, attr.getX(i) + Math.sin(time * 1.7 + i * 0.9) * dt * 0.22)
+      attr.setZ(i, attr.getZ(i) + Math.cos(time * 1.3 + i * 1.3) * dt * 0.18)
     }
     attr.needsUpdate = true
     this.haloRing.rotation.z += dt * 0.12

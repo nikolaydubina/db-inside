@@ -7,7 +7,7 @@ import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { initHud } from './ui'
-import { Ticker, label, rand, OutlineBox, setLineResolution } from './util'
+import { Ticker, label, rand, OutlineBox } from './util'
 
 const canvas = document.querySelector<HTMLCanvasElement>('#c')!
 const labelHost = document.querySelector<HTMLElement>('#labels')!
@@ -27,8 +27,6 @@ instance.group.add(bufferLabel)
 
 const paths = makePaths()
 const flows = makeFlows(scene, paths)
-// fat lines are drawn in screen space, so they need the viewport size
-setLineResolution(window.innerWidth, window.innerHeight)
 
 const sim = new EngineSim(instance, ticker, scene, paths, flows)
 
@@ -435,7 +433,7 @@ function frame() {
     world.controls.autoRotate = true
   }
 
-  world.render(raw)
+  world.render(raw, dt)
   telemetry.tick(dt, raw)
   hud.setStats(sim.stats)
 
@@ -449,6 +447,5 @@ function frame() {
 
 window.addEventListener('resize', () => {
   world.resize()
-  setLineResolution(window.innerWidth, window.innerHeight)
 })
 requestAnimationFrame(frame)

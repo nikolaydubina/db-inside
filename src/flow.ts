@@ -121,9 +121,10 @@ export class FlowLine {
     this.baseOpacity = opts.opacity ?? 0.3
     this.weight = 1
 
+    const width = opts.width ?? 0.9
     this.lineMat = new LineMaterial({
       color,
-      linewidth: opts.width ?? 1.35,
+      linewidth: width,
       transparent: true,
       opacity: this.baseOpacity,
       blending: THREE.AdditiveBlending,
@@ -132,7 +133,7 @@ export class FlowLine {
       worldUnits: false,
       dashed: false,
     })
-    registerLineMaterial(this.lineMat)
+    registerLineMaterial(this.lineMat, width)
     const line = new Line2(this.lineGeo, this.lineMat)
     line.frustumCulled = false
     this.group.add(line)
@@ -255,7 +256,7 @@ export class QueryChain {
     const f = new FlowLine(points, color, {
       speed: 0.55,
       opacity: 0.42,
-      width: 1.6,
+      width: 1.0,
       ...opts,
     })
     this.flows.push(f)
