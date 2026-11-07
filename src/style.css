@@ -271,6 +271,43 @@ h2::after {
   gap: 6px;
 }
 
+.views {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 5px;
+}
+
+.vbtn {
+  appearance: none;
+  padding: 6px 7px;
+  border-radius: 3px;
+  border: 1px solid rgba(120, 190, 230, 0.14);
+  background: rgba(16, 30, 43, 0.4);
+  color: #8fb3c8;
+  font-family: var(--mono);
+  font-size: 8px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s, background 0.16s;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.vbtn:hover {
+  border-color: rgba(53, 224, 255, 0.45);
+  color: #cdefff;
+  background: rgba(53, 224, 255, 0.08);
+}
+
+.vbtn.on {
+  border-color: var(--cyan);
+  color: #eafcff;
+  background: rgba(53, 224, 255, 0.14);
+  box-shadow: 0 0 10px rgba(53, 224, 255, 0.25);
+}
+
 .slider {
   display: flex;
   align-items: center;

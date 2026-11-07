@@ -5,6 +5,7 @@ import { ANCHOR, PostgresInstance } from './instance'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
+import { createCameraRig, ALL_VIEWS } from './views'
 import { initHud } from './ui'
 import { Ticker, label, rand } from './util'
 
@@ -47,6 +48,9 @@ const telemetry = installTelemetry({
 })
 ;(window as unknown as Record<string, unknown>).__psqlDebug = telemetry.api
 if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
+// deep link straight into a walkthrough view: ?view=wal
+const startView = new URLSearchParams(location.search).get('view')
+if (startView) window.setTimeout(() => rig.snap(startView), 260)
 else
   console.info(
     '%cpsql%c telemetry available: __psqlDebug.on() · .snapshot() · .history() · .table("users")',
@@ -97,6 +101,55 @@ const hud = initHud({
 let lastInteraction = performance.now()
 world.controls.addEventListener('start', () => {
   lastInteraction = performance.now()
+})
+
+/* --------------------------------- views ---------------------------------- */
+
+const orbitCheckbox = document.querySelector<HTMLInputElement>('#chk-orbit')!
+const rig = createCameraRig({
+  camera,
+  controls: world.controls,
+  ticker,
+  beforeNavigate: () => {
+    autoOrbit = false
+    world.controls.autoRotate = false
+    if (orbitCheckbox) orbitCheckbox.checked = false
+  },
+})
+;(window as unknown as Record<string, unknown>).__psqlViews = rig
+
+// build the view buttons from the single source of truth
+const viewsEl = document.getElementById('views')
+if (viewsEl) {
+  for (const v of ALL_VIEWS) {
+    const b = document.createElement('button')
+    b.className = 'vbtn'
+    b.dataset.view = v.id
+    b.textContent = v.label
+    b.title = v.hint
+    b.addEventListener('click', () => {
+      rig.go(v.id)
+      lastInteraction = performance.now()
+      for (const el of viewsEl.querySelectorAll('.vbtn')) el.classList.remove('on')
+      b.classList.add('on')
+    })
+    viewsEl.appendChild(b)
+  }
+}
+
+window.addEventListener('keydown', (e) => {
+  if (isTyping(e.target)) return
+  if (e.key >= '0' && e.key <= '9') {
+    const ids = ALL_VIEWS.map((v) => v.id)
+    const idx = e.key === '0' ? (ids.indexOf(rig.current() ?? '') + 1) % ids.length : Number(e.key) - 1
+    const id = ids[idx]
+    if (id) {
+      rig.go(id)
+      viewsEl?.querySelectorAll('.vbtn').forEach((el, i) => {
+        el.classList.toggle('on', i === idx)
+      })
+    }
+  }
 })
 
 /* ------------------------------- hover picking ----------------------------- */
@@ -207,10 +260,26 @@ document.addEventListener('mousemove', (e) => {
   lastInteraction = performance.now()
 })
 
+const FLY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'])
+const flyToggle = document.querySelector<HTMLInputElement>('#chk-fly')!
+
 window.addEventListener('keydown', (e) => {
-  if (!flyMode || isTyping(e.target)) return
+  if (isTyping(e.target)) return
+  // pressing a movement key is itself the request to enter fly mode
+  if (!flyMode && FLY_CODES.has(e.code)) {
+    flyToggle.checked = true
+    flyToggle.dispatchEvent(new Event('change'))
+  }
+  if (!flyMode || !FLY_CODES.has(e.code)) return
   flyKeys.add(e.code)
-  if (e.code.startsWith('Key') || e.code === 'ShiftLeft') e.preventDefault()
+  e.preventDefault()
+})
+
+// shift is only a boost modifier, it must not switch modes on its own
+window.addEventListener('keydown', (e) => {
+  if (flyMode && !isTyping(e.target) && (e.code === 'ShiftLeft' || e.code === 'ShiftRight')) {
+    flyKeys.add(e.code)
+  }
 })
 window.addEventListener('keyup', (e) => flyKeys.delete(e.code))
 window.addEventListener('blur', () => flyKeys.clear())
@@ -303,7 +372,7 @@ function frame() {
   }
 
   // resume the slow orbit after the user stops interacting
-  if (autoOrbit && !world.controls.autoRotate && performance.now() - lastInteraction > 6000) {
+  if (autoOrbit && !flyMode && !world.controls.autoRotate && performance.now() - lastInteraction > 6000) {
     world.controls.autoRotate = true
   }
 

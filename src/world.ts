@@ -46,10 +46,11 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   controls.target.set(3.4, 6.6, 1.0)
   controls.enableDamping = true
   controls.dampingFactor = 0.055
-  controls.minDistance = 12
-  controls.maxDistance = 78
-  controls.minPolarAngle = 0.32
-  controls.maxPolarAngle = 1.46
+  // wide enough range that walkthrough views can get down to block level
+  controls.minDistance = 1.2
+  controls.maxDistance = 90
+  controls.minPolarAngle = 0.06
+  controls.maxPolarAngle = 1.52
   controls.autoRotate = true
   controls.autoRotateSpeed = 0.34
   controls.zoomSpeed = 0.75

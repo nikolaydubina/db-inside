@@ -111,12 +111,13 @@ export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0
  * grows into. Segments are appended left to right and recycled in place.
  */
 const WAL_ROW = 16
+const WAL_BUF_LEN = 4
 /** Leftmost slot of the run — the free space it grows into sits just below. */
 const WAL_C0 = 10
 const WAL_LEN = 12
 const PAGE_Y = 0.25
-const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
-const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
+export const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
+export const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
 const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
 const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
 
@@ -193,7 +194,7 @@ export const ANCHOR = {
   exec: V(1.6, 6.85, -2.4),
   result: V(8.2, 6.6, -1.8),
   bufferCenter: V(-1.0, 5.5, -1.4),
-  wal: V(1.25, 0.55, 7.25),
+  wal: V(-4.0, 0.55, 7.25),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
   disk: V(7.0, 0.5, 5.6),
@@ -235,6 +236,9 @@ export class PostgresInstance {
   readonly walBlocks: Page8K[] = []
   /** Per-segment flash boost, decays in update(). */
   private walBoost = new Map<number, number>()
+  /** the floating wal_buffers cubes, and the group that carries them */
+  readonly walBufBlocks: THREE.Mesh[] = []
+  private walBufGroup!: THREE.Group
   readonly btreeMats: THREE.MeshStandardMaterial[] = []
   readonly ginMats: THREE.MeshStandardMaterial[] = []
   readonly brinMats: THREE.MeshStandardMaterial[] = []
@@ -581,35 +585,47 @@ export class PostgresInstance {
       meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
     })
 
-    // wal_buffers: the only part of the WAL that lives in RAM
+    // wal_buffers: page-sized cubes of shared memory holding the tail of the
+    // log. They hover in the same lattice columns as the segments below and
+    // drift with the write head.
     const wb = new THREE.Group()
-    const wbGeo = new RoundedBoxGeometry(0.34, 0.34, 0.34, 2, 0.04)
-    for (let i = 0; i < 3; i++) {
-      const mat = glowMat(0x08222e, PALETTE.cyan, 0.7, { metalness: 0.4 })
+    const wbGeo = new RoundedBoxGeometry(PAGE_GRID.bw, PAGE_GRID.bh, PAGE_GRID.bd, 2, 0.025)
+    for (let i = 0; i < WAL_BUF_LEN; i++) {
+      const mat = new THREE.MeshStandardMaterial({
+        color: 0x0b2a36,
+        emissive: PALETTE.cyan,
+        emissiveIntensity: 1.15,
+        roughness: 0.35,
+        metalness: 0.45,
+        transparent: true,
+        opacity: 0.94,
+      })
       const m = new THREE.Mesh(wbGeo, mat)
-      m.position.set(i * 0.5, Math.sin(i * 1.7) * 0.12, 0)
+      m.position.set((i - (WAL_BUF_LEN - 1) / 2) * PAGE_GRID.gx, 0, 0)
+      m.add(neonEdges(wbGeo, 0x8fe6ff, 0.55))
       wb.add(m)
       this.walBufferMats.push(mat)
+      this.walBufBlocks.push(m)
     }
-    const walMid = pageX(WAL_C0 + (WAL_LEN - 1) / 2)
-    wb.position.set(walMid, 1.75, pageZ(WAL_ROW) + 0.3)
+    wb.position.set(pageX(WAL_C0 + WAL_LEN - 1), 1.95, pageZ(WAL_ROW))
     this.group.add(wb)
+    this.walBufGroup = wb
 
     const wbPick = new THREE.Mesh(
-      new THREE.BoxGeometry(1.9, 0.9, 0.9),
+      new THREE.BoxGeometry(WAL_BUF_LEN * PAGE_GRID.gx, 0.8, PAGE_GRID.bd * 1.3),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    wbPick.position.copy(wb.position)
-    this.group.add(wbPick)
+    wbPick.position.set(0, 0.1, 0)
+    wb.add(wbPick)
     this.register(wbPick, {
-      title: 'wal_buffers — the WAL tail in RAM',
-      body: 'WAL records are written to these shared-memory buffers first, then flushed to the segment blocks below in order. Same split as heap pages: the durable thing is on disk, RAM only holds a short recent stretch. Default is 1/32 of shared_buffers, about 16 MB.',
-      meta: 'wal_buffers · RAM · tail of the log · flushed by WAL writer',
+      title: 'wal_buffers — the not-yet-written tail of the log',
+      body: 'wal_buffers is a circular strip of 8 kB shared-memory pages that holds the newest WAL records. It is NOT a copy of heap pages: the records describe changes to pages, but the buffer holds the log stream itself. Anything here is not durable yet — it becomes durable when the WAL writer writes it to the segment blocks below and fsyncs. After that the memory is simply overwritten, so these cubes are a staging area, and the segment below is the lasting artefact.',
+      meta: 'wal_buffers · RAM · 8 kB pages · circular · flushed by WAL writer',
     })
 
     const wbLab = label('WAL BUFFERS · RAM')
-    wbLab.position.set(walMid, 2.35, pageZ(WAL_ROW) + 0.3)
-    this.group.add(wbLab)
+    wbLab.position.set(0, 0.75, 0)
+    wb.add(wbLab)
 
     const lab = label('WAL · DISK')
     lab.position.set(x0 + 0.4, PAGE_Y + 0.85, z1 + 0.15)
@@ -1755,6 +1771,24 @@ export class PostgresInstance {
     }
 
     this.styleWal(time, dt)
+
+    // wal_buffers hover above the write head, bobbing and swaying like they are
+    // only half in this world — because they are not on disk yet
+    if (this.walBufGroup) {
+      const headCol = WAL_C0 + (WAL_LEN - 1 - this.walHeadIndex)
+      const targetX = pageX(headCol)
+      const g = this.walBufGroup
+      g.position.x += (targetX - g.position.x) * Math.min(1, dt * 2.4)
+      g.position.z = pageZ(WAL_ROW)
+      g.position.y = 1.95 + Math.sin(time * 1.3) * 0.08
+      this.walBufBlocks.forEach((m, i) => {
+        const ph = i * 1.15
+        m.position.y = 0.16 + Math.sin(time * 1.9 + ph) * 0.09
+        m.rotation.z = Math.sin(time * 1.15 + ph) * 0.16
+        m.rotation.y = Math.sin(time * 0.75 + ph * 0.7) * 0.4
+        m.scale.setScalar(1 + Math.sin(time * 2.4 + ph) * 0.035)
+      })
+    }
 
     // pipeline nodes drift like slow satellites and breathe when they work
     for (const key of Object.keys(this.nodes) as NodeName[]) {

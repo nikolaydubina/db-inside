@@ -89,6 +89,48 @@ equality.
 In PostgreSQL, *heap* is the name of the unordered pile of 8 kB pages a table is stored in (the "heap
 file"). It is a file on disk, and has nothing to do with heap memory / malloc.
 
+## Walkthrough views
+
+Camera poses live in `src/views.ts` as named shots derived from live anchors, not from magic
+numbers — move a structure and its view moves with it.
+
+```js
+__psqlViews.list()            // ids, labels, which entity each one is about
+__psqlViews.go('wal')         // fly there over 0.85s
+__psqlViews.snap('buffers')   // cut straight there
+__psqlViews.isAt('wal')       // true if the camera is on that pose (assert in tests)
+__psqlViews.pose('wal')       // { pos, target, fov } without moving
+__psqlViews.anchor('wal')     // live anchor vector, for authoring new views
+__psqlViews.lookAt(vec3, [0,3,8], 36)   // ad-hoc framing
+```
+
+Views: `overview`, `disk`, `tables`, `wal`, `buffers`, `pipeline`, `indexes`, `free space`,
+`clients`, `pages`, plus `table-users` / `table-products` / `table-metrics`.
+
+In the UI they are the **Views** card, with `1`–`9` jumping to the n'th pose and `0` cycling to the
+next one. Navigating stops auto-orbit first, otherwise the drift drags the camera off the pose.
+
+Deep link for screenshots and tests:
+
+```
+http://127.0.0.1:5199/?view=wal          # or ?view=pages&debug
+```
+
+Playwright:
+
+```js
+await page.goto('http://127.0.0.1:5199/?view=pages')
+await page.waitForTimeout(600)           // let the boot tween settle
+await page.screenshot({ path: 'pages.png' })
+```
+
+Because every pose is a plain function of the anchors, adding a shot for a new entity is two lines:
+
+```ts
+{ id: 'gin', label: 'gin', entity: 'gin index', hint: 'jsonb postings',
+  pose: () => shot(ANCHOR.gin, [2.5, 2.5, 5], 32) }
+```
+
 ## Debugging
 
 The simulation dumps its real state instead of you squinting at a screenshot:
