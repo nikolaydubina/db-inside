@@ -4,6 +4,7 @@ import { createWorld } from './world'
 import { ANCHOR, PostgresInstance } from './instance'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
+import { installTelemetry } from './debug'
 import { initHud } from './ui'
 import { Ticker, label, rand } from './util'
 
@@ -31,7 +32,24 @@ const sim = new EngineSim(instance, ticker, scene, paths, flows)
   ; (window as unknown as Record<string, unknown>).__psql = { scene, world, instance, sim, paths, flows }
 
 let autoOrbit = true
+let speed = 1
 let pinned: THREE.Object3D | null = null
+
+// console telemetry: __psqlDebug.on() / .snapshot() / .history() / .table()
+const telemetry = installTelemetry({
+  sim,
+  inst: instance,
+  renderer: world.renderer,
+  speed: () => speed,
+})
+;(window as unknown as Record<string, unknown>).__psqlDebug = telemetry.api
+if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
+else
+  console.info(
+    '%cpsql%c telemetry available: __psqlDebug.on() · .snapshot() · .history() · .table("users")',
+    'color:#35e0ff',
+    'color:inherit',
+  )
 
 const hud = initHud({
   runQuery: () => {
@@ -42,6 +60,12 @@ const hud = initHud({
   },
   vacuum: () => {
     void sim.vacuum()
+  },
+  compact: () => {
+    void sim.compact()
+  },
+  setSpeed: (v) => {
+    speed = v
   },
   setIndexScan: (on) => sim.setIndexScan(on),
   setOrbit: (on) => {
@@ -137,8 +161,10 @@ let lastTime = performance.now()
 
 function frame() {
   const now = performance.now()
-  const dt = Math.min((now - lastTime) / 1000, 0.05)
+  const raw = Math.min((now - lastTime) / 1000, 0.05)
   lastTime = now
+  // the speed slider scales the whole simulation clock, not the render rate
+  const dt = raw * speed
 
   ticker.update(dt)
   sim.update(dt)
@@ -176,7 +202,8 @@ function frame() {
     world.controls.autoRotate = true
   }
 
-  world.render(dt)
+  world.render(raw)
+  telemetry.tick(dt, raw)
   hud.setStats(sim.stats)
 
   if (!booted) {

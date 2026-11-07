@@ -25,6 +25,7 @@ export interface SimStats {
   backendStates: boolean[]
   checkpointing: boolean
   vacuuming: boolean
+  compacting: boolean
 }
 
 function makePacket(color: number, size: number, scene: THREE.Scene) {
@@ -70,6 +71,9 @@ export class EngineSim {
   private connTimer = 3.5
   private checkpointing = false
   private vacuuming = false
+  private compacting = false
+  private compactTimer = 22
+  private clock = 0
   private scanning = false
   private chains: QueryChain[] = []
 
@@ -79,7 +83,20 @@ export class EngineSim {
     private scene: THREE.Scene,
     private paths: Paths,
     private flows: FlowSet,
-  ) { }
+  ) {
+    // the ambient disk lines are just background traffic; the meaningful disk
+    // arrows are the per-query ones, routed to the page that statement touches
+    this.flows.bufferToDisk.setWeight(0.35)
+    this.flows.diskToBuffer.setWeight(0.35)
+  }
+
+  get activeChains() {
+    return this.chains.length
+  }
+
+  get clockTime() {
+    return this.clock
+  }
 
   get stats(): SimStats {
     const hitRate = this.accesses === 0 ? 0 : (this.hits / this.accesses) * 100
@@ -95,6 +112,7 @@ export class EngineSim {
       backendStates: this.inst.backendStates,
       checkpointing: this.checkpointing,
       vacuuming: this.vacuuming,
+      compacting: this.compacting,
     }
   }
 
@@ -271,28 +289,42 @@ export class EngineSim {
         await travel(this.ticker, packet, this.paths.exec, 0.35)
         fExec.flash(0.7)
 
-        const fDown = chain.addCurve(this.paths.bufferToDisk, PALETTE.amber, {
-          arrows: 3,
-          speed: 0.5,
-          opacity: 0.42,
-        })
-        this.flows.bufferToDisk.flash(1.2)
-        await travel(this.ticker, packet, this.paths.bufferToDisk, 0.42, easeInOutCubic)
-        fDown.flash(0.9)
-        this.inst.flashDisk()
-        this.inst.flashDisk(randInt(0, 2))
-        await this.ticker.wait(0.14)
+        // the arrow goes to the exact block this read needs, not to "the disk"
+        const target = this.inst.pickBlockForRead()
+        const toBlock = target
+          ? target.home.clone().add(new THREE.Vector3(0, 0.34, 0))
+          : this.paths.diskTop.clone()
 
-        const fUp = chain.addCurve(this.paths.diskToBuffer, PALETTE.amber, {
+        const down = pathCurve([
+          new THREE.Vector3(ANCHOR.bufferCenter.x - 1.6, 5.1, ANCHOR.bufferCenter.z - 0.6),
+          new THREE.Vector3(0.4, 3.9, 1.0),
+          toBlock.clone().add(new THREE.Vector3(0, 1.9, 0)),
+          toBlock,
+        ])
+        const fDown = chain.addCurve(down, PALETTE.amber, {
           arrows: 3,
           speed: 0.5,
           opacity: 0.42,
         })
-        this.flows.diskToBuffer.flash(0.8)
+        await travel(this.ticker, packet, down, 0.5, easeInOutCubic)
+        fDown.flash(0.9)
+        if (target) this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
+
+        const up = pathCurve([
+          toBlock,
+          toBlock.clone().add(new THREE.Vector3(0, 1.9, 0)),
+          new THREE.Vector3(2.2, 4.7, 1.2),
+          new THREE.Vector3(ANCHOR.bufferCenter.x - 0.8, 6.15, ANCHOR.bufferCenter.z - 0.4),
+        ])
+        const fUp = chain.addCurve(up, PALETTE.amber, {
+          arrows: 3,
+          speed: 0.5,
+          opacity: 0.42,
+        })
         const packetCore = packet.children[0] as THREE.Mesh
           ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
         this.inst.liftFromDisk(pageIdx)
-        await travel(this.ticker, packet, this.paths.diskToBuffer, 0.5)
+        await travel(this.ticker, packet, up, 0.5)
         fUp.flash(0.8)
         pageIdx = this.inst.pickBufferPage()
         const page = this.inst.pages[pageIdx]
@@ -381,12 +413,24 @@ export class EngineSim {
       }
       await this.ticker.wait(0.5)
 
+      // a checkpoint is batched: many dirty pages leave at once, each one to its
+      // own block in the heap — that is why it is one fsync storm, not many I/Os
       for (let i = 0; i < 7; i++) {
         const page = this.inst.pages[randInt(0, this.inst.pages.length - 1)]
+        const target = this.inst.pickBlockForRead()
         const copy = makePacket(PALETTE.amber, 0.26, this.scene)
         copy.position.copy(page.mesh.position)
-        void travel(this.ticker, copy, this.paths.bufferToDisk, 0.75).then(() => {
-          this.inst.flashDisk(randInt(0, 2))
+        const dest = target
+          ? target.home.clone().add(new THREE.Vector3(0, 0.34, 0))
+          : this.paths.diskTop.clone()
+        const curve = pathCurve([
+          page.mesh.position.clone(),
+          page.mesh.position.clone().lerp(dest, 0.45).add(new THREE.Vector3(0, 1.6, 0)),
+          dest,
+        ])
+        void travel(this.ticker, copy, curve, 0.75).then(() => {
+          if (target) this.inst.paintBlock(target, PALETTE.amber)
+          this.inst.flashDisk()
           despawn(this.ticker, this.scene, copy, 0.2)
         })
         await this.ticker.wait(0.06)
@@ -399,6 +443,18 @@ export class EngineSim {
       this.note = 'checkpoint complete · dirty pages + WAL durable, segments recycled'
     } finally {
       this.checkpointing = false
+    }
+  }
+
+  async compact() {
+    if (this.compacting) return
+    this.compacting = true
+    this.note = 'vacuum full · rewriting a table into a packed new file'
+    try {
+      const res = await this.inst.compact()
+      this.note = `vacuum full · ${res.table} rewritten, ${res.pages} pages packed, tail freed`
+    } finally {
+      this.compacting = false
     }
   }
 
@@ -424,7 +480,8 @@ export class EngineSim {
       return !c.disposed
     })
 
-    this.inst.update(dt, performance.now() * 0.001)
+    this.clock += dt
+    this.inst.update(dt, this.clock)
 
     // clients connect and disconnect
     this.connTimer -= dt
@@ -441,6 +498,18 @@ export class EngineSim {
     if (this.deadTimer <= 0) {
       this.deadTimer = rand(3.2, 6.5)
       this.inst.markDeadTuples(randInt(1, 2))
+    }
+
+    // autovacuum's heavier cousin: a periodic rewrite of one relation
+    this.compactTimer -= dt
+    if (this.compactTimer <= 0 && !this.compacting) {
+      this.compactTimer = rand(30, 55)
+      this.note = 'pg_repack · rebuilding a table online, pages packed'
+      this.compacting = true
+      void this.inst.compact().then((res) => {
+        this.note = `pg_repack · ${res.table} packed into ${res.pages} pages`
+        this.compacting = false
+      })
     }
 
     // ambient scans keep the heap/index alive

@@ -836,6 +836,41 @@ export class PostgresInstance {
     return touched
   }
 
+  /** A page in some table that a read is about to touch. */
+  pickBlockForRead(): Page8K | null {
+    const filled = this.tableBlocks.filter((b) => b.fill > 0 && !b.busy)
+    if (filled.length === 0) return null
+    return filled[randInt(0, filled.length - 1)]
+  }
+
+  /**
+   * VACUUM FULL / CLUSTER style rewrite: the relation is packed into a
+   * brand-new file, tuples pulled to the front, and the empty pages at the end
+   * disappear. That is the only thing that actually defragments a heap.
+   */
+  async compact(): Promise<{ table: string; pages: number }> {
+    const region = TABLE_REGIONS[randInt(0, TABLE_REGIONS.length - 1)]
+    const blocks = this.tableBlocks
+      .filter((b) => b.table === region.label)
+      .sort((a, b) => a.row - b.row || a.col - b.col)
+    if (blocks.length === 0) return { table: region.label, pages: 0 }
+
+    const before = blocks.map((b) => b.fill)
+    const packed = before.filter((f) => f > 0).sort((a, b) => b - a)
+    const after = blocks.map((_, i) => (i < packed.length ? packed[i] : 0))
+
+    await this.ticker.add(0.9, (k) => {
+      blocks.forEach((b, i) => {
+        // a rewrite sweeps the relation from front to back
+        const stagger = Math.min(1, Math.max(0, k * 1.7 - i / blocks.length))
+        this.setFill(b, before[i] + (after[i] - before[i]) * easeInOutCubic(stagger))
+      })
+    })
+    this.touchBlocks(blocks, 0x9be8ff, 0.5, 1.15)
+    await this.ticker.wait(0.3)
+    return { table: region.label, pages: packed.length }
+  }
+
   /** DELETE: pages get emptier, and a drained page becomes a flat free slot. */
   deleteRows(n = 2): Page8K[] {
     const touched: Page8K[] = []
@@ -891,20 +926,6 @@ export class PostgresInstance {
       const edges = neonEdges(new THREE.BoxGeometry(w, h, d), region.color, 0.85)
       edges.position.set(cx, PAGE_Y - 0.12 + h / 2, cz)
       this.group.add(edges)
-
-      // faint wash so the run reads as "selected pages", not as a solid object
-      const wash = new THREE.Mesh(
-        new THREE.BoxGeometry(w, h, d),
-        new THREE.MeshBasicMaterial({
-          color: region.color,
-          transparent: true,
-          opacity: 0.04,
-          blending: THREE.AdditiveBlending,
-          depthWrite: false,
-        }),
-      )
-      wash.position.copy(edges.position)
-      this.group.add(wash)
 
       const pick = new THREE.Mesh(
         new THREE.BoxGeometry(w, h + 0.7, d),

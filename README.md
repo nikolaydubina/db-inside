@@ -88,6 +88,31 @@ equality.
 In PostgreSQL, *heap* is the name of the unordered pile of 8 kB pages a table is stored in (the "heap
 file"). It is a file on disk, and has nothing to do with heap memory / malloc.
 
+## Debugging
+
+The simulation dumps its real state instead of you squinting at a screenshot:
+
+```js
+__psqlDebug.on()            // one line per 2s of virtual time
+__psqlDebug.on(0.5)         // faster
+__psqlDebug.off()
+__psqlDebug.snapshot()      // current state as an object
+__psqlDebug.history(40)     // the last N ticks
+__psqlDebug.table('users')  // page-fill histogram for one relation
+```
+
+A tick looks like:
+
+```
+[psql 12.5s 1x] buffer miss · page fetched from disk ≈ 1 ms
+  q=7 hit=71% lat=1.2ms dead=12 conn=3(1 busy) wal=1536B fill=0.53
+  chains=1 disk=565/816 free=251 deadPages=12 avgFill=0.57
+  buf=0d/32 draw=363 fps=120
+```
+
+`draw`/`fps` come from `renderer.info` summed across the bloom passes, so instancing
+regressions show up immediately. Open the page with `?debug` to have telemetry on from boot.
+
 ## Interactions
 
 - **space** or `run query` — send a query: falls from the sky, through parser/planner/executor, into

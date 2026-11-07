@@ -271,6 +271,61 @@ h2::after {
   gap: 6px;
 }
 
+.slider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 11px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #4f6b7e;
+}
+
+.slider-label {
+  flex: none;
+}
+
+.slider input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 1;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(53, 224, 255, 0.5), rgba(53, 224, 255, 0.12));
+  outline: none;
+  cursor: pointer;
+}
+
+.slider input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #35e0ff;
+  box-shadow: 0 0 8px rgba(53, 224, 255, 0.9);
+  border: none;
+}
+
+.slider input[type='range']::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: none;
+  border-radius: 50%;
+  background: #35e0ff;
+  box-shadow: 0 0 8px rgba(53, 224, 255, 0.9);
+}
+
+.slider b {
+  flex: none;
+  width: 26px;
+  text-align: right;
+  font-weight: 400;
+  color: #7fd7ee;
+}
+
 .btn {
   appearance: none;
   display: flex;

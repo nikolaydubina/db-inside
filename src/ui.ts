@@ -5,6 +5,8 @@ export interface HudHandlers {
   runQuery(): void
   checkpoint(): void
   vacuum(): void
+  compact(): void
+  setSpeed(v: number): void
   setIndexScan(on: boolean): void
   setOrbit(on: boolean): void
   unpin(): void
@@ -22,6 +24,9 @@ export function initHud(handlers: HudHandlers) {
   const btnQuery = $<HTMLButtonElement>('#btn-query')
   const btnCheckpoint = $<HTMLButtonElement>('#btn-checkpoint')
   const btnVacuum = $<HTMLButtonElement>('#btn-vacuum')
+  const btnCompact = $<HTMLButtonElement>('#btn-compact')
+  const speedIn = $<HTMLInputElement>('#speed')
+  const speedVal = $<HTMLElement>('#speed-val')
   const chkIndex = $<HTMLInputElement>('#chk-index')
   const chkOrbit = $<HTMLInputElement>('#chk-orbit')
 
@@ -87,6 +92,12 @@ export function initHud(handlers: HudHandlers) {
   btnQuery.addEventListener('click', () => handlers.runQuery())
   btnCheckpoint.addEventListener('click', () => handlers.checkpoint())
   btnVacuum.addEventListener('click', () => handlers.vacuum())
+  btnCompact.addEventListener('click', () => handlers.compact())
+  speedIn.addEventListener('input', () => {
+    const v = Number(speedIn.value)
+    speedVal.textContent = `${v}×`
+    handlers.setSpeed(v)
+  })
   chkIndex.addEventListener('change', () => handlers.setIndexScan(chkIndex.checked))
   chkOrbit.addEventListener('change', () => handlers.setOrbit(chkOrbit.checked))
 
@@ -98,6 +109,8 @@ export function initHud(handlers: HudHandlers) {
       handlers.checkpoint()
     } else if (e.key === 'v') {
       handlers.vacuum()
+    } else if (e.key === 'f') {
+      handlers.compact()
     } else if (e.key === 'i') {
       chkIndex.checked = !chkIndex.checked
       handlers.setIndexScan(chkIndex.checked)

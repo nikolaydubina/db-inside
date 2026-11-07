@@ -33,6 +33,8 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   renderer.toneMappingExposure = 1.12
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.setClearColor(0x04070d, 1)
+  // keep draw-call stats across post-processing passes instead of per pass
+  renderer.info.autoReset = false
 
   const scene = new THREE.Scene()
   scene.fog = new THREE.FogExp2(0x061420, 0.0108)
@@ -318,6 +320,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   }
 
   function render(dt: number) {
+    renderer.info.reset()
     stars.rotation.y += dt * 0.004
     const k = performance.now() * 0.001
       ; (rimRing.material as THREE.MeshBasicMaterial).opacity = 0.72 + 0.22 * Math.sin(k * 0.9)
