@@ -47,7 +47,8 @@ export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
 export interface BackendPod {
   id: number
   group: THREE.Group
-  ring: THREE.MeshStandardMaterial
+  strip: THREE.MeshStandardMaterial
+  edge: THREE.LineBasicMaterial
   glow: THREE.SpriteMaterial
   active: boolean
   busy: boolean
@@ -914,52 +915,48 @@ export class PostgresInstance {
 
   private buildBackends() {
     const slots = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
-    const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
-    const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
-    const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
-    const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
+    const bodyGeo = new RoundedBoxGeometry(1.3, 0.22, 0.78, 2, 0.05)
+    const stripGeo = new THREE.BoxGeometry(0.86, 0.02, 0.07)
+    const bodyMat = glowMat(0x07131c, 0x1a4d63, 0.35, { metalness: 0.65, roughness: 0.3 })
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
-      g.position.set(x, 9.88, 5.8)
+      g.position.set(x, 9.9, 5.8)
       g.visible = false
       g.scale.setScalar(0.001)
 
-      const base = new THREE.Mesh(baseGeo, baseMat)
-      base.castShadow = true
-      g.add(base)
+      const body = new THREE.Mesh(bodyGeo, bodyMat)
+      body.castShadow = true
+      g.add(body)
 
-      const ring = new THREE.MeshStandardMaterial({
+      // glowing outline of the slot
+      const edge = neonEdges(bodyGeo, PALETTE.cyan, 0.5)
+      const edgeMat = edge.material as THREE.LineBasicMaterial
+      edgeMat.transparent = true
+      g.add(edge)
+
+      // status strip on top of the slot
+      const strip = new THREE.MeshStandardMaterial({
         color: 0x0a1018,
         emissive: PALETTE.cyan,
         emissiveIntensity: 0.7,
-        roughness: 0.3,
-        metalness: 0.4,
+        roughness: 0.35,
+        metalness: 0.3,
       })
-      const ringMesh = new THREE.Mesh(ringGeo, ring)
-      ringMesh.rotation.x = Math.PI / 2
-      ringMesh.position.y = 0.16
-      g.add(ringMesh)
+      const stripMesh = new THREE.Mesh(stripGeo, strip)
+      stripMesh.position.y = 0.1
+      g.add(stripMesh)
 
-      const ledMat = new THREE.MeshStandardMaterial({
-        color: 0x0a1018,
-        emissive: PALETTE.cyan,
-        emissiveIntensity: 0.9,
-        roughness: 0.4,
-      })
-      const led = new THREE.Mesh(LEDGeo, ledMat)
-      led.position.y = 0.24
-      g.add(led)
-
-      const gl = halo(PALETTE.cyan, 2.4, 0)
-      gl.position.y = 0.3
+      const gl = halo(PALETTE.cyan, 1.9, 0)
+      gl.position.y = 0.18
       g.add(gl)
 
       this.group.add(g)
       this.backends.push({
         id: i,
         group: g,
-        ring,
+        strip,
+        edge: edgeMat,
         glow: gl.material,
         active: false,
         busy: false,
@@ -1413,12 +1410,14 @@ export class PostgresInstance {
       b.group.visible = s > 0.02
 
       if (b.busy) {
-        b.ring.emissiveIntensity = 2.2 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
+        b.strip.emissiveIntensity = 2.6 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
+        b.edge.opacity = 1
         b.glow.opacity = 0.45
       } else {
-        b.ring.emissiveIntensity =
-          (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
-        b.glow.opacity = b.active ? 0.08 : 0
+        b.strip.emissiveIntensity =
+          (b.active ? 1.1 + 0.3 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
+        b.edge.opacity = b.active ? 0.8 : 0.15
+        b.glow.opacity = b.active ? 0.12 : 0
       }
     }
 
