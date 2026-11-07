@@ -19,7 +19,7 @@ scene.add(instance.group)
 
 // extra labels
 const bufferLabel = label('SHARED BUFFERS · RAM')
-bufferLabel.position.set(ANCHOR.bufferCenter.x - 4.6, 5.5, ANCHOR.bufferCenter.z + 2.3)
+bufferLabel.position.set(ANCHOR.bufferCenter.x - 4.6, 4.95, ANCHOR.bufferCenter.z + 3.2)
 instance.group.add(bufferLabel)
 
 const paths = makePaths()

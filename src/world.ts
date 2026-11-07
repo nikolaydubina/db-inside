@@ -38,10 +38,10 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.fog = new THREE.FogExp2(0x061420, 0.0108)
 
   const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 400)
-  camera.position.set(32, 21.5, 38)
+  camera.position.set(29.2, 19, 34.5)
 
   const controls = new OrbitControls(camera, canvas)
-  controls.target.set(2.4, 6.8, 1.0)
+  controls.target.set(3.4, 6.6, 1.0)
   controls.enableDamping = true
   controls.dampingFactor = 0.055
   controls.minDistance = 12

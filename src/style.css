@@ -176,7 +176,7 @@ h1 span {
 .panel.right {
   top: 74px;
   right: 26px;
-  width: 268px;
+  width: 248px;
   display: flex;
   flex-direction: column;
   gap: 10px;

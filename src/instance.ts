@@ -425,7 +425,7 @@ export class PostgresInstance {
     })
 
     const lab = label('WAL · DISK')
-    lab.position.set(x + 1.15, 4.75, z + 0.55)
+    lab.position.set(x - 1.5, 4.75, z + 0.4)
     this.group.add(lab)
   }
 
@@ -923,7 +923,7 @@ export class PostgresInstance {
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
-      g.position.set(x, 10.0, 7.75)
+      g.position.set(x, 9.88, 5.8)
       g.visible = false
       g.scale.setScalar(0.001)
 
@@ -983,14 +983,14 @@ export class PostgresInstance {
     })
 
     const lab = label('BACKENDS · CONNECTIONS')
-    lab.position.set(-10.4, 11.3, 7.75)
+    lab.position.set(-10.6, 11.05, 5.8)
     this.group.add(lab)
 
     const pick = new THREE.Mesh(
       new THREE.BoxGeometry(21.4, 1.8, 1.6),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(0, 10.2, 7.75)
+    pick.position.set(0, 10.05, 5.8)
     this.group.add(pick)
     this.register(pick, {
       title: 'Backend processes (connections)',
@@ -1397,9 +1397,9 @@ export class PostgresInstance {
       n.group.position.set(
         n.home.x + Math.sin(time * 0.42 + phase) * 0.1,
         n.home.y +
-          Math.sin(time * 0.75 + phase * 1.3) * 0.16 +
-          Math.sin(time * 1.9 + phase) * 0.04 +
-          n.pulse * 0.12,
+        Math.sin(time * 0.75 + phase * 1.3) * 0.16 +
+        Math.sin(time * 1.9 + phase) * 0.04 +
+        n.pulse * 0.12,
         n.home.z + Math.cos(time * 0.5 + phase) * 0.1,
       )
       n.group.rotation.y += dt * 0.12

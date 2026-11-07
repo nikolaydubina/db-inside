@@ -250,7 +250,7 @@ export class EngineSim {
         })
         this.flows.diskToBuffer.flash(0.8)
         const packetCore = packet.children[0] as THREE.Mesh
-        ;(packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
+          ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
         await travel(this.ticker, packet, this.paths.diskToBuffer, 0.5)
         fUp.flash(0.8)
         pageIdx = this.inst.pickBufferPage()
