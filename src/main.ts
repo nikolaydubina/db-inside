@@ -30,6 +30,9 @@ const sim = new EngineSim(instance, ticker, scene, paths, flows)
   // handy for debugging in the browser console
   ; (window as unknown as Record<string, unknown>).__psql = { scene, world, instance, sim, paths, flows }
 
+let autoOrbit = true
+let pinned: THREE.Object3D | null = null
+
 const hud = initHud({
   runQuery: () => {
     void sim.runQuery()
@@ -45,9 +48,12 @@ const hud = initHud({
     autoOrbit = on
     world.controls.autoRotate = on
   },
+  unpin: () => {
+    pinned = null
+    hud.unpin()
+  },
 })
 
-let autoOrbit = true
 let lastInteraction = performance.now()
 world.controls.addEventListener('start', () => {
   lastInteraction = performance.now()
@@ -59,7 +65,6 @@ const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2(-2, -2)
 let pointerPx = { x: 0, y: 0 }
 let hovered: THREE.Object3D | null = null
-let pinned: THREE.Object3D | null = null
 
 const hoverBox = new THREE.Box3Helper(new THREE.Box3(), 0x35e0ff)
 hoverBox.visible = false
@@ -100,8 +105,13 @@ canvas.addEventListener('pointerup', (e) => {
   if (moved > 6) return
   const root = pick(pointer)
   if (root?.userData.info) {
-    pinned = root
-    hud.inspect(root.userData.info)
+    if (pinned === root) {
+      pinned = null
+      hud.unpin()
+    } else {
+      pinned = root
+      hud.inspect(root.userData.info)
+    }
   } else {
     pinned = null
     hud.unpin()

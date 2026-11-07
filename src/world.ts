@@ -275,6 +275,17 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   composer.addPass(bloom)
   composer.addPass(output)
 
+  // desktop looks slightly right of centre to clear the HUD; portrait centres the box
+  const CAM_OFFSET = new THREE.Vector3(25.8, 12.4, 33.5)
+  let lastPortrait: boolean | null = null
+  function frameView(portrait: boolean) {
+    const tx = portrait ? 0.2 : 3.4
+    const ty = portrait ? 4.9 : 6.6
+    controls.target.set(tx, ty, 1.0)
+    camera.position.set(tx + CAM_OFFSET.x, ty + CAM_OFFSET.y, 1.0 + CAM_OFFSET.z)
+    controls.update()
+  }
+
   function resize() {
     const w = window.innerWidth
     const h = window.innerHeight
@@ -288,6 +299,14 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
         ? Math.min(86, (2 * Math.atan(Math.tan((baseFov * Math.PI) / 360) / aspect) * 180) / Math.PI)
         : baseFov
     camera.updateProjectionMatrix()
+
+    // only re-frame when the layout flips between portrait and landscape,
+    // so a browser chrome resize does not reset the user's orbit
+    const portrait = aspect < 1
+    if (lastPortrait !== portrait) {
+      lastPortrait = portrait
+      frameView(portrait)
+    }
 
     const dpr = Math.min(window.devicePixelRatio, w < 760 ? 1.5 : 2)
     renderer.setPixelRatio(dpr)

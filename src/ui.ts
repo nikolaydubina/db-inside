@@ -7,6 +7,7 @@ export interface HudHandlers {
   vacuum(): void
   setIndexScan(on: boolean): void
   setOrbit(on: boolean): void
+  unpin(): void
 }
 
 const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!
@@ -45,11 +46,13 @@ export function initHud(handlers: HudHandlers) {
   const insTitle = $<HTMLElement>('#ins-title')
   const insBody = $<HTMLElement>('#ins-body')
   const insMeta = $<HTMLElement>('#ins-meta')
-
   const tooltip = $<HTMLElement>('#tooltip')
   const boot = $<HTMLElement>('#boot')
 
   setupCards()
+
+  // the inspector is contextual: tapping its title dismisses the selection
+  insTitle.addEventListener('click', () => handlers.unpin())
 
   btnQuery.addEventListener('click', () => handlers.runQuery())
   btnCheckpoint.addEventListener('click', () => handlers.checkpoint())
@@ -96,12 +99,15 @@ export function initHud(handlers: HudHandlers) {
       prAvDot.classList.toggle('on', s.vacuuming)
     },
     inspect(info: Info) {
+      inspector.hidden = false
+      inspector.classList.remove('collapsed')
+      inspector.classList.add('pinned')
       insTitle.textContent = info.title
       insBody.textContent = info.body
       insMeta.textContent = info.meta ?? ''
-      inspector.classList.add('pinned')
     },
     unpin() {
+      inspector.hidden = true
       inspector.classList.remove('pinned')
     },
     hover(info: Info | null, x: number, y: number) {
@@ -127,7 +133,7 @@ const COMPACT = () =>
   window.matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)').matches
 
 function setupCards() {
-  const cards = Array.from(document.querySelectorAll<HTMLElement>('.card'))
+  const cards = Array.from(document.querySelectorAll<HTMLElement>('.card:not(#inspector)'))
   let saved: Record<string, boolean> = {}
   try {
     saved = JSON.parse(localStorage.getItem(CARDS_KEY) ?? '{}') as Record<string, boolean>
