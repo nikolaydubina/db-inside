@@ -334,6 +334,17 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         snap: (id: string) => go(id, { instant: true }),
         focus,
         /**
+         * Translate the view without rotating or re-framing it. Some subjects
+         * drift on their own — wal_buffers slides along the WAL run as the head
+         * advances — and a lock that only frames once leaves them behind. This
+         * lets the story follow them the way a camera operator would pan.
+         */
+        pan(delta: THREE.Vector3) {
+            camera.position.add(delta)
+            controls.target.add(delta)
+            controls.update()
+        },
+        /**
          * Frame a world-space box from a direction. This is how the story aims
          * the camera: it knows *what* it wants to look at and hands over a box,
          * so a step never hardcodes a camera position or a pod index. Returns

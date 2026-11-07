@@ -46,6 +46,9 @@ export const BLOCK_PICK_RANGE = 7
 /** Postgres page size. One block is exactly this many bytes, always. */
 export const PAGE_BYTES = 8192
 
+/** Default WAL segment size: the run is a set of these, numbered in order. */
+export const WAL_SEGMENT_BYTES = 16 * 1024 * 1024
+
 export interface Page {
   mesh: THREE.Mesh
   mat: THREE.MeshStandardMaterial
@@ -354,7 +357,6 @@ export class PostgresInstance {
   haloRing!: THREE.Mesh
 
   indexScan = false
-  walFill = 0.35
   private deadCount = 0
 
   constructor(private ticker: Ticker) {
@@ -675,7 +677,7 @@ export class PostgresInstance {
       pick,
       {
         title: 'Write-ahead log (on disk)',
-        body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. At checkpoint the old segments are recycled: they are dimmed in place and written over, never moved.',
+        body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. The run is a ring, not a growing file: when the head reaches the end it wraps and writes over the oldest segment, which by then is behind the last checkpoint and no longer needed. That is why pg_wal has a bounded footprint instead of filling the disk.',
         meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
       },
       runEdge,
@@ -690,7 +692,10 @@ export class PostgresInstance {
       const mat = new THREE.MeshStandardMaterial({
         color: 0x0b2a36,
         emissive: PALETTE.cyan,
-        emissiveIntensity: 1.15,
+        // deliberately dim at rest: four adjacent emissive cubes at full
+        // strength bloom into one white slab, and then they stop reading as
+        // four pages of staging memory
+        emissiveIntensity: 0.5,
         roughness: 0.35,
         metalness: 0.45,
         transparent: true,
@@ -731,15 +736,22 @@ export class PostgresInstance {
   /**
    * WAL blocks are ordinary blocks in the field — we only restyle them, so they
    * can never overlap or z-fight with the surrounding pages.
+   *
+   * The run is a ring, not a growing line: pg_wal has a fixed footprint, so the
+   * write head wraps and overwrites segments that are no longer needed. That is
+   * the whole reason a busy server's WAL does not fill the disk.
    */
   private styleWal(time: number, dt: number) {
-    const filled = this.walFilledSegments
+    const len = this.walBlocks.length
     const head = this.walHeadIndex
-    for (let i = 0; i < this.walBlocks.length; i++) {
+    const live = Math.min(len, Math.max(1, this.walWritten))
+    for (let i = 0; i < len; i++) {
       const p = this.walBlocks[i]
       if (p.busy) continue
-      const on = i < filled
-      const isHead = on && i === head
+      // how far behind the head this segment was written; 0 is the head itself
+      const behind = (head - i + len) % len
+      const on = behind < live
+      const isHead = i === head
       const boost = this.walBoost.get(i) ?? 0
       if (boost > 0) {
         const next = boost * (1 - Math.min(1, dt * 2.6))
@@ -747,12 +759,17 @@ export class PostgresInstance {
         else this.walBoost.set(i, next)
       }
 
+      // Height is real, not decorative: a finished segment is full, the head is
+      // as full as the bytes actually appended to it, and a recycled one starts
+      // again from near-empty. Every other part of the scene reads p.fill, so
+      // arrows land on the true top face.
+      const fill = isHead ? Math.max(0.08, this.walProgress) : on ? 1 : 0
       const base = isHead ? 0xffc76b : on ? 0xc9822a : 0x140f07
-      const k = (isHead ? 0.78 + 0.22 * breathe(time, 2.2, 0) : 1) + boost * 0.6
+      const k = (isHead ? 0.82 + 0.18 * breathe(time, 2.2, 0) : 1) + boost * 0.6
       this.tmpColorC.setHex(base).multiplyScalar(k)
       this.paintBlock(p, this.tmpColorC.getHex())
-      const scale = isHead ? 1.9 : on ? 1 : 0.35
-      this.applyTransform(p, 1, this.blockScale(on ? 1 : 0) * scale)
+      p.fill = fill
+      this.applyTransform(p, 1, on || isHead ? this.blockScale(fill) : this.blockScale(0) * 0.35)
     }
   }
 
@@ -955,6 +972,11 @@ export class PostgresInstance {
     const p = this.pages8k[id]
     if (!p || p.free) return null
     if (hit.distance > BLOCK_PICK_RANGE) return null
+    // the WAL run is part of the same InstancedMesh, but a segment is not a page
+    const walIdx = this.walBlocks.indexOf(p)
+    if (walIdx >= 0) {
+      return { key: `wal-${walIdx}`, info: this.walSegmentInfo(walIdx), box: this.blockBox(p) }
+    }
     return { key: `page-${p.i}`, info: this.blockInfo(p), box: this.blockBox(p) }
   }
 
@@ -991,6 +1013,42 @@ export class PostgresInstance {
         dead,
       meta: `bytes ${start}–${end} · page ${p.i} of the file · ${packed}% packed` +
         ` · ${kB(PAGE_BYTES)} kB block${p.dead ? ' · dead tuples' : ''}`,
+    }
+  }
+
+  /**
+   * One segment of pg_wal. The height of the block is how much of it has been
+   * written, so this reads the same number the geometry is drawn from.
+   */
+  walSegmentInfo(i: number): Info {
+    const len = this.walBlocks.length
+    const head = this.walHeadIndex
+    const behind = (head - i + len) % len
+    const live = Math.min(len, Math.max(1, this.walWritten))
+    const isHead = i === head
+    const start = i * WAL_SEGMENT_BYTES
+    const end = start + WAL_SEGMENT_BYTES - 1
+    const mb = (n: number) => `${(n / (1024 * 1024)).toFixed(1).replace(/\.0$/, '')} MB`
+    const written = isHead
+      ? this.walProgress
+      : behind < live
+        ? 1
+        : 0
+    const state = isHead
+      ? `the head, ${Math.round(written * 100)}% written`
+      : written > 0
+        ? 'written and waiting to be recycled'
+        : 'recyclable — its bytes stay until the head comes round again'
+    return {
+      title: `WAL segment ${i} · ${mb(WAL_SEGMENT_BYTES)} contiguous`,
+      body:
+        `A segment is one contiguous file of ${mb(WAL_SEGMENT_BYTES)} in pg_wal, and the log is little ` +
+        `more than a numbered list of them. Records are appended to the current one until it is full, ` +
+        `then the head moves to the next number. The run has a fixed footprint: once it reaches the end ` +
+        `the head wraps and writes over the oldest segment, which by then sits behind the last ` +
+        `checkpoint and is no longer needed. Height and brightness here are how much of the segment is ` +
+        `written, so an empty head means nothing has landed in it yet.`,
+      meta: `bytes ${start}–${end} · segment ${i + 1} of ${len} · ${state}`,
     }
   }
 
@@ -1941,6 +1999,71 @@ export class PostgresInstance {
     await this.ticker.wait(0.35)
   }
 
+  /**
+   * WAL records currently held in wal_buffers, as a fraction of the strip.
+   * Everything here is *not* durable: it exists in shared memory only.
+   */
+  walBuffered = 0
+
+  /** The cube the next record lands in. */
+  private bufferCubeIndex() {
+    return Math.min(
+      this.walBufBlocks.length - 1,
+      Math.floor(this.walBuffered * this.walBufBlocks.length),
+    )
+  }
+
+  /** Top face of the wal_buffers cube being written — where an append lands. */
+  walBufferTop(): THREE.Vector3 {
+    const m = this.walBufBlocks[this.bufferCubeIndex()]
+    if (!m) return this.walHeadTop()
+    const v = new THREE.Vector3()
+    m.getWorldPosition(v)
+    return v.setY(v.y + PAGE_GRID.bh * 0.7)
+  }
+
+  /**
+   * A backend appended a record. This is the point of the WAL: the bytes go to
+   * wal_buffers in shared memory first, and nothing is durable yet.
+   */
+  appendWal(fraction: number) {
+    this.walBuffered = Math.min(1, this.walBuffered + fraction)
+    const mat = this.walBufferMats[this.bufferCubeIndex()]
+    if (mat) {
+      void this.ticker.add(0.5, (k) => {
+        // a gentle lift only: these cubes are already emissive, and anything
+        // brighter blooms into a white slab that hides the thing it marks
+        mat.emissiveIntensity = 1.25 - 0.75 * k
+      })
+    }
+  }
+
+  /**
+   * The WAL writer: write + fsync. Everything buffered joins the segment on
+   * disk, and only after this can a COMMIT be answered. Returns what moved so
+   * the caller can account for bytes that became durable.
+   */
+  flushWalBuffers(): number {
+    const moved = this.walBuffered
+    this.walBuffered = 0
+    if (moved <= 0.01) return 0
+    this.flashWalSegment(this.walHeadIndex)
+    // advance the ring: a batch of records is worth part of a segment, and the
+    // head wraps round rather than running out of run
+    this.walProgress += moved * 0.9
+    while (this.walProgress >= 1) {
+      this.walProgress -= 1
+      this.walWritten++
+    }
+    // the staging memory is simply reused once its contents are on disk
+    for (const mat of this.walBufferMats) {
+      void this.ticker.add(0.45, (k) => {
+        mat.emissiveIntensity = 0.2 + 0.3 * k
+      })
+    }
+    return moved
+  }
+
   async vacuum(): Promise<number> {
     const dead = this.tableBlocks.filter((p) => p.dead)
     if (dead.length === 0) return 0
@@ -2067,9 +2190,17 @@ export class PostgresInstance {
     return this.walSlot(i)
   }
 
+  /**
+   * Segments written since the run started. The head is this modulo the run, so
+   * it wraps; `walWritten` itself keeps counting.
+   */
+  private walWritten = 4
+  /** How much of the head segment is actually written, 0..1. */
+  walProgress = 0
+
   /** Index of the block currently being written — the WAL head. */
   get walHeadIndex() {
-    return Math.min(WAL_LEN - 1, Math.max(0, this.walFilledSegments - 1))
+    return this.walWritten % this.walBlocks.length
   }
 
   /** The WAL block being appended to right now. */
@@ -2108,8 +2239,23 @@ export class PostgresInstance {
     return new THREE.Box3(c.clone().sub(r), c.clone().add(r))
   }
 
+  /** Segments currently holding data: the run fills up, then stays full forever. */
   get walFilledSegments() {
-    return Math.max(1, Math.round(this.walFill * this.walBlocks.length))
+    return Math.min(this.walBlocks.length, Math.max(1, this.walWritten))
+  }
+
+  /** How far round the ring the head has got, 0..1 — handy for diagnostics. */
+  get walFill() {
+    return Math.min(1, (this.walWritten + this.walProgress) / this.walBlocks.length)
+  }
+
+  /**
+   * Start the ring again from its first segment, as a checkpoint does when the
+   * segments behind the redo point become recyclable.
+   */
+  recycleWal() {
+    this.walWritten = 1
+    this.walProgress = 0
   }
 
   update(dt: number, time: number) {

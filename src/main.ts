@@ -175,8 +175,12 @@ const storyScene: StoryScene = {
     return { id: `backend ${best.id + 1}`, box }
   },
   valid: (id: string) => {
-    const n = Number(/(\d+)/.exec(id)?.[1])
-    const pod = instance.backends[n - 1]
+    // only backends can stop existing mid-step; a WAL run or a buffer strip is
+    // a fixed structure, and treating it as invalid made the story re-frame
+    // every 400 ms, which reads as the camera twitching instead of moving
+    const m = /^backend (\d+)$/.exec(id)
+    if (!m) return true
+    const pod = instance.backends[Number(m[1]) - 1]
     return !!pod && pod.active && pod.busy
   },
   walRun: () => instance.walRunBox(),

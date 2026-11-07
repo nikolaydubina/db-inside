@@ -34,11 +34,11 @@ export const WAL_STORY: StoryStep[] = [
     },
     {
         title: 'the head moves',
-        body: 'Records are appended at the head, and the head walks along the run as segments fill. Only the tail is active; everything behind it is already written and can be recycled at the next checkpoint.',
+        body: 'Records are appended at the head, and the head walks along the run as segments fill. Only the tail is active; everything behind it is already written. When the head reaches the end it wraps to the start and writes over the oldest segment — which is why pg_wal never grows without bound.',
         subject: (s) => s.walHead(),
         dir: [0.2, 0.5, 1],
         fov: 26,
-        padding: 2.2,
+        padding: 6.6,
         lookShift: [0, -0.5, 0],
         send: 6,
         delay: 700,
@@ -55,8 +55,8 @@ export const WAL_STORY: StoryStep[] = [
         fov: 26,
         padding: 1.35,
         lookShift: [0, -0.55, 0],
-        send: 4,
-        delay: 700,
+        send: 6,
+        delay: 450,
         speed: 3,
         expect: (c) => c.walPending > 0,
         waitFor: 'bytes sitting in the in-memory buffer',
@@ -173,6 +173,12 @@ export interface StoryStep {
     expect: (c: StoryFacts) => boolean
     /** short description of `expect`, shown while it is not yet true */
     waitFor: string
+    /**
+     * The subject moves under its own steam (wal_buffers rides the WAL head).
+     * Framing it once would leave it behind, so the view pans to keep it in
+     * shot — a pan, not a re-frame: re-framing restarts the tween every tick.
+     */
+    track?: boolean
     /**
      * Taps per second to keep firing until `expect` holds. A single burst is
      * not enough: the pool drains between the burst and the moment somebody
@@ -356,6 +362,10 @@ export function createStory({
      * disagreeing — the panel said "clients" while the frame showed the buffers.
      */
     let arrived = false
+    /** the current step's claim has been seen true at least once */
+    let demonstrated = false
+    /** subject centre at the last follow tick, so a pan covers only the drift */
+    let trackCentre: THREE.Vector3 | null = null
     /** what the current step is actually pointed at, and where the camera went */
     let subjectId: string | null = null
     let subjectBox: THREE.Box3 | null = null
@@ -423,11 +433,26 @@ export function createStory({
         if (!stateEl) return
         const a = audit()
         if (!a) return
-        const ok = a.camera.arrived && a.claim.holds
+        // latch: some claims are true in pulses (records sitting in wal_buffers
+        // drain on the next fsync), and a caption that flips every 200 ms reads
+        // as a bug. Once demonstrated, it stays described for this step.
+        if (a.claim.holds) demonstrated = true
+        // follow a subject that drifts, otherwise it slides out of the frame
+        const stepNow = steps[index]
+        if (a.camera.arrived && stepNow?.track && subjectId && stepNow.subject) {
+            const box = stepNow.subject(scene)?.box
+            if (box) {
+                const centre = box.getCenter(new THREE.Vector3())
+                if (trackCentre) rig.pan(centre.clone().sub(trackCentre).multiplyScalar(0.45))
+                trackCentre = centre
+                subjectBox = box
+            }
+        }
+        const ok = a.camera.arrived && demonstrated
         stateEl.classList.toggle('ok', ok)
         stateEl.textContent = !a.camera.arrived
             ? `camera → ${a.subject ?? a.view ?? '…'}`
-            : !a.claim.holds
+            : !demonstrated
                 ? `not yet · ${a.claim.expects}`
                 : 'as described'
     }
@@ -454,6 +479,8 @@ export function createStory({
         expected = null
         subjectId = null
         subjectBox = null
+        demonstrated = false
+        trackCentre = null
         render()
         // a live subject wins over a fixed view: the step says what it is about
         // and the camera goes there — but the thing may not exist yet (nothing

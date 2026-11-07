@@ -115,6 +115,10 @@ export class EngineSim {
   indexScan = false
   /** bytes already forced to disk since the run started */
   private flushedBytes = 0
+  /** bytes sitting in wal_buffers, counted as written but not yet durable */
+  private bufferedBytes = 0
+  /** countdown to the next write+fsync by the WAL writer */
+  private walFlushTimer = 0.6
   private flushing = false
   /** ambient background traffic; a story turns it off so its own taps are the only load */
   ambient = true
@@ -210,13 +214,21 @@ export class EngineSim {
     ])
   }
 
-  private readonly walArc = (head: THREE.Vector3) =>
+  private readonly walBufferArc = (target: THREE.Vector3) =>
     pathCurve([
       ANCHOR.exec.clone(),
       new THREE.Vector3(3.8, 6.7, -1.4),
-      new THREE.Vector3(6.8, 6.1, 0.0),
-      new THREE.Vector3(9.4, 5.4, 0.9),
-      head.clone().add(new THREE.Vector3(0, 2.2, 0)),
+      new THREE.Vector3(6.9, 5.7, -0.3),
+      target.clone().add(new THREE.Vector3(0, 1.5, 0)),
+      target,
+    ])
+
+  /** wal_buffers → the segment head: the write + fsync a commit waits on. */
+  private readonly walFlushArc = (from: THREE.Vector3, head: THREE.Vector3) =>
+    pathCurve([
+      from,
+      from.clone().add(new THREE.Vector3(0, 0.85, 0.15)),
+      head.clone().add(new THREE.Vector3(0, 1.15, 0)),
       head,
     ])
 
@@ -225,7 +237,7 @@ export class EngineSim {
     const head = this.inst.walHeadIndex
     if (head === this.walHeadSeen) return
     this.walHeadSeen = head
-    this.flows.execToWal.repoint(this.walArc(this.inst.walHeadTop()).getPoints(28))
+    this.flows.execToWal.repoint(this.walBufferArc(this.inst.walBufferTop()).getPoints(28))
   }
 
   /**
@@ -429,13 +441,17 @@ export class EngineSim {
       this.inst.pulseNode('exec', 1)
       fPlan.flash(0.8)
 
-      // WAL append happens regardless of read/write; the arrow lands on the
-      // block the WAL writer is actually appending to right now
-      const walArc = this.walArc(this.inst.walHeadTop())
+      // WAL first — but into shared memory, not to disk. The record lands in
+      // wal_buffers and is not durable yet; the flush to the segment comes at
+      // commit, after the change has been made.
+      const walBytesFor =
+        kind === 'insert' ? 384 : kind === 'delete' ? 320 : hit ? 128 : 256
       const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
       walPack.position.copy(ANCHOR.exec)
-      void travel(this.ticker, walPack, walArc, 0.62).then(() => {
-        this.inst.walFill = Math.min(1, this.inst.walFill + 0.09)
+      void travel(this.ticker, walPack, this.walBufferArc(this.inst.walBufferTop()), 0.4).then(() => {
+        this.inst.appendWal(0.3)
+        this.walBytes += walBytesFor
+        this.bufferedBytes += walBytesFor
         despawn(this.ticker, this.scene, walPack, 0.22)
       })
       this.flows.execToWal.flash(0.7)
@@ -478,7 +494,6 @@ export class EngineSim {
           kind === 'insert'
             ? `insert · ${touched.length} heap page${touched.length === 1 ? '' : 's'} written, one may be brand new`
             : `delete · ${touched.length} heap page${touched.length === 1 ? '' : 's'} marked dead`
-        this.walBytes += kind === 'insert' ? 384 : 320
         if (kind === 'delete') this.inst.markDeadTuples(1)
       } else if (hit) {
         // the arrow lands on the top face of the exact buffer page it will read
@@ -498,7 +513,6 @@ export class EngineSim {
         this.hits++
         this.accesses++
         this.lastLatency = rand(0.04, 0.18)
-        this.walBytes += 128
       } else {
         // read path: buffer miss → disk → buffer. The slot the clock sweep is
         // about to hand out is chosen first, so every arrow can end on a real
@@ -565,9 +579,13 @@ export class EngineSim {
         this.accesses++
         this.lastLatency = rand(0.4, 1.9)
         this.note = `${stmt.viaIndex ? 'index scan' : 'seq scan'} · buffer miss, page fetched from disk ≈ 1 ms`
-        this.walBytes += 256
         this.inst.markDeadTuples(1)
       }
+
+      // COMMIT waits for durability, but it does not own the fsync: the WAL
+      // writer drains whatever is buffered on its own cadence, and every commit
+      // that arrives in the same window rides the same flush (group commit).
+      await this.walDurable()
 
       // 5. rows → result node
       const rows = makePacket(PALETTE.teal, 0.3, this.scene)
@@ -613,6 +631,19 @@ export class EngineSim {
       // releasing here dropped `busy` while pipelined work was still buffered,
       // so the ambient churn could close the pod and orphan that work
       chain.fadeOut(this.ticker, 1.25)
+    }
+  }
+
+  /**
+   * Wait until everything appended so far has been written and fsynced. The
+   * wait is not proportional to this statement's own bytes: whatever else was
+   * buffered rides the same flush, which is what makes group commit cheap.
+   */
+  private async walDurable(timeout = 3) {
+    let waited = 0
+    while (this.inst.walBuffered > 0.02 && waited < timeout) {
+      await this.ticker.wait(0.08)
+      waited += 0.08
     }
   }
 
@@ -679,7 +710,10 @@ export class EngineSim {
       await this.ticker.wait(0.85)
       this.inst.flashDisk()
       this.inst.cleanAllPages()
-      this.inst.walFill = 0.1
+      this.inst.recycleWal()
+      // the checkpoint flushed everything, so nothing is left staged in memory
+      this.inst.walBuffered = 0
+      this.bufferedBytes = 0
       this.note = 'checkpoint complete · dirty pages + WAL durable, segments recycled'
     } finally {
       this.checkpointing = false
@@ -776,6 +810,34 @@ export class EngineSim {
     if (this.deadTimer <= 0) {
       this.deadTimer = rand(3.2, 6.5)
       this.inst.markDeadTuples(randInt(1, 2))
+    }
+
+    // The WAL writer. Backends only ever append to wal_buffers; this is what
+    // turns that staging memory into a segment on disk, in batches, one
+    // write + fsync at a time. Commits queue behind the same flush.
+    if (this.inst.walBuffered > 0.02) {
+      this.walFlushTimer -= dt
+      if (this.walFlushTimer <= 0) {
+        this.walFlushTimer = rand(1.3, 1.9)
+        const from = this.inst.walBufferTop()
+        const head = this.inst.walHeadTop()
+        // capture what is on disk-bound at this instant: anything appended
+        // while the arrow is in flight belongs to the next flush
+        const flushingBytes = this.bufferedBytes
+        const pack = makePacket(PALETTE.ice, 0.22, this.scene)
+        pack.position.copy(from)
+        void travel(this.ticker, pack, this.walFlushArc(from, head), 0.42).then(() => {
+          if (this.inst.flushWalBuffers() > 0) {
+            this.flushedBytes += flushingBytes
+            this.bufferedBytes = Math.max(0, this.bufferedBytes - flushingBytes)
+          }
+          despawn(this.ticker, this.scene, pack, 0.18)
+        })
+      }
+    } else {
+      // idle: re-arm, so the first record that arrives always sits in the
+      // buffer for a beat before the writer picks it up
+      this.walFlushTimer = 1.2
     }
 
     // autovacuum's heavier cousin: a periodic rewrite of one relation
