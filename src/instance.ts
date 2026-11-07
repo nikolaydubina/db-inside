@@ -78,6 +78,10 @@ export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
  * process's own heap. This is private memory per backend — NOT shared_buffers.
  */
 export const INBUF_CELLS = 3
+/** x of each connection port along the top rim, in order */
+export const BACKEND_SLOTS = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
+/** where the ports sit in the scene */
+export const BACKEND_ORIGIN = { y: 9.88, z: 5.8 }
 /** vertical pitch between buffered requests */
 const INBUF_PITCH = 0.52
 /** local y of the oldest cell — the head of the buffer, about to be executed */
@@ -95,6 +99,12 @@ export interface BackendPod {
   pulse: number
   /** requests pipelined behind the running one, waiting in the input buffer */
   inbuf: number
+  /**
+   * Requests sent on this connection whose bytes are still on their way. A pool
+   * checks a connection out the moment it hands it to a client, so a burst of
+   * taps spreads across ports instead of piling onto the first one.
+   */
+  pending: number
   /** the drawn cells of the input buffer */
   cells: THREE.Mesh[]
 }
@@ -1346,7 +1356,7 @@ export class PostgresInstance {
   }
 
   private buildBackends() {
-    const slots = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
+    const slots = BACKEND_SLOTS
     const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
     const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
     const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
@@ -1466,6 +1476,7 @@ export class PostgresInstance {
         index: i,
         pulse: 0,
         inbuf: 0,
+        pending: 0,
         cells,
       })
     })
@@ -1486,19 +1497,36 @@ export class PostgresInstance {
     if (!free) return null
     free.active = true
     free.busy = false
+    // a recycled slot must not inherit counters from its previous life
+    free.inbuf = 0
+    free.pending = 0
     if (!this.pickables.includes(free.pick)) this.pickables.push(free.pick)
     return free
   }
 
   closeBackend(): boolean {
-    const idle = this.backends.filter((b) => b.active && !b.busy)
+    // only a connection with nothing running and nothing buffered can go away;
+    // closing one mid-buffer orphans requests that were already accepted
+    const idle = this.backends.filter((b) => b.active && !b.busy && b.inbuf === 0 && b.pending === 0)
     if (idle.length === 0) return false
     const victim = idle[randInt(0, idle.length - 1)]
     victim.active = false
     victim.busy = false
+    victim.inbuf = 0
+    victim.pending = 0
     const idx = this.pickables.indexOf(victim.pick)
     if (idx >= 0) this.pickables.splice(idx, 1)
     return true
+  }
+
+  /**
+   * Close idle connections until `keep` remain. A story uses this to start from
+   * an empty pool so its first caption describes what is actually on screen.
+   */
+  closeIdleBackendsTo(keep: number) {
+    while (this.activeBackendCount > keep && this.closeBackend()) {
+      /* keep going until only `keep` are left */
+    }
   }
 
   acquireBackend(): BackendPod | null {

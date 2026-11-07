@@ -27,6 +27,8 @@ export interface SimStats {
   rps: number
   /** arrived, but no connection has picked them up yet */
   queued: number
+  /** requests sitting in backends' input buffers, behind what they are running */
+  buffered: number
   busyBackends: number
   backendStates: boolean[]
   checkpointing: boolean
@@ -71,6 +73,8 @@ export class EngineSim {
   walBytes = 0
   live = 0
   indexScan = false
+  /** ambient background traffic; a story turns it off so its own taps are the only load */
+  ambient = true
   note = 'shared_buffers · 8 kB pages'
   /** Arrivals whose bytes are sitting in a socket because a buffer was full. */
   private parked: { pod: BackendPod; packet: THREE.Group }[] = []
@@ -138,6 +142,7 @@ export class EngineSim {
       maxConnections: max,
       rps: this.rps,
       queued: this.queued,
+      buffered: this.inst.backends.reduce((n, b) => n + b.inbuf, 0),
       busyBackends: this.inst.busyBackendCount,
       backendStates: this.inst.backendStates,
       checkpointing: this.checkpointing,
@@ -212,11 +217,24 @@ export class EngineSim {
   private pickPod(): BackendPod | null {
     const pods = this.inst.backends
     const open = pods.filter((b) => b.active)
-    const idle = open.filter((b) => !b.busy)
-    if (idle.length > 0) return idle[randInt(0, idle.length - 1)]
-    if (open.length < pods.length) return this.inst.openBackend()
+    // "free" means idle *and* not already holding a request in flight, so two
+    // taps in the same burst cannot both think they own the same connection
+    const free = open.filter((b) => !b.busy && b.pending === 0)
+    if (free.length > 0) {
+      const pod = free[randInt(0, free.length - 1)]
+      pod.pending++
+      return pod
+    }
+    if (open.length < pods.length) {
+      const fresh = this.inst.openBackend()
+      if (!fresh) return null
+      fresh.pending++
+      return fresh
+    }
+    // at max_connections: spread by load, counting bytes already on their way
     let best = open[0]
-    for (const b of open) if (b.inbuf < best.inbuf) best = b
+    for (const b of open) if (b.inbuf + b.pending < best.inbuf + best.pending) best = b
+    best.pending++
     return best
   }
 
@@ -290,6 +308,8 @@ export class EngineSim {
    * backpressure. That is why hammering the button never loses a query.
    */
   private arrive(pod: BackendPod, packet: THREE.Group) {
+    // the reservation made when the tap was sent is done with
+    if (pod.pending > 0) pod.pending--
     if (this.canAdmit(pod)) this.admit(pod, packet)
     else this.parked.push({ pod, packet })
   }
@@ -555,7 +575,9 @@ export class EngineSim {
       await travel(this.ticker, out, outbound, 0.8, easeOutCubic)
       despawn(this.ticker, this.scene, out, 0.3)
     } finally {
-      this.inst.releaseBackend(pod)
+      // the connection's own lifecycle belongs to serve(), not to one query:
+      // releasing here dropped `busy` while pipelined work was still buffered,
+      // so the ambient churn could close the pod and orphan that work
       chain.fadeOut(this.ticker, 1.25)
     }
   }
@@ -665,6 +687,18 @@ export class EngineSim {
       p.packet.position.lerp(target, Math.min(1, dt * 5))
       p.packet.rotation.y += dt * 1.6
     }
+
+    // invariant: a connection holding buffered requests must always have a
+    // worker pulling them out. If the two ever disagree, the buffer would sit
+    // there forever and the step caption would be describing nothing.
+    for (const b of this.inst.backends) {
+      if (b.active && b.inbuf > 0 && !this.running.has(b.id)) {
+        this.running.add(b.id)
+        b.busy = true
+        this.live++
+        void this.serve(b)
+      }
+    }
     // keep the throughput window bounded — it is read by the HUD every frame
     if (this.completions.length > 0) {
       const from = this.clock - RPS_WINDOW
@@ -672,14 +706,17 @@ export class EngineSim {
     }
     this.inst.update(dt, this.clock)
 
-    // clients connect and disconnect
-    this.connTimer -= dt
-    if (this.connTimer <= 0) {
-      this.connTimer = rand(3.5, 8.5)
-      const active = this.inst.activeBackendCount
-      if (active < 2) this.inst.openBackend()
-      else if (active < 6 && Math.random() < 0.6) this.inst.openBackend()
-      else if (active > 2) this.inst.closeBackend()
+    // clients connect and disconnect — ambient churn stops during a story so the
+    // state on screen is only what the story's own taps produced
+    if (this.ambient) {
+      this.connTimer -= dt
+      if (this.connTimer <= 0) {
+        this.connTimer = rand(3.5, 8.5)
+        const active = this.inst.activeBackendCount
+        if (active < 2) this.inst.openBackend()
+        else if (active < 6 && Math.random() < 0.6) this.inst.openBackend()
+        else if (active > 2) this.inst.closeBackend()
+      }
     }
 
     // ambient MVCC churn

@@ -97,6 +97,12 @@
         </div>
       </section>
 
+      <section class="card" id="stories-card">
+        <h2>Stories</h2>
+        <div class="views" id="stories"></div>
+        <p class="hint">guided tours · ← → to step · esc to leave</p>
+      </section>
+
       <section class="card" id="views-card">
         <h2>Views</h2>
         <div class="views" id="views"></div>
@@ -167,6 +173,21 @@
 
     <div id="crosshair" class="crosshair" hidden></div>
     <div id="tooltip" class="tooltip"></div>
+
+    <div class="hud story" id="story" hidden>
+      <div class="story-head">
+        <span class="story-step" id="story-step">1 / 8</span>
+        <h3 id="story-title">…</h3>
+        <span class="story-state" id="story-state">as described</span>
+        <button class="story-x" id="story-exit" title="exit story (esc)">✕</button>
+      </div>
+      <p id="story-body"></p>
+      <div class="story-nav">
+        <button class="btn story-btn" id="story-prev">← back</button>
+        <span class="story-hint">← → keys</span>
+        <button class="btn primary story-btn" id="story-next">next →</button>
+      </div>
+    </div>
     <div id="boot" class="boot">
       <div class="boot-ring"></div>
       <p>warming shared buffers…</p>

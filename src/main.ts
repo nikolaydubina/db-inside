@@ -6,6 +6,8 @@ import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
+import { createStory } from './story'
+import type { StoryScene } from './story'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox } from './util'
 
@@ -118,6 +120,103 @@ const rig = createCameraRig({
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlViews = rig
+
+/* -------------------------------- story mode ------------------------------- */
+
+/** auto-orbit as it was before the story opened, so exiting restores it */
+let orbitBeforeStory = true
+/** clock speed as it was before the story opened */
+let speedBeforeStory = 1
+
+const speedInput = document.querySelector<HTMLInputElement>('#speed')
+const speedLabel = document.getElementById('speed-val')
+
+/** Move the clock and keep the slider honest about it. */
+function applySpeed(v: number) {
+  speed = v
+  if (speedInput) speedInput.value = String(v)
+  if (speedLabel) speedLabel.textContent = `${v}×`
+}
+
+/**
+ * What the story is allowed to point at. This is the only place that knows how
+ * backends are laid out; the story just asks for "the one that is executing".
+ */
+const storyScene: StoryScene = {
+  overview: () => new THREE.Box3().setFromObject(instance.group),
+  ports: () => {
+    const box = new THREE.Box3()
+    for (const b of instance.backends) if (b.active) box.expandByObject(b.group)
+    return box
+  },
+  executing: () => {
+    // the busiest connection: running, and preferring one with the most queued
+    const open = instance.backends.filter((b) => b.active && b.busy)
+    if (open.length === 0) return null
+    let best = open[0]
+    for (const b of open) if (b.inbuf > best.inbuf) best = b
+    // a semantic box: the port plus the input-buffer shaft hanging under it,
+    // not the object's own bounds (those include the additive halo, which would
+    // frame the glow instead of the thing the caption is about)
+    const box = new THREE.Box3(
+      best.group.position.clone().add(new THREE.Vector3(-0.8, -2.35, -0.8)),
+      best.group.position.clone().add(new THREE.Vector3(0.8, 0.75, 0.8)),
+    )
+    return { id: `backend ${best.id + 1}`, box }
+  },
+  valid: (id: string) => {
+    const n = Number(/(\d+)/.exec(id)?.[1])
+    const pod = instance.backends[n - 1]
+    return !!pod && pod.active && pod.busy
+  },
+}
+
+const story = createStory({
+  rig,
+  sim,
+  scene: storyScene,
+  setSpeed: applySpeed,
+  onEnter: () => {
+    // no camera drift during a story: the scene is already moving enough, and
+    // a turning frame makes the captions hard to follow
+    orbitBeforeStory = autoOrbit
+    speedBeforeStory = speed
+    autoOrbit = false
+    world.controls.autoRotate = false
+    if (orbitCheckbox) orbitCheckbox.checked = false
+    sim.ambient = false
+    // start from a clean pool: leave one connection, so "one request, one
+    // connection" describes what is actually on screen
+    instance.closeIdleBackendsTo(1)
+  },
+  onExit: () => {
+    sim.ambient = true
+    applySpeed(speedBeforeStory)
+    // hand the camera back the way we found it
+    autoOrbit = orbitBeforeStory
+    world.controls.autoRotate = orbitBeforeStory
+    if (orbitCheckbox) orbitCheckbox.checked = orbitBeforeStory
+  },
+})
+  ; (window as unknown as Record<string, unknown>).__psqlStory = story
+
+// build the story list from the same registry the stories themselves come from
+const storiesEl = document.getElementById('stories')
+if (storiesEl) {
+  for (const s of story.stories) {
+    const b = document.createElement('button')
+    b.className = 'vbtn'
+    b.dataset.story = s.id
+    b.textContent = s.label
+    b.title = s.hint
+    b.addEventListener('click', () => {
+      story.start(s.id)
+      for (const el of storiesEl.querySelectorAll('.vbtn')) el.classList.remove('on')
+      b.classList.add('on')
+    })
+    storiesEl.appendChild(b)
+  }
+}
 
 // build the view buttons from the single source of truth
 const viewsEl = document.getElementById('views')
@@ -379,11 +478,14 @@ function frame() {
   sim.update(dt)
   updateFly(raw)
 
-  // ambient traffic so the machine always feels alive
-  trafficTimer -= dt
-  if (trafficTimer <= 0) {
-    trafficTimer = rand(3.6, 7.2)
-    void sim.runQuery()
+  // ambient traffic so the machine always feels alive; a story switches it off
+  // so the only load on screen is the load it just described
+  if (sim.ambient) {
+    trafficTimer -= dt
+    if (trafficTimer <= 0) {
+      trafficTimer = rand(3.6, 7.2)
+      void sim.runQuery()
+    }
   }
 
   // hover highlight

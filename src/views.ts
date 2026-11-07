@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { ANCHOR, PAGE_GRID, pageX, pageZ } from './instance'
+import { ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, pageX, pageZ } from './instance'
 import type { Ticker } from './util'
 import { easeInOutCubic } from './util'
 
@@ -108,7 +108,15 @@ export const VIEWS: ViewDef[] = [
         label: 'clients',
         entity: 'backend ports',
         hint: 'connection ports on the top rim — one process per connection',
-        pose: () => shot(V(0, 9.88, 5.8), [2.0, 4.6, 9.0], 36),
+        // far enough back that all six ports fit, and centred on the strip: an
+        // x offset swings the view and silently cropped the outer two
+        pose: () =>
+            shot(
+                V(0, BACKEND_ORIGIN.y - 0.9, BACKEND_ORIGIN.z),
+                [0, 6.4, 20.5],
+                36,
+                [0, -1.3, 0],
+            ),
     },
     {
         id: 'pages',
@@ -128,7 +136,36 @@ export const tableView = (name: keyof typeof TABLE_ANCHOR): ViewDef => ({
     pose: () => shot(TABLE_ANCHOR[name], [3.0, 4.2, 7.0], 32, [0, 0.2, 0]),
 })
 
-export const ALL_VIEWS = [...VIEWS, ...(['users', 'products', 'metrics'] as const).map(tableView)]
+/**
+ * One connection on its own: the port, the input-buffer shaft under it, and
+ * nothing else of the pool in frame. This is what the story's buffer steps look
+ * at, because "the buffer" is a per-backend thing and a wide shot of six ports
+ * does not show any one of them.
+ */
+export const backendView = (i: number): ViewDef => {
+    const x = BACKEND_SLOTS[i] ?? 0
+    // aim a little below the middle of port + shaft so the subject sits above
+    // centre, clear of the caption panel along the bottom
+    const mid = V(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
+    return {
+        id: `backend-${i}`,
+        label: `backend ${i + 1}`,
+        entity: `backend ${i + 1}`,
+        hint: 'one connection close up: port, input buffer, what it is running',
+        // Symmetric and narrow: the target port sits dead centre, the whole
+        // subject (port down to the last buffer cell) fits between the top of
+        // the frame and the caption panel, and the neighbouring ports stay at
+        // the edges as context rather than competing for attention. Closer than
+        // ~15 units the port's halo plus bloom white the frame out.
+        pose: () => shot(mid, [0, 4.0, 16.3], 20, [0, -0.97, 0]),
+    }
+}
+
+export const ALL_VIEWS = [
+    ...VIEWS,
+    ...(['users', 'products', 'metrics'] as const).map(tableView),
+    ...BACKEND_SLOTS.map((_, i) => backendView(i)),
+]
 
 export interface RigOptions {
     camera: THREE.PerspectiveCamera
@@ -140,6 +177,14 @@ export interface RigOptions {
 
 export function createCameraRig({ camera, controls, ticker, beforeNavigate }: RigOptions) {
     let current: string | null = null
+    /**
+     * Bumped by every navigation. A tween that wakes up with a stale token
+     * stops writing, so two moves started inside one tween duration cannot
+     * fight over the camera and leave it on the pose that happened to be added
+     * last. Without this, stepping quickly through a story landed on the
+     * previous step's view while the rig still reported the new one.
+     */
+    let nav = 0
 
     const apply = (pose: CameraPose) => {
         camera.position.copy(pose.pos)
@@ -233,8 +278,10 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         beforeNavigate?.()
 
         const dur = opts.duration ?? 0.95
+        const mine = ++nav
         return ticker
             .add(dur, (k) => {
+                if (mine !== nav) return
                 const e = easeInOutCubic(k)
                 camera.position.lerpVectors(fromPos, toPos, e)
                 controls.target.lerpVectors(fromTarget, centre, e)
@@ -256,6 +303,11 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         beforeNavigate?.()
 
         if (opts.instant) {
+            // an instant cut must still cancel any tween already in flight,
+            // otherwise that tween keeps writing and drags the camera back to
+            // wherever it was heading — which is exactly how a story step ended
+            // up showing the previous step's view
+            nav++
             apply(pose)
             return true
         }
@@ -264,7 +316,9 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         const fromTarget = controls.target.clone()
         const fromFov = camera.fov
         const dur = opts.duration ?? 0.85
+        const mine = ++nav
         void ticker.add(dur, (k) => {
+            if (mine !== nav) return
             const e = easeInOutCubic(k)
             camera.position.lerpVectors(fromPos, pose.pos, e)
             controls.target.lerpVectors(fromTarget, pose.target, e)
@@ -279,6 +333,98 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         go,
         snap: (id: string) => go(id, { instant: true }),
         focus,
+        /**
+         * Frame a world-space box from a direction. This is how the story aims
+         * the camera: it knows *what* it wants to look at and hands over a box,
+         * so a step never hardcodes a camera position or a pod index. Returns
+         * the pose it flew to, so a test can check the camera actually got there.
+         */
+        frame(
+            box: THREE.Box3,
+            dir: [number, number, number],
+            opts: {
+                fov?: number
+                padding?: number
+                lookShift?: [number, number, number]
+                duration?: number
+            } = {},
+        ): CameraPose | null {
+            if (box.isEmpty()) return null
+            const centre = box.getCenter(new THREE.Vector3())
+            const fov = opts.fov ?? 36
+            // fitDistance reads camera.fov/aspect, so measure at the target fov
+            const keepFov = camera.fov
+            camera.fov = fov
+            camera.updateProjectionMatrix()
+            const d = new THREE.Vector3(...dir).normalize()
+            const dist = THREE.MathUtils.clamp(fitDistance(box, d) * (opts.padding ?? 1.06), 1.6, 140)
+            camera.fov = keepFov
+            camera.updateProjectionMatrix()
+
+            const target = centre.clone().add(new THREE.Vector3(...(opts.lookShift ?? [0, 0, 0])))
+            const pose: CameraPose = { pos: centre.clone().addScaledVector(d, dist), target, fov }
+
+            current = null
+            beforeNavigate?.()
+            const fromPos = camera.position.clone()
+            const fromTarget = controls.target.clone()
+            const fromFov = camera.fov
+            const dur = opts.duration ?? 0.85
+            const mine = ++nav
+            void ticker.add(dur, (k) => {
+                if (mine !== nav) return
+                const e = easeInOutCubic(k)
+                camera.position.lerpVectors(fromPos, pose.pos, e)
+                controls.target.lerpVectors(fromTarget, pose.target, e)
+                camera.fov = fromFov + (pose.fov - fromFov) * e
+                camera.updateProjectionMatrix()
+                controls.update()
+            })
+            return pose
+        },
+        /** Is the camera sitting at an arbitrary pose (used for framed subjects)? */
+        atPose(pose: CameraPose | null, tol = 0.45) {
+            if (!pose) return false
+            return (
+                camera.position.distanceTo(pose.pos) < tol &&
+                controls.target.distanceTo(pose.target) < tol
+            )
+        },
+        /**
+         * Where a box lands on screen, in normalised device coordinates plus a
+         * coverage figure. This is what lets a test assert "the camera is on the
+         * subject" from state alone: every corner inside the frustum and a
+         * decent share of the frame, instead of eyeballing a screenshot.
+         */
+        projectBox(box: THREE.Box3) {
+            if (box.isEmpty()) return null
+            camera.updateMatrixWorld()
+            let minX = 1
+            let maxX = -1
+            let minY = 1
+            let maxY = -1
+            let behind = false
+            for (let i = 0; i < 8; i++) {
+                const v = new THREE.Vector3(
+                    i & 1 ? box.max.x : box.min.x,
+                    i & 2 ? box.max.y : box.min.y,
+                    i & 4 ? box.max.z : box.min.z,
+                )
+                const view = v.clone().applyMatrix4(camera.matrixWorldInverse)
+                if (view.z > -0.05) behind = true
+                const p = v.project(camera)
+                minX = Math.min(minX, p.x)
+                maxX = Math.max(maxX, p.x)
+                minY = Math.min(minY, p.y)
+                maxY = Math.max(maxY, p.y)
+            }
+            return {
+                inside: !behind && minX > -1 && maxX < 1 && minY > -1 && maxY < 1,
+                centre: [(minX + maxX) / 2, (minY + maxY) / 2] as [number, number],
+                /** fraction of the frame's height the subject occupies */
+                coverage: (maxY - minY) / 2,
+            }
+        },
         list: () => ALL_VIEWS.map(({ id, label, entity, hint }) => ({ id, label, entity, hint })),
         current: () => current,
         /** Live anchor vector for an entity, handy when writing new views. */
