@@ -34,6 +34,8 @@ export function initHud(handlers: HudHandlers) {
   const flyHint = $<HTMLElement>('#fly-hint')
 
   const stQueries = $<HTMLElement>('#st-queries')
+  const stRps = $<HTMLElement>('#st-rps')
+  const stConn = $<HTMLElement>('#st-conn')
   const stHit = $<HTMLElement>('#st-hit')
   const stLat = $<HTMLElement>('#st-lat')
   const stWal = $<HTMLElement>('#st-wal')
@@ -134,6 +136,9 @@ export function initHud(handlers: HudHandlers) {
     },
     setStats(s: SimStats) {
       stQueries.textContent = String(s.queries)
+      stRps.textContent = `${s.rps.toFixed(1)} rps`
+      stConn.textContent =
+        s.connections === 0 ? '—' : `${s.busyBackends} busy · ${s.connections}/${s.maxConnections}`
       stHit.textContent = s.hitRate > 0 ? `${s.hitRate.toFixed(1)}%` : '—'
       stLat.textContent = s.latency > 0 ? `${s.latency.toFixed(2)} ms` : '—'
       stWal.textContent = fmtBytes(s.walBytes)

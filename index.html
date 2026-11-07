@@ -111,6 +111,14 @@
             <dd id="st-queries">0</dd>
           </div>
           <div>
+            <dt>throughput</dt>
+            <dd id="st-rps" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>connections</dt>
+            <dd id="st-conn">—</dd>
+          </div>
+          <div>
             <dt>buffer hit</dt>
             <dd id="st-hit" class="c-cyan">—</dd>
           </div>
@@ -152,6 +160,7 @@
         <li><i style="--c: #ffb03a"></i>wal &amp; page i/o <span>disk</span></li>
         <li><i style="--c: #ff3ea5"></i>query packets <span>client</span></li>
         <li><i style="--c: #8a7bff"></i>index structures <span>RAM</span></li>
+        <li><i style="--c: #b46bff"></i>input buffer <span>backend RAM</span></li>
       </ul>
       <p class="hint">orange blocks = disk pages · floating = in RAM · grid = floor<br />double-click anything to fly to it and drift around it</p>
     </div>

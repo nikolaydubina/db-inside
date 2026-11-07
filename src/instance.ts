@@ -72,6 +72,17 @@ export interface Page8K {
 
 export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
 
+/**
+ * Cells in a backend's input buffer. Slot 0 is whatever it is executing right
+ * now, the rest are pipelined requests whose bytes are already sitting in that
+ * process's own heap. This is private memory per backend — NOT shared_buffers.
+ */
+export const INBUF_CELLS = 3
+/** vertical pitch between buffered requests */
+const INBUF_PITCH = 0.52
+/** local y of the oldest cell — the head of the buffer, about to be executed */
+const INBUF_BOTTOM = -1.86
+
 export interface BackendPod {
   id: number
   group: THREE.Group
@@ -82,6 +93,10 @@ export interface BackendPod {
   busy: boolean
   index: number
   pulse: number
+  /** requests pipelined behind the running one, waiting in the input buffer */
+  inbuf: number
+  /** the drawn cells of the input buffer */
+  cells: THREE.Mesh[]
 }
 
 export interface PipelineNode {
@@ -1337,6 +1352,7 @@ export class PostgresInstance {
     const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
     const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
     const pickGeo = new THREE.BoxGeometry(1.36, 0.62, 1.36)
+    const cellGeo = new THREE.BoxGeometry(0.36, 0.36, 0.36)
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
@@ -1388,6 +1404,57 @@ export class PostgresInstance {
 
       this.group.add(g)
       this.group.add(pick)
+
+      // The input buffer as a shaft, not a row of boxes: the client's wire comes
+      // down into the port, the bytes stack up in a vertical queue in this
+      // backend's own memory, and the work leaves from the bottom of it. The
+      // internal line into the pipeline picks up exactly where it ends.
+      const shaftTop = -0.3
+      const shaftBottom = INBUF_BOTTOM - 0.42
+      const rail = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.035, 0.035, shaftTop - shaftBottom, 8),
+        new THREE.MeshStandardMaterial({
+          color: 0x0a1118,
+          emissive: PALETTE.cyan,
+          emissiveIntensity: 0.7,
+          roughness: 0.5,
+        }),
+      )
+      rail.position.y = (shaftTop + shaftBottom) / 2
+      g.add(rail)
+
+      const cells: THREE.Mesh[] = []
+      for (let c = 0; c < INBUF_CELLS; c++) {
+        const cell = new THREE.Mesh(
+          cellGeo,
+          new THREE.MeshStandardMaterial({
+            color: 0x0a1118,
+            emissive: 0xb46bff,
+            emissiveIntensity: 0.04,
+            roughness: 0.4,
+          }),
+        )
+        // 0 is the oldest and sits at the bottom, closest to execution; later
+        // arrivals stack upward toward the incoming wire
+        cell.position.set(0, INBUF_BOTTOM + c * INBUF_PITCH, 0)
+        g.add(cell)
+        cells.push(cell)
+      }
+
+      // tappable: this is the one place in the drawing that is a backend's own
+      // memory rather than the shared pool, and it is worth being able to ask
+      const bufPick = new THREE.Mesh(
+        new THREE.BoxGeometry(0.9, 2.5, 0.9),
+        new THREE.MeshBasicMaterial({ visible: false }),
+      )
+      bufPick.position.set(0, INBUF_BOTTOM + (INBUF_CELLS - 1) * INBUF_PITCH * 0.5, 0)
+      g.add(bufPick)
+      this.register(bufPick, {
+        title: 'Backend input buffer',
+        body: 'Each backend reads its connection into a private buffer in its own process memory — 8 kB to start, grown as needed. This is per-process heap, not shared_buffers: no other backend can see it. The wire from the client comes down into the port, requests stack up in the shaft, and the one at the bottom is what the backend is executing right now. Cyan is executing, violet is already received and waiting. A connection runs one statement at a time, in order.',
+        meta: 'per-connection RAM · private heap · pipelining waits here',
+      })
+
       this.backends.push({
         id: i,
         group: g,
@@ -1398,6 +1465,8 @@ export class PostgresInstance {
         busy: false,
         index: i,
         pulse: 0,
+        inbuf: 0,
+        cells,
       })
     })
 
@@ -1433,17 +1502,28 @@ export class PostgresInstance {
   }
 
   acquireBackend(): BackendPod | null {
-    let active = this.backends.filter((b) => b.active)
-    if (active.length === 0) {
-      const opened = this.openBackend()
-      if (!opened) return null
-      active = [opened]
+    const active = this.backends.filter((b) => b.active)
+    // A pooled connection is reused first: that is what a client pool does, and
+    // it is why the port count stays put under light load.
+    const idle = active.filter((b) => !b.busy)
+    if (idle.length > 0) {
+      const pod = idle[randInt(0, idle.length - 1)]
+      pod.busy = true
+      return pod
     }
-    const free = active.filter((b) => !b.busy)
-    const pod =
-      free.length > 0 ? free[randInt(0, free.length - 1)] : active[randInt(0, active.length - 1)]
-    pod.busy = true
-    return pod
+    // Every open connection is busy, so the postmaster forks another backend —
+    // but only up to max_connections. Past that, clients genuinely wait, and
+    // the caller keeps the query queued instead of double-booking a port.
+    if (active.length === 0) {
+      const first = this.openBackend()
+      if (!first) return null
+      first.busy = true
+      return first
+    }
+    const opened = this.openBackend()
+    if (!opened) return null
+    opened.busy = true
+    return opened
   }
 
   releaseBackend(pod: BackendPod) {
@@ -1456,6 +1536,20 @@ export class PostgresInstance {
     if (b) b.pulse = 1
   }
 
+  /**
+   * Where a backend's work leaves its input buffer: the bottom of the shaft.
+   * The internal pipeline line starts here, so the flow is continuous — client
+   * wire, port, buffer, then into the machine.
+   */
+  backendBufferExit(pod: BackendPod) {
+    return pod.group.position.clone().add(new THREE.Vector3(0, INBUF_BOTTOM - 0.55, 0))
+  }
+
+  /** The top cell of a backend's input buffer — where new bytes drop in. */
+  backendBufferEntry(pod: BackendPod) {
+    return pod.group.position.clone().add(new THREE.Vector3(0, INBUF_BOTTOM + (INBUF_CELLS - 1) * INBUF_PITCH, 0))
+  }
+
   get activeBackendCount() {
     return this.backends.filter((b) => b.active).length
   }
@@ -1466,6 +1560,11 @@ export class PostgresInstance {
 
   get backendStates() {
     return this.backends.filter((b) => b.active).map((b) => b.busy)
+  }
+
+  /** Slots in the scene are the server's max_connections. */
+  get maxBackendCount() {
+    return this.backends.length
   }
 
   private buildPipeline(): Record<NodeName, PipelineNode> {
@@ -1901,6 +2000,25 @@ export class PostgresInstance {
           (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
         b.glow.opacity = b.active ? 0.08 : 0
       }
+
+      // input buffer: cell 0 is the statement being executed, the others are
+      // pipelined requests parked in this backend's own memory. A dim cell is
+      // an empty slot — 8 kB of buffer with nothing in it.
+      const held = b.busy ? 1 + b.inbuf : 0
+      b.cells.forEach((cell, i) => {
+        const mat = cell.material as THREE.MeshStandardMaterial
+        if (i >= held) {
+          mat.emissiveIntensity = 0.04
+          return
+        }
+        if (i === 0) {
+          mat.emissive.setHex(PALETTE.cyan)
+          mat.emissiveIntensity = 1.6 + 0.5 * Math.sin(time * 9 + b.id)
+        } else {
+          mat.emissive.setHex(0xb46bff)
+          mat.emissiveIntensity = 0.85
+        }
+      })
     }
 
     // index structures shimmer at different rhythms

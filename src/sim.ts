@@ -1,5 +1,6 @@
 import * as THREE from 'three'
-import { ANCHOR, PALETTE, PostgresInstance } from './instance'
+import { ANCHOR, INBUF_CELLS, PALETTE, PostgresInstance } from './instance'
+import type { BackendPod } from './instance'
 import { QueryChain, pathCurve } from './flow'
 import type { FlowSet, Paths } from './flow'
 import {
@@ -21,12 +22,20 @@ export interface SimStats {
   dead: number
   note: string
   connections: number
+  maxConnections: number
+  /** completed queries per simulated second, over a short sliding window */
+  rps: number
+  /** arrived, but no connection has picked them up yet */
+  queued: number
   busyBackends: number
   backendStates: boolean[]
   checkpointing: boolean
   vacuuming: boolean
   compacting: boolean
 }
+
+/** window for the throughput figure, in simulated seconds */
+const RPS_WINDOW = 2
 
 function makePacket(color: number, size: number, scene: THREE.Scene) {
   const g = new THREE.Group()
@@ -63,6 +72,12 @@ export class EngineSim {
   live = 0
   indexScan = false
   note = 'shared_buffers · 8 kB pages'
+  /** Arrivals whose bytes are sitting in a socket because a buffer was full. */
+  private parked: { pod: BackendPod; packet: THREE.Group }[] = []
+  /** Connections with a statement in progress right now. */
+  private running = new Set<number>()
+  /** Completion times on the simulation clock, for the throughput figure. */
+  private completions: number[] = []
   /** Which concrete page the last disk operation touched — shown in telemetry. */
   lastOp = 'idle'
   /** Where the last page arrow landed — always a block's top face, never air. */
@@ -94,20 +109,35 @@ export class EngineSim {
     return this.chains.length
   }
 
+  /** Completed queries per simulated second over the last RPS_WINDOW seconds. */
+  get rps() {
+    const from = this.clock - RPS_WINDOW
+    let n = 0
+    for (const t of this.completions) if (t > from) n++
+    return n / RPS_WINDOW
+  }
+
   get clockTime() {
     return this.clock
   }
 
   get stats(): SimStats {
     const hitRate = this.accesses === 0 ? 0 : (this.hits / this.accesses) * 100
+    const max = this.inst.maxBackendCount
     return {
       queries: this.queries,
       hitRate,
       latency: this.lastLatency,
       walBytes: this.walBytes,
       dead: this.inst.deadTuples,
-      note: this.note,
+      note:
+        this.queued > 0
+          ? `${this.queued} request${this.queued === 1 ? '' : 's'} blocked in socket buffers · backpressure, nothing dropped`
+          : this.note,
       connections: this.inst.activeBackendCount,
+      maxConnections: max,
+      rps: this.rps,
+      queued: this.queued,
       busyBackends: this.inst.busyBackendCount,
       backendStates: this.inst.backendStates,
       checkpointing: this.checkpointing,
@@ -163,52 +193,157 @@ export class EngineSim {
     this.flows.execToWal.repoint(this.walArc(this.inst.walHeadTop()).getPoints(28))
   }
 
-  async runQuery() {
-    if (this.live >= 3) return
-    this.live++
+  /**
+   * Requests held by TCP backpressure. Not a queue postgres keeps — these bytes
+   * are in a socket because the backend stopped reading while its input buffer
+   * was full. Nothing here can be dropped.
+   */
+  get queued() {
+    return this.parked.length
+  }
+
+  /**
+   * Where a tap's bytes go, in the order a real client would try:
+   *  1. an idle pooled connection — reuse beats connecting
+   *  2. a new backend, up to max_connections
+   *  3. whichever working connection has the least in its input buffer
+   * Nothing waits for a connection here. Waiting happens on the wire, later.
+   */
+  private pickPod(): BackendPod | null {
+    const pods = this.inst.backends
+    const open = pods.filter((b) => b.active)
+    const idle = open.filter((b) => !b.busy)
+    if (idle.length > 0) return idle[randInt(0, idle.length - 1)]
+    if (open.length < pods.length) return this.inst.openBackend()
+    let best = open[0]
+    for (const b of open) if (b.inbuf < best.inbuf) best = b
+    return best
+  }
+
+  /**
+   * One connection works through its own input buffer in order, one statement
+   * at a time. Nothing runs in parallel on a single connection — pipelining
+   * only saves the round trip, it does not add concurrency.
+   */
+  private async serve(pod: BackendPod) {
     try {
-      await this.querySequence()
+      for (; ;) {
+        await this.querySequence(pod)
+        this.completions.push(this.clock)
+        if (pod.inbuf <= 0) break
+        // the next pipelined request is pulled out of the buffer and executed
+        pod.inbuf--
+      }
+    } catch {
+      /* one bad query must never take the whole connection down */
+      pod.inbuf = 0
     } finally {
+      this.running.delete(pod.id)
+      pod.busy = false
+      this.inst.releaseBackend(pod)
       this.live--
     }
   }
 
-  private async querySequence() {
+  /**
+   * A tap sends the signal immediately: the packet leaves for a connection on
+   * the same frame. It does not wait anywhere first, because postgres has no
+   * queue in front of a backend — the client writes, and the bytes are in that
+   * backend's input buffer as fast as the network allows.
+   */
+  async runQuery() {
+    const pod = this.pickPod()
+    if (!pod) return
+    void this.send(pod)
+  }
+
+  /** The wire: the tap's packet falls into the port it was given. */
+  private async send(pod: BackendPod) {
+    const origin = pod.group.position.clone()
+    const inPort = new THREE.Vector3(origin.x, 10.35, origin.z - 0.34)
+    const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
+    // well above the top of the frame: the client is not drawn at all, the
+    // packet simply enters the picture already on its way down
+    packet.position.set(inPort.x, 42, inPort.z)
+    this.inst.pulseBackend(pod)
+    const inbound = pathCurve([
+      packet.position.clone(),
+      new THREE.Vector3(inPort.x, 26, inPort.z + 0.8),
+      new THREE.Vector3(inPort.x, 13.4, inPort.z + 0.3),
+      inPort,
+    ])
+    // the request's own wire, drawn the whole way from the source into the port
+    // in the same magenta the packets use — green is the answer coming back
+    const wire = new QueryChain(this.scene)
+    const fIn = wire.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
+    await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
+    fIn.flash(0.9)
+    // keep the wire up for a beat after it lands, then release it so a hammered
+    // button does not silt the scene up with permanent lines
+    void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
+    this.arrive(pod, packet)
+  }
+
+  /**
+   * The bytes reached the backend. If its input buffer has room they go straight
+   * in; if it is full they stay in the socket and the client blocks — TCP
+   * backpressure. That is why hammering the button never loses a query.
+   */
+  private arrive(pod: BackendPod, packet: THREE.Group) {
+    if (this.canAdmit(pod)) this.admit(pod, packet)
+    else this.parked.push({ pod, packet })
+  }
+
+  private canAdmit(pod: BackendPod) {
+    // an idle connection takes a statement at once; a working one only if there
+    // is a free cell behind the statement it is executing
+    if (!this.running.has(pod.id)) return true
+    return pod.inbuf < INBUF_CELLS - 1
+  }
+
+  private admit(pod: BackendPod, packet: THREE.Group) {
+    // the bytes drop down the shaft into the buffer, then execute in order
+    const entry = this.inst.backendBufferEntry(pod)
+    void travel(this.ticker, packet, pathCurve([packet.position.clone(), entry]), 0.2).then(
+      () => despawn(this.ticker, this.scene, packet, 0.15),
+    )
+    this.inst.pulseBackend(pod)
+    if (!this.running.has(pod.id)) {
+      this.running.add(pod.id)
+      pod.busy = true
+      this.live++
+      void this.serve(pod)
+    } else {
+      pod.inbuf++
+    }
+  }
+
+  private async querySequence(pod: BackendPod) {
     const kind: 'select' | 'insert' | 'delete' =
       Math.random() < 0.22 ? 'insert' : Math.random() < 0.2 ? 'delete' : 'select'
     const hit = kind === 'select' && Math.random() < (this.indexScan ? 0.9 : 0.78)
     this.queries++
 
-    // pick a connection port on the top boundary — every query gets its own
-    const pod = this.inst.acquireBackend()
-    if (!pod) return
     const origin = pod.group.position.clone()
+    // Two strands of one cable: answers leave on the far side of the port, so
+    // both directions run side by side instead of drawing over each other.
+    const outPort = new THREE.Vector3(origin.x, 10.35, origin.z + 0.34)
     const chain = new QueryChain(this.scene)
     this.chains.push(chain)
 
+    // the bytes are already inside the backend, so the work starts at the
+    // bottom of its input buffer — the shaft is what the flow passes through
+    const bufferExit = this.inst.backendBufferExit(pod)
     const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
-    packet.position.set(origin.x, 27.5, origin.z)
+    packet.position.copy(bufferExit)
 
     try {
-      // 1. client packet falls into its connection port
-      const inbound = pathCurve([
-        new THREE.Vector3(origin.x, 27.5, origin.z),
-        new THREE.Vector3(origin.x, 18, origin.z + 0.9),
-        new THREE.Vector3(origin.x, 12.4, origin.z + 0.35),
-        new THREE.Vector3(origin.x, 10.35, origin.z),
-      ])
-      const fIn = chain.addCurve(inbound, PALETTE.magenta, {
-        speed: 0.7,
-        opacity: 0.32,
-      })
-      await travel(this.ticker, packet, inbound, 0.95, easeInQuad)
-      fIn.flash(0.9)
-      this.inst.pulseBackend(pod)
-
-      // 2. backend hands the query to the parser, through the roof
+      // 1. backend hands the query to the parser — the line picks up at the
+      // bottom of the input buffer, so the flow reads as one continuous route:
+      // client wire → port → buffer shaft → inside the engine
       const toParse = pathCurve([
-        new THREE.Vector3(origin.x, 10.2, origin.z - 0.2),
-        new THREE.Vector3(origin.x * 0.9, 8.6, 4.6),
+        bufferExit,
+        new THREE.Vector3(origin.x * 0.9, 8.2, 4.6),
         new THREE.Vector3(ANCHOR.parse.x + 2.8, 7.5, 0.6),
         ANCHOR.parse.clone(),
       ])
@@ -396,7 +531,7 @@ export class EngineSim {
         ANCHOR.result.clone(),
         new THREE.Vector3(ANCHOR.result.x + 0.5, 7.9, 0.2),
         new THREE.Vector3(origin.x * 0.95, 9.2, origin.z - 2.0),
-        new THREE.Vector3(origin.x, 10.3, origin.z - 0.3),
+        outPort.clone(),
       ])
       const fBack = chain.addCurve(toPort, PALETTE.teal, {
         speed: 0.55,
@@ -407,11 +542,13 @@ export class EngineSim {
       fBack.flash(0.9)
       despawn(this.ticker, this.scene, rows, 0.2)
 
-      // 7. answer leaves to the client
+      // 7. answer leaves along the same run of cable, a strand to the side of
+      // the request that came down, and exits the frame the same way it came in
       const outbound = pathCurve([
-        new THREE.Vector3(origin.x, 10.45, origin.z),
-        new THREE.Vector3(origin.x, 17, origin.z),
-        new THREE.Vector3(origin.x, 26.5, origin.z),
+        outPort,
+        new THREE.Vector3(outPort.x + 0.3, 13.4, outPort.z + 0.3),
+        new THREE.Vector3(outPort.x + 0.5, 26, outPort.z + 0.8),
+        new THREE.Vector3(outPort.x + 0.5, 42, outPort.z + 0.6),
       ])
       chain.addCurve(outbound, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
       const out = makePacket(PALETTE.teal, 0.26, this.scene)
@@ -512,6 +649,27 @@ export class EngineSim {
     })
 
     this.clock += dt
+    // bytes that hit a full buffer wait in the socket, stacked above their port,
+    // and are let in the moment a cell frees. Nothing is ever discarded.
+    const perPod = new Map<number, number>()
+    for (let i = 0; i < this.parked.length; i++) {
+      const p = this.parked[i]
+      if (this.canAdmit(p.pod)) {
+        this.admit(p.pod, p.packet)
+        this.parked.splice(i--, 1)
+        continue
+      }
+      const n = perPod.get(p.pod.id) ?? 0
+      perPod.set(p.pod.id, n + 1)
+      const target = p.pod.group.position.clone().add(new THREE.Vector3(0, 1.9 + n * 0.6, 0))
+      p.packet.position.lerp(target, Math.min(1, dt * 5))
+      p.packet.rotation.y += dt * 1.6
+    }
+    // keep the throughput window bounded — it is read by the HUD every frame
+    if (this.completions.length > 0) {
+      const from = this.clock - RPS_WINDOW
+      while (this.completions.length > 0 && this.completions[0] <= from) this.completions.shift()
+    }
     this.inst.update(dt, this.clock)
 
     // clients connect and disconnect
