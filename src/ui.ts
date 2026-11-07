@@ -1,5 +1,6 @@
 import type { Info } from './instance'
-import type { SimStats } from './sim'
+import { REGIME_ORDER, regimeLabel } from './sim'
+import type { Regime, SimStats } from './sim'
 
 export interface HudHandlers {
   runQuery(): void
@@ -7,6 +8,7 @@ export interface HudHandlers {
   vacuum(): void
   compact(): void
   setSpeed(v: number): void
+  setRegime(r: Regime): void
   setOrbit(on: boolean): void
   setFly(on: boolean): void
   unpin(): void
@@ -107,6 +109,26 @@ export function initHud(handlers: HudHandlers) {
     handlers.setFly(chkFly.checked)
   })
 
+  // workload chips: exclusive, and they only change what arrives
+  const regimeOpts = $<HTMLElement>('#regime-opts')
+  const regimeButtons: HTMLButtonElement[] = []
+  const markRegime = (r: Regime) => {
+    for (const b of regimeButtons) b.setAttribute('aria-pressed', String(b.dataset.regime === r))
+  }
+  for (const r of REGIME_ORDER) {
+    const b = document.createElement('button')
+    b.className = 'regime'
+    b.dataset.regime = r
+    b.textContent = regimeLabel(r)
+    b.setAttribute('aria-pressed', String(r === 'default'))
+    b.addEventListener('click', () => {
+      markRegime(r)
+      handlers.setRegime(r)
+    })
+    regimeOpts.appendChild(b)
+    regimeButtons.push(b)
+  }
+
   window.addEventListener('keydown', (e) => {
     const el = e.target as HTMLElement | null
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
@@ -127,6 +149,10 @@ export function initHud(handlers: HudHandlers) {
   return {
     setQueryBusy(on: boolean) {
       busy(btnQuery, on)
+    },
+    setRegime(r: Regime) {
+      markRegime(r)
+      handlers.setRegime(r)
     },
     setStats(s: SimStats) {
       stQueries.textContent = String(s.queries)

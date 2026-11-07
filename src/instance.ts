@@ -59,6 +59,8 @@ export interface Page {
   dirty: boolean
   /** How packed the page is with live tuples, 0..1 — same meaning as on disk. */
   fill: number
+  /** The block on disk this slot currently holds a copy of, if any. */
+  block: Page8K | null
 }
 
 export interface Tuple {
@@ -592,6 +594,7 @@ export class PostgresInstance {
           col: c,
           dirty: false,
           fill,
+          block: null,
         }
         this.pages.push(page)
         this.setBufferFill(page, fill)
@@ -638,13 +641,58 @@ export class PostgresInstance {
    * A miss evicts the current occupant of the slot (clock sweep) and reads a new
    * page into it. Layout never moves — only which page lives in the slot.
    */
-  async swapBufferPage(idx: number, fill: number) {
+  async swapBufferPage(idx: number, fill: number, block?: Page8K | null) {
     const p = this.pages[idx]
     if (!p) return
     const from = p.fill
     await this.ticker.add(0.16, (k) => this.setBufferFill(p, from * (1 - k)))
     const to = fill
     await this.ticker.add(0.2, (k) => this.setBufferFill(p, to * k))
+    p.block = block ?? null
+  }
+
+  /**
+   * The slot a write will modify. Postgres never writes a block in place: it
+   * loads the page into a shared buffer slot if it is not there already, and the
+   * change happens to that copy. Prefers a slot that already caches a table page
+   * — that is what a live write usually finds.
+   */
+  private writeSlot(): { idx: number; page: Page } | null {
+    if (this.pages.length === 0) return null
+    const cached = this.pages
+      .map((p, i) => ({ idx: i, page: p }))
+      .filter(({ page }) => page.block?.table)
+    if (cached.length > 0 && Math.random() < 0.75) return cached[randInt(0, cached.length - 1)]
+    const blocks = this.tableBlocks.filter((b) => !b.busy)
+    if (blocks.length === 0) return null
+    const idx = randInt(0, this.pages.length - 1)
+    const page = this.pages[idx]
+    page.block = blocks[randInt(0, blocks.length - 1)]
+    this.setBufferFill(page, page.block.fill)
+    return { idx, page }
+  }
+
+  /**
+   * Apply a change to a buffer page. The slot holds the new contents and is
+   * dirty; the block on disk still holds the old contents, and stays that way
+   * until the checkpointer writes the page back. Returns the slot so the arrow
+   * can end on the page that actually changed.
+   */
+  writeIntoBuffer(kind: 'insert' | 'delete'): { idx: number; page: Page; fill: number } | null {
+    const slot = this.writeSlot()
+    if (!slot) return null
+    const { page } = slot
+    const next =
+      kind === 'insert'
+        ? Math.min(1, page.fill + rand(0.15, 0.45))
+        : page.fill < 0.4 && Math.random() < 0.55
+          ? 0
+          : Math.max(0, page.fill - rand(0.25, 0.6))
+    this.setBufferFill(page, next)
+    page.dirty = true
+    page.base.set(PALETTE.amber)
+    page.heat = 1
+    return { idx: slot.idx, page, fill: next }
   }
 
   /**
@@ -1098,39 +1146,6 @@ export class PostgresInstance {
     }
   }
 
-  /** INSERT: pages fill up, and a brand-new page is allocated when one is full. */
-  insertRows(n = 2): Page8K[] {
-    const touched: Page8K[] = []
-    for (let k = 0; k < n; k++) {
-      const region = TABLE_REGIONS[randInt(0, TABLE_REGIONS.length - 1)]
-      const blocks = this.tableBlocks.filter((b) => b.table === region.label && !b.busy)
-      if (blocks.length === 0) continue
-      const empty = blocks.filter((b) => b.fill <= 0.001)
-      const partial = blocks.filter((b) => b.fill > 0.001 && b.fill < 1)
-      // the fuller the run, the likelier it appends a page to the file end
-      const live = blocks.length - empty.length
-      const pressure = live / blocks.length
-      const append = empty.length > 0 && Math.random() < 0.12 + pressure * 0.5
-
-      let p: Page8K | undefined
-      if (append) {
-        // a brand-new page is initialised for this heap and takes its place
-        p = empty[randInt(0, empty.length - 1)]
-        this.setFill(p, rand(0.08, 0.26))
-      } else if (partial.length > 0) {
-        p = partial[randInt(0, partial.length - 1)]
-        this.setFill(p, p.fill + rand(0.15, 0.45))
-      } else if (empty.length > 0) {
-        p = empty[randInt(0, empty.length - 1)]
-        this.setFill(p, rand(0.08, 0.22))
-      }
-      if (p) touched.push(p)
-    }
-    // an insert makes pages visibly fatter and brighter
-    this.touchBlocks(touched, 0xd9ff7a, 0.6, 1.6)
-    return touched
-  }
-
   /** Expanding ring on top of one page: "the arrow landed exactly here". */
   markBlock(p: Page8K, hex: number) {
     const ring = new THREE.Mesh(this.markGeo, this.markMat.clone())
@@ -1184,24 +1199,6 @@ export class PostgresInstance {
     this.touchBlocks(blocks, 0x9be8ff, 0.5, 1.15)
     await this.ticker.wait(0.3)
     return { table: region.label, pages: packed.length }
-  }
-
-  /** DELETE: pages get emptier, and a drained page becomes a flat free slot. */
-  deleteRows(n = 2): Page8K[] {
-    const touched: Page8K[] = []
-    for (let k = 0; k < n; k++) {
-      const filled = this.tableBlocks.filter((b) => b.fill > 0.001 && !b.busy)
-      if (filled.length === 0) break
-      const p = filled[randInt(0, filled.length - 1)]
-      // a nearly-empty page can be drained completely — that is how a heap
-      // file gets a hole in it, and the page stops existing in the diagram
-      const drained = p.fill < 0.4 && Math.random() < 0.55
-      this.setFill(p, drained ? 0 : p.fill - rand(0.25, 0.6))
-      touched.push(p)
-    }
-    // a delete makes them sag and dim
-    this.touchBlocks(touched, 0xff3ea5, 0.55, 0.7)
-    return touched
   }
 
   settlePage(p: Page8K) {
@@ -2097,15 +2094,21 @@ export class PostgresInstance {
     return made
   }
 
+  /**
+   * Write dirty pages back to the blocks they cache, then clean them. This is
+   * the only moment a buffer page's contents reach the disk field — a write in
+   * the executor only ever dirties a slot.
+   */
   async dirtyPages(n: number): Promise<void> {
-    const chosen = this.pages
-      .map((p, i) => ({ p, i }))
-      .sort(() => Math.random() - 0.5)
-      .slice(0, n)
+    const dirty = this.pages.map((p, i) => ({ p, i })).filter(({ p }) => p.dirty)
+    const chosen = (dirty.length > 0 ? dirty : this.pages.map((p, i) => ({ p, i }))).slice(0, n)
     for (const { p } of chosen) {
-      p.dirty = true
-      p.base.set(PALETTE.amber)
-      p.heat = 1
+      if (p.dirty && p.block) {
+        this.setFill(p.block, p.fill)
+        this.markBlock(p.block, PALETTE.amber)
+      }
+      p.dirty = false
+      p.base.set(PALETTE.cyan)
       await this.ticker.wait(0.03)
     }
   }

@@ -433,6 +433,58 @@ h2::after {
   pointer-events: none;
 }
 
+/* workload regime picker: chips, not switches — they are exclusive, and each one
+   reshapes the traffic instead of toggling a feature */
+.regimes {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  margin-top: 12px;
+  padding-top: 11px;
+  border-top: 1px solid rgba(110, 170, 210, 0.1);
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #5b7c90;
+}
+
+.regime-label {
+  flex: none;
+}
+
+.regime-opts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.regime {
+  appearance: none;
+  padding: 3px 7px;
+  border-radius: 2px;
+  border: 1px solid rgba(110, 170, 210, 0.16);
+  background: none;
+  color: #6d8fa4;
+  font-family: inherit;
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color 0.16s, border-color 0.16s;
+}
+
+.regime:hover {
+  color: #a9d8e8;
+  border-color: rgba(110, 170, 210, 0.34);
+}
+
+.regime[aria-pressed='true'] {
+  color: #bfefff;
+  border-color: rgba(53, 224, 255, 0.55);
+  background: rgba(53, 224, 255, 0.07);
+}
+
 .switches {
   display: flex;
   flex-direction: column;

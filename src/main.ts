@@ -5,6 +5,7 @@ import { PostgresInstance } from './instance'
 import type { BlockPick } from './instance'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
+import type { Regime } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { createStory } from './story'
@@ -88,6 +89,7 @@ const hud = initHud({
   setSpeed: (v) => {
     speed = v
   },
+  setRegime: (r) => sim.setRegime(r),
   setOrbit: (on) => {
     autoOrbit = on
     world.controls.autoRotate = on && !flyMode
@@ -137,6 +139,8 @@ const rig = createCameraRig({
 let orbitBeforeStory = true
 /** clock speed as it was before the story opened */
 let speedBeforeStory = 1
+/** workload regime as it was before the story opened */
+let regimeBeforeStory: Regime = 'default'
 
 const speedInput = document.querySelector<HTMLInputElement>('#speed')
 const speedLabel = document.getElementById('speed-val')
@@ -198,10 +202,14 @@ const story = createStory({
     // a turning frame makes the captions hard to follow
     orbitBeforeStory = autoOrbit
     speedBeforeStory = speed
+    regimeBeforeStory = sim.regime
     autoOrbit = false
     world.controls.autoRotate = false
     if (orbitCheckbox) orbitCheckbox.checked = false
     sim.ambient = false
+    // a story's captions assume the default mix: a write-heavy workload would
+    // starve the read steps and a read-heavy one would never grow the WAL
+    hud.setRegime('default')
     // start from a clean pool: leave one connection, so "one request, one
     // connection" describes what is actually on screen
     instance.closeIdleBackendsTo(1)
@@ -209,6 +217,7 @@ const story = createStory({
   onExit: () => {
     sim.ambient = true
     applySpeed(speedBeforeStory)
+    hud.setRegime(regimeBeforeStory)
     // hand the camera back the way we found it
     autoOrbit = orbitBeforeStory
     world.controls.autoRotate = orbitBeforeStory
@@ -531,7 +540,7 @@ function frame() {
   if (sim.ambient) {
     trafficTimer -= dt
     if (trafficTimer <= 0) {
-      trafficTimer = rand(3.6, 7.2)
+      trafficTimer = rand(3.6, 7.2) * sim.arrivalGap
       void sim.runQuery()
     }
   }

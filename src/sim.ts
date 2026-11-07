@@ -94,16 +94,23 @@ const STATEMENTS: Statement[] = [
   { sql: 'delete from users where id = $1', kind: 'delete', viaIndex: true, weight: 1 },
 ]
 
-const STATEMENT_WEIGHT = STATEMENTS.reduce((n, s) => n + s.weight, 0)
+/**
+ * Workload regimes. They change the mix of statements that arrive and how fast
+ * they arrive — never the code path a query takes. Some behaviour is only
+ * visible under the right traffic: dirty pages need writes, backpressure needs
+ * arrivals outrunning the pool, a high hit rate needs reads.
+ */
+export type Regime = 'default' | 'read' | 'write' | 'burst'
 
-const pickStatement = (): Statement => {
-  let r = Math.random() * STATEMENT_WEIGHT
-  for (const s of STATEMENTS) {
-    r -= s.weight
-    if (r <= 0) return s
-  }
-  return STATEMENTS[0]
+const REGIMES: Record<Regime, { label: string; select: number; write: number; pace: number }> = {
+  default: { label: 'default', select: 1, write: 1, pace: 1 },
+  read: { label: 'read heavy', select: 4, write: 0.12, pace: 0.85 },
+  write: { label: 'write heavy', select: 0.35, write: 7, pace: 0.9 },
+  burst: { label: 'burst', select: 1, write: 1, pace: 0.3 },
 }
+
+export const REGIME_ORDER: Regime[] = ['default', 'read', 'write', 'burst']
+export const regimeLabel = (r: Regime) => REGIMES[r].label
 
 export class EngineSim {
   queries = 0
@@ -122,6 +129,8 @@ export class EngineSim {
   private flushing = false
   /** ambient background traffic; a story turns it off so its own taps are the only load */
   ambient = true
+  /** which mix of statements arrives — see REGIMES */
+  regime: Regime = 'default'
   note = 'shared_buffers · 8 kB pages'
   /** Arrivals whose bytes are sitting in a socket because a buffer was full. */
   private parked: { pod: BackendPod; packet: THREE.Group }[] = []
@@ -381,7 +390,7 @@ export class EngineSim {
   }
 
   private async querySequence(pod: BackendPod) {
-    const stmt = pickStatement()
+    const stmt = this.pickStatement()
     const kind = stmt.kind
     const hit = kind === 'select' && Math.random() < (stmt.viaIndex ? 0.9 : 0.78)
     // what this statement needs decides which structures light up: the index
@@ -441,25 +450,29 @@ export class EngineSim {
       this.inst.pulseNode('exec', 1)
       fPlan.flash(0.8)
 
-      // WAL first — but into shared memory, not to disk. The record lands in
-      // wal_buffers and is not durable yet; the flush to the segment comes at
-      // commit, after the change has been made.
-      const walBytesFor =
-        kind === 'insert' ? 384 : kind === 'delete' ? 320 : hit ? 128 : 256
-      const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
-      walPack.position.copy(ANCHOR.exec)
-      void travel(this.ticker, walPack, this.walBufferArc(this.inst.walBufferTop()), 0.4).then(() => {
-        this.inst.appendWal(0.3)
-        this.walBytes += walBytesFor
-        this.bufferedBytes += walBytesFor
-        despawn(this.ticker, this.scene, walPack, 0.22)
-      })
-      this.flows.execToWal.flash(0.7)
+      // WAL first — but only when something actually changes, and only into
+      // shared memory, not to disk. The record is produced by the access method
+      // the executor calls, immediately before that same call modifies the page
+      // in a buffer slot; a read-only statement writes no WAL at all.
+      const writes = kind === 'insert' || kind === 'delete'
+      if (writes) {
+        const walBytesFor = kind === 'insert' ? 384 : 320
+        const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
+        walPack.position.copy(ANCHOR.exec)
+        void travel(this.ticker, walPack, this.walBufferArc(this.inst.walBufferTop()), 0.4).then(() => {
+          this.inst.appendWal(0.3)
+          this.walBytes += walBytesFor
+          this.bufferedBytes += walBytesFor
+          despawn(this.ticker, this.scene, walPack, 0.22)
+        })
+        this.flows.execToWal.flash(0.7)
+      }
 
       let pageIdx = this.inst.pickBufferPage()
 
       if (kind === 'insert' || kind === 'delete') {
-        // a write: the executor goes straight at the heap pages of a table
+        // a write never touches a disk block: the executor modifies the copy in
+        // a shared buffer slot, which turns dirty and waits for the checkpointer
         const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
           speed: 0.5,
           opacity: 0.4,
@@ -467,11 +480,9 @@ export class EngineSim {
         await travel(this.ticker, packet, this.paths.exec, 0.4)
         fExec.flash(0.75)
 
-        const touched =
-          kind === 'insert' ? this.inst.insertRows(randInt(1, 3)) : this.inst.deleteRows(randInt(1, 3))
-        const target = touched[0]
-        if (target) {
-          const to = this.inst.blockTop(target)
+        const slot = this.inst.writeIntoBuffer(kind)
+        if (slot) {
+          const to = this.inst.pageTop(slot.page)
           const from = packet.position.clone()
           const down = pathCurve([from, from.clone().lerp(to, 0.5).add(new THREE.Vector3(0, 1.4, 0)), to])
           const fDown = chain.addCurve(
@@ -481,8 +492,9 @@ export class EngineSim {
           )
           await travel(this.ticker, packet, down, 0.55)
           fDown.flash(0.85)
-          this.inst.markBlock(target, kind === 'insert' ? 0xc7ff5a : PALETTE.magenta)
-          this.lastOp = `${kind} ${target.table ?? 'free'}[${target.row},${target.col}]`
+          this.inst.setPageActive(slot.idx, kind === 'insert' ? 0xc7ff5a : PALETTE.magenta, 1.2)
+          const owner = slot.page.block?.table
+          this.lastOp = `${kind} → buffer slot ${slot.idx}${owner ? ` (${owner})` : ''} · dirty`
           this.lastArrowEnd = to.clone()
         }
         despawn(this.ticker, this.scene, packet, 0.2)
@@ -492,8 +504,8 @@ export class EngineSim {
         this.lastLatency = rand(0.3, 1.4)
         this.note =
           kind === 'insert'
-            ? `insert · ${touched.length} heap page${touched.length === 1 ? '' : 's'} written, one may be brand new`
-            : `delete · ${touched.length} heap page${touched.length === 1 ? '' : 's'} marked dead`
+            ? 'insert · buffer page dirtied, still only in RAM until the checkpointer writes it back'
+            : 'delete · buffer page dirtied, dead tuples stay in the page until VACUUM'
         if (kind === 'delete') this.inst.markDeadTuples(1)
       } else if (hit) {
         // the arrow lands on the top face of the exact buffer page it will read
@@ -570,8 +582,9 @@ export class EngineSim {
         await travel(this.ticker, packet, up, 0.62)
         fUp.flash(0.8)
         this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
-        // the copy that arrives carries the density of the page it came from
-        void this.inst.swapBufferPage(pageIdx, target ? target.fill : 0.5)
+        // the copy that arrives carries the density of the page it came from,
+        // and the slot now stands for that specific block
+        void this.inst.swapBufferPage(pageIdx, target ? target.fill : 0.5, target)
         void this.ticker.add(0.7, (k) => {
           page.base.lerpColors(new THREE.Color(PALETTE.amber), new THREE.Color(PALETTE.cyan), k)
         })
@@ -585,7 +598,8 @@ export class EngineSim {
       // COMMIT waits for durability, but it does not own the fsync: the WAL
       // writer drains whatever is buffered on its own cadence, and every commit
       // that arrives in the same window rides the same flush (group commit).
-      await this.walDurable()
+      // A read-only statement has nothing to wait for.
+      if (writes) await this.walDurable()
 
       // 5. rows leave the executor and go straight back out through the same
       // connection. There is no "result" stage in postgres: tuples are handed
@@ -628,6 +642,31 @@ export class EngineSim {
     }
   }
 
+  /** How much longer the ambient clients wait between requests, per regime. */
+  get arrivalGap() {
+    return REGIMES[this.regime].pace
+  }
+
+  setRegime(r: Regime) {
+    if (r === this.regime) return
+    this.regime = r
+    this.note = `workload · ${REGIMES[r].label}`
+  }
+
+  /** Weighted by the current regime: reads and writes get scaled independently. */
+  private pickStatement(): Statement {
+    const mix = REGIMES[this.regime]
+    const weightOf = (s: Statement) => s.weight * (s.kind === 'select' ? mix.select : mix.write)
+    let total = 0
+    for (const s of STATEMENTS) total += weightOf(s)
+    let r = Math.random() * total
+    for (const s of STATEMENTS) {
+      r -= weightOf(s)
+      if (r <= 0) return s
+    }
+    return STATEMENTS[0]
+  }
+
   /**
    * Wait until everything appended so far has been written and fsynced. The
    * wait is not proportional to this statement's own bytes: whatever else was
@@ -663,6 +702,9 @@ export class EngineSim {
     this.checkpointing = true
     this.note = 'checkpoint · flushing dirty pages + fsync wal'
     try {
+      // this is the only place a buffer page reaches the disk field: writes in
+      // the executor only ever dirtied slots
+      const dirty = this.inst.pages.filter((p) => p.dirty && p.block)
       await this.inst.dirtyPages(12)
       await this.inst.flushWal()
       this.flushedBytes = this.walBytes
@@ -676,11 +718,11 @@ export class EngineSim {
       }
       await this.ticker.wait(0.4)
 
-      // a checkpoint is batched: many dirty pages leave at once, each one to its
-      // own block in the heap — that is why it is one fsync storm, not many I/Os
-      for (let i = 0; i < 7; i++) {
-        const page = this.inst.pages[randInt(0, this.inst.pages.length - 1)]
-        const target = this.inst.pickBlockForRead()
+      // a checkpoint is batched: the dirty pages leave together, each one to the
+      // block it caches — that is why it is one fsync storm, not many I/Os
+      const leaving = dirty.length > 0 ? dirty : this.inst.pages.slice(0, 7)
+      for (const page of leaving.slice(0, 7)) {
+        const target = page.block
         const copy = makePacket(PALETTE.amber, 0.26, this.scene)
         const start = this.inst.pageTop(page)
         copy.position.copy(start)
