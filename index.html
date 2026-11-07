@@ -113,19 +113,15 @@
 
       <section class="card">
         <h2>Processes</h2>
-        <div class="conns" id="conns"></div>
-        <div class="procs-chips">
-          <span class="p on"><i></i>postmaster</span>
-          <span class="p" id="pr-ck"><i></i>checkpointer</span>
-          <span class="p" id="pr-wl"><i></i>walwriter</span>
-          <span class="p" id="pr-av"><i></i>autovacuum</span>
-        </div>
+        <ul class="procs" id="procs"></ul>
         <p class="hint">one process per connection</p>
-        <section class="card inspector" id="inspector" hidden>
-          <h2 id="ins-title">Inspector</h2>
-          <p id="ins-body"></p>
-          <p class="ins-meta" id="ins-meta"></p>
-        </section>
+      </section>
+
+      <section class="card inspector" id="inspector" hidden>
+        <h2 id="ins-title">Inspector</h2>
+        <p id="ins-body"></p>
+        <p class="ins-meta" id="ins-meta"></p>
+      </section>
     </aside>
 
     <div class="hud panel legend">

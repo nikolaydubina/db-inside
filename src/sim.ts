@@ -22,6 +22,7 @@ export interface SimStats {
   note: string
   connections: number
   busyBackends: number
+  backendStates: boolean[]
   checkpointing: boolean
   vacuuming: boolean
 }
@@ -91,6 +92,7 @@ export class EngineSim {
       note: this.note,
       connections: this.inst.activeBackendCount,
       busyBackends: this.inst.busyBackendCount,
+      backendStates: this.inst.backendStates,
       checkpointing: this.checkpointing,
       vacuuming: this.vacuuming,
     }

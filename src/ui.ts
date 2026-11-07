@@ -33,16 +33,44 @@ export function initHud(handlers: HudHandlers) {
   const stBar = $<HTMLElement>('#st-bar')
   const stNote = $<HTMLElement>('#st-note')
 
-  const connsEl = $<HTMLElement>('#conns')
-  const prCk = $<HTMLElement>('#pr-ck')
-  const prWl = $<HTMLElement>('#pr-wl')
-  const prAv = $<HTMLElement>('#pr-av')
-  const connBoxes = Array.from({ length: 6 }, () => {
-    const el = document.createElement('div')
-    el.className = 'conn-box'
-    connsEl.appendChild(el)
-    return el
+  const procsEl = $<HTMLElement>('#procs')
+
+  const makeRow = (label: string) => {
+    const li = document.createElement('li')
+    li.innerHTML = '<i class="pt"></i><span></span><b></b>'
+    li.querySelector('span')!.textContent = label
+    return li
+  }
+
+  const postmaster = makeRow('postmaster')
+  postmaster.querySelector('i')!.classList.add('on')
+  postmaster.querySelector('b')!.textContent = 'listening'
+  procsEl.appendChild(postmaster)
+
+  const workerLabels = ['checkpointer', 'walwriter', 'autovacuum'] as const
+  const workerRows = workerLabels.map((w) => {
+    const row = makeRow(w)
+    procsEl.appendChild(row)
+    return row
   })
+
+  const backendRows: HTMLElement[] = []
+  const syncBackends = (states: boolean[]) => {
+    while (backendRows.length < states.length) {
+      const row = makeRow(`backend ${backendRows.length + 1}`)
+      procsEl.insertBefore(row, workerRows[0])
+      backendRows.push(row)
+    }
+    while (backendRows.length > states.length) {
+      backendRows.pop()!.remove()
+    }
+    backendRows.forEach((row, i) => {
+      const busy = states[i]
+      row.querySelector('i')!.classList.toggle('on', busy)
+      const state = row.querySelector('b')!
+      state.textContent = busy ? 'busy' : 'idle'
+    })
+  }
 
   const inspector = $<HTMLElement>('#inspector')
   const insTitle = $<HTMLElement>('#ins-title')
@@ -91,13 +119,13 @@ export function initHud(handlers: HudHandlers) {
       stBar.style.width = `${Math.min(100, s.hitRate)}%`
       addNote(stNote, s.note)
 
-      connBoxes.forEach((el, i) => {
-        el.classList.toggle('open', i < s.connections)
-        el.classList.toggle('busy', i < s.busyBackends)
+      syncBackends(s.backendStates)
+      const busyOk = [s.checkpointing, s.walBytes > 0, s.vacuuming]
+      const states = ['flushing', 'streaming', 'reclaiming']
+      workerRows.forEach((row, i) => {
+        row.querySelector('i')!.classList.toggle('on', busyOk[i])
+        row.querySelector('b')!.textContent = busyOk[i] ? states[i] : 'idle'
       })
-      prCk.classList.toggle('on', s.checkpointing)
-      prWl.classList.toggle('on', s.walBytes > 0)
-      prAv.classList.toggle('on', s.vacuuming)
     },
     inspect(info: Info) {
       inspector.hidden = false

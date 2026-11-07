@@ -95,7 +95,7 @@ function pick(ndc: THREE.Vector2) {
 }
 
 // debug helper: what is under a screen point?
-;(window as unknown as Record<string, unknown>).__pickAt = (x: number, y: number) => {
+; (window as unknown as Record<string, unknown>).__pickAt = (x: number, y: number) => {
   const ndc = new THREE.Vector2(
     (x / window.innerWidth) * 2 - 1,
     -(y / window.innerHeight) * 2 + 1,

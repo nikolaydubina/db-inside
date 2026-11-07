@@ -464,60 +464,46 @@ h2::after {
 
 /* ---------- processes ---------- */
 
-.conns {
+.procs {
+  margin: 0;
+  padding: 0;
+  list-style: none;
   display: flex;
-  gap: 4px;
-  margin-bottom: 9px;
+  flex-direction: column;
+  gap: 5px;
 }
 
-.conn-box {
-  width: 15px;
-  height: 15px;
-  border-radius: 3px;
-  border: 1px solid rgba(120, 190, 230, 0.14);
-  background: rgba(16, 32, 44, 0.45);
-  transition: background 0.25s, border-color 0.25s, box-shadow 0.25s;
-}
-
-.conn-box.open {
-  border-color: rgba(53, 224, 255, 0.45);
-  background: rgba(53, 224, 255, 0.1);
-}
-
-.conn-box.busy {
-  border-color: var(--cyan);
-  background: var(--cyan);
-  box-shadow: 0 0 10px rgba(53, 224, 255, 0.85);
-}
-
-.procs-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px 10px;
-  font-family: var(--mono);
-  font-size: 8px;
-  letter-spacing: 0.04em;
-  color: #546c80;
-}
-
-.procs-chips .p {
+.procs li {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  color: #93aec2;
 }
 
-.procs-chips .p i {
-  width: 4px;
-  height: 4px;
+.procs li i.pt {
+  width: 5px;
+  height: 5px;
   border-radius: 50%;
   background: #2d4353;
   flex: none;
   transition: background 0.3s, box-shadow 0.3s;
 }
 
-.procs-chips .p.on i {
+.procs li i.pt.on {
   background: var(--teal);
-  box-shadow: 0 0 7px var(--teal);
+  box-shadow: 0 0 9px var(--teal);
+}
+
+.procs li b {
+  margin-left: auto;
+  font-weight: 400;
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: #4b6679;
 }
 
 /* ---------- inspector ---------- */

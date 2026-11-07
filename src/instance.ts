@@ -1047,6 +1047,10 @@ export class PostgresInstance {
     return this.backends.filter((b) => b.active && b.busy).length
   }
 
+  get backendStates() {
+    return this.backends.filter((b) => b.active).map((b) => b.busy)
+  }
+
   private buildPipeline(): Record<NodeName, PipelineNode> {
     const defs: { name: NodeName; pos: THREE.Vector3; color: number; text: string; info: Info }[] = [
       {
