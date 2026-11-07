@@ -22,10 +22,17 @@ the roof; results stream back up.
 | a port lights up + vertical beam | that backend is busy serving a query |
 | one thin path per query | a query enters through a port, runs parser → planner → executor → buffers, and its result leaves through the **same** port; the path fades once the query is done |
 | `PARSER` → `PLANNER` → `EXECUTOR` orbs | parse tree, cost-based plan, volcano executor |
-| `SHARED BUFFERS · RAM` deck | `shared_buffers` — the RAM in the picture. 8 kB pages: cyan = cached, amber = dirty, green = just served a hit |
-| everything on the floor | disk — heaps, indexes and WAL all live in files down here |
-| `WAL · DISK` column | write-ahead log segments. Records append as queries run; at checkpoint the segments are fsynced and recycled, and their blocks drop into the disk array |
-| `DISK · PERSISTENT` voxels | an 8 kB page file: each cube is one page. Blocks light up when pages are written at checkpoint (or read back on a buffer miss) |
+| `SHARED BUFFERS · RAM` deck | `shared_buffers` — the RAM cache. It floats above the floor, because it is a cache, not storage. 8 kB pages: cyan = cached, amber = dirty, green = just served a hit |
+| the page field | orange blocks covering most of the floor, one block = one 8 kB page. They sit on a 0.5-unit lattice, so four blocks fit exactly inside one floor-grid cell |
+| the blue grid floor | not storage, just the ground the whole instance sits on |
+| `TABLE: users` / `products` / `metrics` | selection marquees over contiguous runs of those pages. A table is only a name plus a run of pages — that is the whole trick |
+| block height & brightness | how full that page is. A flat dark slot is a page with nothing in it yet; a tall bright block is a packed page. Fill levels start random, as they do in a real heap |
+| green / magenta flash on a page | the statement just touched it: green for INSERT (page fills up, or a brand-new page gets allocated), magenta for DELETE (page drains, and at zero it becomes a flat free slot again) |
+| `UNALLOCATED CAPACITY` | the rest of the disk: pages the instance is not using. They exist as space the files can grow into, not as data |
+| `PAGE FILE` blocks lifting off | on a buffer miss a page lifts out of the field and floats up toward the deck: that page is now in RAM |
+| `WAL · DISK` column | write-ahead log segments, a file sequence on the plate. Records append as queries run; at checkpoint the segments are fsynced and recycled |
+| `WAL BUFFERS · RAM` cubes | the newest WAL bytes, held in `wal_buffers` in shared memory until the WAL writer fsyncs them |
+| `B-TREE` / `BRIN` / `GIN` / `HASH` | index structures floating in the air: they are shown as they exist **in memory** right now, i.e. their pages read up from the index files into shared buffers |
 | `HEAP` (users) | table pages and tuples; magenta blocks are dead tuples left by MVCC updates |
 | `EVENTS` | second heap, jsonb payloads — the kind of column a GIN index is for |
 | `METRICS` | append-only time series, physically ordered by timestamp |
@@ -38,10 +45,30 @@ the roof; results stream back up.
 
 ### Memory vs disk
 
-- **RAM above the floor**: `shared_buffers` (and the WAL tail in `wal_buffers`). Fast, volatile.
-- **Disk on the floor**: every heap page, index page and WAL segment is a file down there.
-- Reads climb up from disk into the deck on a miss; dirty deck pages fall back to disk at checkpoint.
-- Watch `checkpoint`: WAL blocks drop into the disk array, then the segment stack recycles.
+- **The page field is disk.** The orange blocks cover most of the floor on purpose: that is where most
+  of the data lives. The plate beneath them is colourless — the blocks are the storage, not the slab.
+- **The blue grid is just a floor** — the thing the instance floats over, not storage.
+- **Floating means "in RAM right now"**: the `shared_buffers` deck, the `wal_buffers` cubes and the four
+  index structures hovering above the plate. A page that is lifted off the plate is a page that has just
+  been read into memory.
+- Reads climb up from disk into the deck on a miss (one block visibly lifts out of the array); dirty deck
+  pages fall back to disk at checkpoint.
+- Each table keeps a fixed reserved area, which is a simplification: in reality Postgres grows a heap
+  one page at a time wherever the filesystem puts it. Inside the reserved run, pages are allocated and
+  freed as rows are inserted and deleted.
+- Rough numbers: a buffer hit is ~0.1 µs–1 µs of CPU, a disk read 100 µs–10 ms, and an `fsync` on
+  `COMMIT` is the thing that actually costs you latency.
+
+### "Heap" means table file, not heap memory
+
+The three table-ish things in the scene — `TABLE: users`, `TABLE: products`, `TABLE: metrics` — are **demo
+schema**, not PostgreSQL internals. Each is just a selection outline over a contiguous run of 8 kB pages
+on the disk plate, which is precisely what a table is at the storage layer. They exist to motivate the
+four index types: B-tree on `users`, GIN on `products`' jsonb, BRIN on `metrics`' timestamps, hash for
+equality.
+
+In PostgreSQL, *heap* is the name of the unordered pile of 8 kB pages a table is stored in (the "heap
+file"). It is a file on disk, and has nothing to do with heap memory / malloc.
 
 ## Interactions
 

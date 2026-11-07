@@ -3,6 +3,7 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import {
   Ticker,
   breathe,
+  easeInOutCubic,
   halo,
   label,
   neonEdges,
@@ -42,6 +43,22 @@ export interface Tuple {
   home: THREE.Vector3
 }
 
+/** One block of the disk field: a single 8 kB page. */
+export interface Page8K {
+  /** Instance index inside the page-field InstancedMesh. */
+  i: number
+  home: THREE.Vector3
+  row: number
+  col: number
+  color: number
+  table: string | null
+  /** 0 = nothing on this page, 1 = packed full. Drives colour and height. */
+  fill: number
+  dead: boolean
+  busy: boolean
+  glow: THREE.Mesh | null
+}
+
 export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
 
 export interface BackendPod {
@@ -68,6 +85,93 @@ export interface PipelineNode {
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 
+/** y of the first WAL segment: the log sits on the disk floor, not in the air. */
+const WAL_BASE = 0.23
+
+/** How far "in-memory right now" structures float above the disk plate. */
+const RAM_LIFT = 1.15
+
+/** The amber plate: width, depth and centre-z of the disk area on the floor. */
+export const DISK_PLATE = { w: 24.2, d: 9.0, cz: 3.2, top: 0.09 }
+
+/**
+ * The disk is tiled edge to edge with page blocks. Spacing is 0.5 and the floor
+ * grid is drawn every 2 units, so four blocks fit exactly in one grid cell and
+ * every fourth block edge lands on a grid line.
+ */
+export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0.28, bd: 0.46 }
+const PAGE_Y = 0.25
+const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
+const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
+const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
+const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
+
+/** Albedo of a free (unassigned) page block. */
+const BLOCK_FREE = 0x6b4a1c
+/** Page fill ramp: empty slot → packed page. */
+const FILL_DARK = 0x0e0a04
+const FILL_BRIGHT = 0xd28f2c
+
+interface TableRegion {
+  anchor: 'heap' | 'events' | 'metrics'
+  label: string
+  c0: number
+  c1: number
+  r0: number
+  r1: number
+  color: number
+  info: Info
+}
+
+/**
+ * A table is nothing but a named, contiguous run of pages on the disk. These
+ * outlines are the only thing that distinguishes a table from free space.
+ */
+const TABLE_REGIONS: TableRegion[] = [
+  {
+    anchor: 'heap',
+    label: 'users',
+    c0: 4,
+    c1: 17,
+    r0: 5,
+    r1: 12,
+    color: PALETTE.teal,
+    info: {
+      title: 'TABLE: users — 28 contiguous pages',
+      body: 'A table is not a separate kind of object: it is a named, contiguous run of 8 kB pages, and this outline is all that \'table\' means at the storage layer. Rows live inside those pages. An UPDATE writes a new row version into a page and leaves the old one dead; VACUUM later marks that space reusable. That is MVCC, and it happens right here on the disk.',
+      meta: 'demo table · 28 pages · heap file on disk',
+    },
+  },
+  {
+    anchor: 'events',
+    label: 'products',
+    c0: 22,
+    c1: 35,
+    r0: 5,
+    r1: 12,
+    color: PALETTE.amber,
+    info: {
+      title: 'TABLE: products — 32 contiguous pages',
+      body: 'Another example table, same shape: a contiguous run of pages, nothing more. These rows are wide and carry a jsonb document, which is why the interesting query is containment inside the document. A B-tree cannot answer that, because the whole document is one value in one column — which is what GIN is for.',
+      meta: 'demo table · 32 pages · jsonb payload · heap file',
+    },
+  },
+  {
+    anchor: 'metrics',
+    label: 'metrics',
+    c0: 39,
+    c1: 47,
+    r0: 1,
+    r1: 5,
+    color: 0x5a7bff,
+    info: {
+      title: 'TABLE: metrics — 21 contiguous pages',
+      body: 'A third example table, again just pages: append-only measurements written in timestamp order. Nothing in Postgres guaranteed that order — we simply inserted them that way, so ranges of these pages hold narrow timestamp ranges. That is exactly the assumption BRIN exploits, and why it can be a few kilobytes for a huge table.',
+      meta: 'demo table · 21 pages · naturally ordered · heap file',
+    },
+  },
+]
+
 export const ANCHOR = {
   sky: V(-11.0, 27, 0.8),
   parse: V(-9.4, 6.55, -2.0),
@@ -75,14 +179,15 @@ export const ANCHOR = {
   exec: V(1.6, 6.85, -2.4),
   result: V(8.2, 6.6, -1.8),
   bufferCenter: V(-1.0, 5.5, -1.4),
-  wal: V(10.4, 4.6, 2.4),
+  wal: V(10.9, 4.6, 2.4),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
-  disk: V(8.2, 0.5, 5.2),
-  events: V(0.2, 0.5, 4.4),
+  disk: V(7.0, 0.5, 5.6),
+  events: V(0.2, 0.5, 4.6),
+  metrics: V(-5.2, 0.5, 0.6),
   gin: V(10.3, 1.4, -3.4),
   brin: V(-1.9, 1.6, -5.3),
-  hash: V(8.4, 1.2, 0.6),
+  hash: V(5.9, 1.2, 1.0),
   hub: V(0, 7.2, 0),
   resultSky: V(10.6, 24, 1.2),
 }
@@ -105,19 +210,26 @@ const glowMat = (
 export class PostgresInstance {
   readonly group = new THREE.Group()
   readonly pages: Page[] = []
-  readonly tuples: Tuple[] = []
+  /** Every 8 kB block on the disk plate. */
+  readonly pages8k: Page8K[] = []
+  /** The blocks that belong to a table, i.e. the ones VACUUM can touch. */
+  readonly tableBlocks: Page8K[] = []
   readonly pickables: THREE.Object3D[] = []
   readonly nodes: Record<NodeName, PipelineNode>
   readonly walMats: THREE.MeshStandardMaterial[] = []
+  readonly walBufferMats: THREE.MeshStandardMaterial[] = []
   readonly walSegments: THREE.Mesh[] = []
-  readonly heapMats: THREE.MeshStandardMaterial[] = []
-  readonly diskMats: THREE.MeshStandardMaterial[] = []
   readonly btreeMats: THREE.MeshStandardMaterial[] = []
   readonly ginMats: THREE.MeshStandardMaterial[] = []
   readonly brinMats: THREE.MeshStandardMaterial[] = []
   readonly hashMats: THREE.MeshStandardMaterial[] = []
-  readonly eventsMats: THREE.MeshStandardMaterial[] = []
   readonly lockMats: THREE.MeshStandardMaterial[] = []
+  /** Instanced field of 8 kB page blocks that fills the whole disk plate. */
+  pageField!: THREE.InstancedMesh
+  /** Reusable block mesh used while a page is being read up into RAM. */
+  private liftMesh!: THREE.Mesh
+  private deadGeo!: THREE.BoxGeometry
+  private deadMat!: THREE.MeshBasicMaterial
   /** One port per client connection, sitting on the top boundary of the box. */
   readonly backends: BackendPod[] = []
   readonly walHead: THREE.Mesh
@@ -135,14 +247,12 @@ export class PostgresInstance {
     this.buildShell()
     this.buildBufferPool()
     this.buildWal()
-    this.buildHeap()
+    this.buildPageField()
+    this.buildTableRegions()
     this.buildIndex()
-    this.buildEvents()
     this.buildGin()
-    this.buildMetrics()
     this.buildBrin()
     this.buildHash()
-    this.buildDisks()
     this.buildLocks()
     this.buildBackends()
     this.nodes = this.buildPipeline()
@@ -218,7 +328,7 @@ export class PostgresInstance {
     roofEdge.position.y = shellH + 0.02
     this.group.add(roofEdge)
 
-    // city-block pad the whole instance sits on
+    // city-block pad: the blue grid floor everything floats over
     const pad = new THREE.Mesh(
       new RoundedBoxGeometry(27.6, 0.06, 18.4, 2, 0.1),
       new THREE.MeshStandardMaterial({
@@ -253,6 +363,47 @@ export class PostgresInstance {
     const padEdge = neonEdges(new THREE.BoxGeometry(27.6, 0.06, 18.4), 0x35e0ff, 0.45)
     padEdge.position.y = 0.05
     this.group.add(padEdge)
+
+    /* -------------------------------------------------------------------- disk */
+    // The disk is only the field of page blocks. This plate is deliberately
+    // colourless — it just gives the blocks a bed and marks their footprint.
+    const plate = new THREE.Mesh(
+      new RoundedBoxGeometry(PAGE_W + 0.4, 0.04, PAGE_D + 0.4, 2, 0.02),
+      new THREE.MeshStandardMaterial({
+        color: 0x060a0f,
+        emissive: 0x081820,
+        emissiveIntensity: 0.8,
+        roughness: 0.92,
+        metalness: 0.2,
+      }),
+    )
+    plate.position.set(0, 0.06, DISK_PLATE.cz)
+    plate.receiveShadow = true
+    this.group.add(plate)
+
+    const plateEdge = neonEdges(
+      new THREE.BoxGeometry(PAGE_W + 0.4, 0.04, PAGE_D + 0.4),
+      0x2f9fbf,
+      0.55,
+    )
+    plateEdge.position.copy(plate.position)
+    this.group.add(plateEdge)
+
+    const diskFloorPick = new THREE.Mesh(
+      new THREE.BoxGeometry(DISK_PLATE.w, 0.3, DISK_PLATE.d),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    diskFloorPick.position.set(0, 0.12, DISK_PLATE.cz)
+    this.group.add(diskFloorPick)
+    this.register(diskFloorPick, {
+      title: 'Disk — a field of 8 kB pages',
+      body: 'Every block on this plate is one 8 kB page, and that is the entire disk: heap pages, index pages and WAL payloads all look like this. A table is just a named, contiguous run of these blocks — see the outlines. RAM holds copies, so only copies ever float.',
+      meta: 'disk · one block = 8 kB page · survives a crash',
+    })
+
+    const floorLab = label('DISK · ALL PAGE FILES')
+    floorLab.position.set(-10.2, 0.5, DISK_PLATE.cz + PAGE_D / 2 + 0.75)
+    this.group.add(floorLab)
 
     const processLabel = label('POSTGRESQL PROCESS')
     processLabel.position.set(-12.3, 10.15, 8.1)
@@ -319,7 +470,7 @@ export class PostgresInstance {
     this.group.add(frame)
     this.register(frame, {
       title: 'Shared buffers',
-      body: 'The page cache every backend shares — this is the RAM in the picture. Reads and writes hit 8 kB pages here first; a miss pulls a page from disk and evicts another one with the clock-sweep algorithm.',
+      body: 'The only RAM in the picture: a page cache every backend shares. Reads and writes hit 8 kB page copies here first; a miss pulls the page up from disk and evicts another one with the clock-sweep algorithm. The table itself never moves — only copies do.',
       meta: 'shared_buffers · RAM · 8 kB pages · clock sweep',
     })
 
@@ -327,19 +478,22 @@ export class PostgresInstance {
     frameEdge.position.copy(frame.position)
     this.group.add(frameEdge)
 
-    // support columns
-    const colGeo = new RoundedBoxGeometry(0.12, 4.5, 0.12, 2, 0.03)
-    const colMat = glowMat(0x061018, 0x1d5f78, 0.7)
-    for (const [x, z] of [
-      [-6.4, -3.55],
-      [4.4, -3.55],
-      [4.4, 0.65],
-    ]) {
-      const c = new THREE.Mesh(colGeo, colMat)
-      c.position.set(x, 2.8, z)
-      c.castShadow = true
-      this.group.add(c)
-    }
+    // the pool floats — RAM is not bolted to the floor. A soft ring underneath
+    // makes the levitation legible instead of accidental.
+    const levitation = new THREE.Mesh(
+      new THREE.TorusGeometry(5.6, 0.05, 6, 128),
+      new THREE.MeshBasicMaterial({
+        color: 0x35e0ff,
+        transparent: true,
+        opacity: 0.35,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      }),
+    )
+    levitation.rotation.x = Math.PI / 2
+    levitation.position.set(ANCHOR.bufferCenter.x, 4.72, ANCHOR.bufferCenter.z)
+    levitation.scale.set(1, 0.48, 1)
+    this.group.add(levitation)
 
     const cols = 8
     const rows = 4
@@ -388,12 +542,12 @@ export class PostgresInstance {
     const z = ANCHOR.wal.z
     const segGeo = new RoundedBoxGeometry(0.85, 0.3, 0.85, 2, 0.04)
     for (let i = 0; i < 7; i++) {
-      const mat = glowMat(0x140d04, 0x8a4a10, 0.62, {
+      const mat = glowMat(0x241703, 0xa85a14, 0.62, {
         roughness: 0.45,
         metalness: 0.25,
       })
       const seg = new THREE.Mesh(segGeo, mat)
-      seg.position.set(x, 0.85 + i * 0.42, z)
+      seg.position.set(x, WAL_BASE + i * 0.42, z)
       seg.castShadow = true
       seg.receiveShadow = true
       this.group.add(seg)
@@ -413,12 +567,41 @@ export class PostgresInstance {
     this.group.add(pick)
     this.register(pick, {
       title: 'Write-ahead log (on disk)',
-      body: 'A file sequence on disk, appended to on every change. Its tail sits in wal_buffers in RAM until the WAL writer issues a write + fsync; COMMIT only returns once that fsync is done. A checkpoint then flushes dirty pages and recycles old segments — the blocks you see falling into the disk array.',
-      meta: 'pg_wal · disk files · buffered in wal_buffers · fsync',
+      body: 'A sequence of segment files in pg_wal, appended on every change before the heap page is touched. The newest bytes sit in wal_buffers — the floating cyan blocks above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. A checkpoint then flushes dirty pages and recycles old segments.',
+      meta: 'pg_wal · disk files · tail buffered in wal_buffers · fsync',
     })
 
+    // wal_buffers: the only part of the WAL that lives in RAM
+    const wb = new THREE.Group()
+    const wbGeo = new RoundedBoxGeometry(0.34, 0.34, 0.34, 2, 0.04)
+    for (let i = 0; i < 3; i++) {
+      const mat = glowMat(0x08222e, PALETTE.cyan, 0.7, { metalness: 0.4 })
+      const m = new THREE.Mesh(wbGeo, mat)
+      m.position.set(i * 0.5, Math.sin(i * 1.7) * 0.12, 0)
+      wb.add(m)
+      this.walBufferMats.push(mat)
+    }
+    wb.position.set(x - 0.55, 4.35, z + 0.55)
+    this.group.add(wb)
+
+    const wbPick = new THREE.Mesh(
+      new THREE.BoxGeometry(1.9, 0.9, 0.9),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    wbPick.position.copy(wb.position)
+    this.group.add(wbPick)
+    this.register(wbPick, {
+      title: 'wal_buffers — the WAL tail in RAM',
+      body: 'WAL records are written to these shared-memory buffers first, then flushed to the segment files on disk in order. It is the same split as heap pages: the durable thing is on disk, RAM only holds a short recent stretch. Default is 1/32 of shared_buffers, about 16 MB.',
+      meta: 'wal_buffers · RAM · tail of the log · flushed by WAL writer',
+    })
+
+    const wbLab = label('WAL BUFFERS · RAM')
+    wbLab.position.set(x - 1.1, 5.6, z + 1.05)
+    this.group.add(wbLab)
+
     const lab = label('WAL · DISK')
-    lab.position.set(x - 1.5, 4.75, z + 0.4)
+    lab.position.set(x - 1.5, 4.25, z + 0.4)
     this.group.add(lab)
   }
 
@@ -440,56 +623,250 @@ export class PostgresInstance {
     return core
   }
 
-  private buildHeap() {
-    const base = new THREE.Mesh(
-      new RoundedBoxGeometry(6.9, 0.5, 4.1, 3, 0.07),
-      glowMat(0x061019, 0x0f5a4c, 0.55, { metalness: 0.5, roughness: 0.45 }),
-    )
-    base.position.set(ANCHOR.heap.x, 0.32, ANCHOR.heap.z)
-    base.castShadow = true
-    base.receiveShadow = true
-    this.group.add(base)
-    this.heapMats.push(base.material as THREE.MeshStandardMaterial)
+  /** The disk plate is tiled edge to edge with 8 kB pages — this *is* the disk. */
+  private buildPageField() {
+    const { cols, rows, bw, bh, bd } = PAGE_GRID
+    const geo = new RoundedBoxGeometry(bw, bh, bd, 1, 0.02)
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      emissive: PALETTE.amber,
+      emissiveIntensity: 0.14,
+      roughness: 0.5,
+      metalness: 0.3,
+    })
+    const field = new THREE.InstancedMesh(geo, mat, cols * rows)
+    field.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+    field.castShadow = true
+    field.receiveShadow = true
+    this.group.add(field)
+    this.pageField = field
 
-    const edges = neonEdges(new THREE.BoxGeometry(6.9, 0.5, 4.1), 0x2bffc3, 0.3)
-    edges.position.copy(base.position)
-    this.group.add(edges)
-
-    const cols = 8
-    const rows = 5
-    const gx = 0.78
-    const gz = 0.74
-    const ox = ANCHOR.heap.x - ((cols - 1) * gx) / 2
-    const oz = ANCHOR.heap.z - ((rows - 1) * gz) / 2
-    const tupleGeo = new RoundedBoxGeometry(0.54, 0.22, 0.54, 1, 0.03)
-
+    const dummy = new THREE.Object3D()
+    let i = 0
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const mat = glowMat(0x0b2a24, PALETTE.teal, 0.34)
-        const mesh = new THREE.Mesh(tupleGeo, mat)
-        const pos = new THREE.Vector3(ox + c * gx, 0.68, oz + r * gz)
-        mesh.position.copy(pos)
-        mesh.castShadow = true
-        this.group.add(mesh)
-        this.tuples.push({ mesh, mat, dead: false, home: pos.clone() })
+        const home = new THREE.Vector3(pageX(c), PAGE_Y, pageZ(r))
+        dummy.position.copy(home)
+        dummy.updateMatrix()
+        field.setMatrixAt(i, dummy.matrix)
+        this.pages8k.push({
+          i,
+          home,
+          row: r,
+          col: c,
+          color: BLOCK_FREE,
+          table: null,
+          fill: 0,
+          dead: false,
+          busy: false,
+          glow: null,
+        })
+        i++
       }
     }
+    this.pages8k.forEach((p) => this.setFill(p, 0))
 
-    const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(7.2, 1.1, 4.3),
-      new THREE.MeshBasicMaterial({ visible: false }),
+    // one reusable mesh carries a page while it is being read into RAM
+    this.liftMesh = new THREE.Mesh(
+      geo.clone(),
+      new THREE.MeshStandardMaterial({
+        color: 0xffffff,
+        emissive: PALETTE.amber,
+        emissiveIntensity: 2.4,
+        roughness: 0.35,
+        metalness: 0.3,
+      }),
     )
-    pick.position.set(ANCHOR.heap.x, 0.5, ANCHOR.heap.z)
-    this.group.add(pick)
-    this.register(pick, {
-      title: 'Heap (table storage)',
-      body: 'Rows are stored in 8 kB heap pages. An UPDATE writes a new version and leaves the old one dead; VACUUM later marks that space reusable. This is MVCC made visible.',
-      meta: 'heap pages · tuples · MVCC',
-    })
+    this.liftMesh.visible = false
+    this.group.add(this.liftMesh)
 
-    const lab = label('HEAP')
-    lab.position.set(ANCHOR.heap.x - 0.5, 1.4, ANCHOR.heap.z + 2.35)
-    this.group.add(lab)
+    // additive shell that makes a dead page glow magenta
+    this.deadGeo = new THREE.BoxGeometry(bw * 1.12, 0.02, bd * 1.12)
+    this.deadMat = new THREE.MeshBasicMaterial({
+      color: 0xff3ea5,
+      transparent: true,
+      opacity: 0.4,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
+  }
+
+  /** Albedo of one page block in the instanced field. */
+  paintBlock(p: Page8K, hex: number) {
+    const field = this.pageField
+    if (!field) return
+    field.setColorAt(p.i, this.tmpColor.setHex(hex))
+    if (field.instanceColor) field.instanceColor.needsUpdate = true
+  }
+
+  /** Colour a page by how full it is; a table tint keeps the tables apart. */
+  private fillHex(p: Page8K) {
+    const ramp = this.tmpColorA.setHex(FILL_DARK).lerp(this.tmpColorB.setHex(FILL_BRIGHT), p.fill)
+    if (p.table) ramp.lerp(this.tmpColorB.setHex(p.color), 0.28)
+    return ramp.getHex()
+  }
+
+  /** Height of a block: an empty page is a flat slot, a full one is a cube. */
+  private blockScale(fill: number) {
+    return 0.28 + 0.72 * fill
+  }
+
+  private applyTransform(p: Page8K, scale: number, sy?: number) {
+    const d = this.dummy
+    d.position.copy(p.home)
+    d.rotation.set(0, 0, 0)
+    d.scale.set(scale, scale, scale)
+    if (sy !== undefined) d.scale.y = sy
+    d.updateMatrix()
+    this.pageField.setMatrixAt(p.i, d.matrix)
+    this.pageField.instanceMatrix.needsUpdate = true
+  }
+
+  setFill(p: Page8K, fill: number) {
+    p.fill = Math.max(0, Math.min(1, fill))
+    this.paintBlock(p, this.fillHex(p))
+    this.applyTransform(p, 1, this.blockScale(p.fill))
+  }
+
+  private hideBlock(p: Page8K) {
+    this.applyTransform(p, 0.001)
+  }
+
+  private showBlock(p: Page8K) {
+    this.applyTransform(p, 1, this.blockScale(p.fill))
+  }
+
+  /**
+   * Flash the pages a statement touched, then settle back to their fill colour.
+   * This is how you see which blocks the query actually rewrote.
+   */
+  touchBlocks(blocks: Page8K[], hex: number, dur = 0.55) {
+    for (const p of blocks) this.paintBlock(p, hex)
+    for (const p of blocks) {
+      const lift = this.blockScale(p.fill) * 1.35
+      this.applyTransform(p, 1, lift)
+      void this.ticker.add(dur, () => {}).then(() => {
+        if (p.busy) return
+        this.paintBlock(p, this.fillHex(p))
+        this.showBlock(p)
+      })
+    }
+  }
+
+  /** INSERT: pages fill up, and a brand-new page is allocated when one is full. */
+  insertRows(n = 2): Page8K[] {
+    const touched: Page8K[] = []
+    for (let k = 0; k < n; k++) {
+      const region = TABLE_REGIONS[randInt(0, TABLE_REGIONS.length - 1)]
+      const blocks = this.tableBlocks.filter((b) => b.table === region.label && !b.busy)
+      if (blocks.length === 0) continue
+      const partial = blocks.filter((b) => b.fill > 0 && b.fill < 1)
+      const fresh = blocks.filter((b) => b.fill === 0)
+      let p: Page8K | undefined
+      if (partial.length > 0 && Math.random() < 0.7) {
+        p = partial[randInt(0, partial.length - 1)]
+        this.setFill(p, p.fill + rand(0.15, 0.45))
+      } else if (fresh.length > 0) {
+        // a new page is initialised for this heap
+        p = fresh[randInt(0, fresh.length - 1)]
+        this.setFill(p, rand(0.12, 0.3))
+      } else if (partial.length > 0) {
+        p = partial[randInt(0, partial.length - 1)]
+        this.setFill(p, p.fill + 0.2)
+      }
+      if (p) touched.push(p)
+    }
+    this.touchBlocks(touched, 0xc7ff5a)
+    return touched
+  }
+
+  /** DELETE: pages get emptier, and a drained page becomes a flat free slot. */
+  deleteRows(n = 2): Page8K[] {
+    const touched: Page8K[] = []
+    for (let k = 0; k < n; k++) {
+      const filled = this.tableBlocks.filter((b) => b.fill > 0 && !b.busy)
+      if (filled.length === 0) break
+      const p = filled[randInt(0, filled.length - 1)]
+      this.setFill(p, p.fill - rand(0.25, 0.6))
+      touched.push(p)
+    }
+    this.touchBlocks(touched, 0xff3ea5)
+    return touched
+  }
+
+  settlePage(p: Page8K) {
+    this.setFill(p, p.fill)
+  }
+
+  /**
+   * Tables are just contiguous runs of those pages, so they are drawn as
+   * selection marquees over the block field — no extra geometry, no fake shape.
+   */
+  private buildTableRegions() {
+    for (const region of TABLE_REGIONS) {
+      const blocks: Page8K[] = []
+      for (let r = region.r0; r <= region.r1; r++) {
+        for (let c = region.c0; c <= region.c1; c++) {
+          const p = this.pages8k.find((b) => b.row === r && b.col === c)
+          if (!p) continue
+          p.table = region.label
+          p.color = region.color
+          // pages start out partly used, with a believable spread of fill levels;
+          // the rest of the reserved run is still unallocated (flat slots)
+          const initial = Math.random() < 0.62 ? rand(0.18, 1) : 0
+          this.setFill(p, initial)
+          blocks.push(p)
+        }
+      }
+      this.tableBlocks.push(...blocks)
+
+      const x0 = pageX(region.c0) - PAGE_GRID.bw / 2 - 0.09
+      const x1 = pageX(region.c1) + PAGE_GRID.bw / 2 + 0.09
+      const z0 = pageZ(region.r0) - PAGE_GRID.bd / 2 - 0.09
+      const z1 = pageZ(region.r1) + PAGE_GRID.bd / 2 + 0.09
+      const w = x1 - x0
+      const d = z1 - z0
+      const cx = (x0 + x1) / 2
+      const cz = (z0 + z1) / 2
+      const h = 0.46
+
+      const edges = neonEdges(new THREE.BoxGeometry(w, h, d), region.color, 0.85)
+      edges.position.set(cx, PAGE_Y - 0.12 + h / 2, cz)
+      this.group.add(edges)
+
+      // faint wash so the run reads as "selected pages", not as a solid object
+      const wash = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h, d),
+        new THREE.MeshBasicMaterial({
+          color: region.color,
+          transparent: true,
+          opacity: 0.04,
+          blending: THREE.AdditiveBlending,
+          depthWrite: false,
+        }),
+      )
+      wash.position.copy(edges.position)
+      this.group.add(wash)
+
+      const pick = new THREE.Mesh(
+        new THREE.BoxGeometry(w, h + 0.7, d),
+        new THREE.MeshBasicMaterial({ visible: false }),
+      )
+      pick.position.set(cx, PAGE_Y + h / 2, cz)
+      this.group.add(pick)
+      this.register(pick, region.info)
+
+      const lab = label(`TABLE: ${region.label}`)
+      lab.position.set(cx - w / 2, PAGE_Y + h + 0.55, z0)
+      this.group.add(lab)
+
+      ANCHOR[region.anchor].set(cx, PAGE_Y, cz)
+    }
+
+    // the free tail of the disk: pages that exist as capacity, not as data
+    const freeLab = label('UNALLOCATED CAPACITY')
+    freeLab.position.set(pageX(33), PAGE_Y + 0.7, pageZ(PAGE_GRID.rows - 1))
+    this.group.add(freeLab)
   }
 
   private buildIndex() {
@@ -553,88 +930,24 @@ export class PostgresInstance {
     base.position.set(cx, 0.95, cz)
     tree.add(base)
 
+    // an index is built and read in memory: float the whole tree above the plate
+    tree.position.y = RAM_LIFT - 0.55
     this.group.add(tree)
 
     const pick = new THREE.Mesh(
       new THREE.BoxGeometry(6.8, 3.1, 1.4),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(cx, 2.2, cz)
+    pick.position.set(cx, 1.5 + RAM_LIFT, cz)
     this.group.add(pick)
     this.register(pick, {
-      title: 'B-tree index',
-      body: 'A balanced tree over key → TID. Internal pages live near the top and stay hot in shared buffers; leaves point at heap tuples. An index scan touches ~3 pages instead of the whole table.',
-      meta: 'b-tree · 3 levels · key → TID',
+      title: 'B-tree index — the tree as it sits in RAM',
+      body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table.',
+      meta: 'b-tree · 3 levels · key → TID · pages cached in RAM',
     })
 
     const lab = label('B-TREE')
-    lab.position.set(cx - 1.6, 3.65, cz + 1.4)
-    this.group.add(lab)
-  }
-
-  private buildEvents() {
-    const cx = ANCHOR.events.x
-    const cz = ANCHOR.events.z
-
-    const base = new THREE.Mesh(
-      new RoundedBoxGeometry(5.8, 0.5, 3.2, 3, 0.07),
-      glowMat(0x061019, 0x0f5a4c, 0.5, { metalness: 0.5, roughness: 0.45 }),
-    )
-    base.position.set(cx, 0.32, cz)
-    base.castShadow = true
-    base.receiveShadow = true
-    this.group.add(base)
-
-    const edges = neonEdges(new THREE.BoxGeometry(5.8, 0.5, 3.2), 0x2bffc3, 0.26)
-    edges.position.copy(base.position)
-    this.group.add(edges)
-
-    const cols = 7
-    const rows = 4
-    const gx = 0.74
-    const gz = 0.72
-    const ox = cx - ((cols - 1) * gx) / 2
-    const oz = cz - ((rows - 1) * gz) / 2
-    const tupleGeo = new RoundedBoxGeometry(0.5, 0.3, 0.5, 1, 0.03)
-    const docGeo = new RoundedBoxGeometry(0.28, 0.12, 0.28, 1, 0.02)
-
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const toasted = Math.random() < 0.18
-        const mat = glowMat(
-          0x0b2a24,
-          toasted ? PALETTE.amber : PALETTE.teal,
-          toasted ? 0.6 : 0.26,
-        )
-        const m = new THREE.Mesh(tupleGeo, mat)
-        m.position.set(ox + c * gx, 0.68, oz + r * gz)
-        m.castShadow = true
-        this.group.add(m)
-        this.eventsMats.push(mat)
-
-        // jsonb payload sitting on the row
-        if (Math.random() < 0.55) {
-          const doc = new THREE.Mesh(docGeo, mat)
-          doc.position.set(m.position.x, 0.9, m.position.z)
-          this.group.add(doc)
-        }
-      }
-    }
-
-    const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(6.0, 1.1, 3.4),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    )
-    pick.position.set(cx, 0.6, cz)
-    this.group.add(pick)
-    this.register(pick, {
-      title: 'Heap: events',
-      body: 'A second table, wider and insert-heavy: each row carries a jsonb payload. Rows are still 8 kB heap pages, but the interesting access path is containment and key lookup inside jsonb — which a B-tree cannot help with.',
-      meta: 'heap · jsonb payload · append mostly',
-    })
-
-    const lab = label('EVENTS')
-    lab.position.set(cx - 2.9, 1.15, cz + 1.9)
+    lab.position.set(cx - 1.6, 2.85 + RAM_LIFT, cz + 1.4)
     this.group.add(lab)
   }
 
@@ -646,7 +959,7 @@ export class PostgresInstance {
       new RoundedBoxGeometry(3.4, 0.26, 2.6, 2, 0.06),
       glowMat(0x140a18, 0x6a1f4d, 0.6, { metalness: 0.4, roughness: 0.5 }),
     )
-    base.position.set(cx, 0.36, cz)
+    base.position.set(cx, 0.36 + RAM_LIFT, cz)
     base.castShadow = true
     base.receiveShadow = true
     this.group.add(base)
@@ -665,7 +978,7 @@ export class PostgresInstance {
         const mat = glowMat(0x2a0a1e, PALETTE.magenta, 0.75)
         const m = new THREE.Mesh(pinGeo, mat)
         m.scale.y = h
-        m.position.set(ox + c * gx, 0.5 + h / 2, oz + r * gz)
+        m.position.set(ox + c * gx, 0.5 + RAM_LIFT + h / 2, oz + r * gz)
         m.castShadow = true
         this.group.add(m)
         this.ginMats.push(mat)
@@ -683,14 +996,14 @@ export class PostgresInstance {
         depthWrite: false,
       }),
     )
-    rail.position.set(cx, 1.95, cz - 0.78)
+    rail.position.set(cx, 1.95 + RAM_LIFT, cz - 0.78)
     this.group.add(rail)
 
     const pick = new THREE.Mesh(
       new THREE.BoxGeometry(3.6, 2.2, 2.8),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(cx, 1.3, cz)
+    pick.position.set(cx, 1.3 + RAM_LIFT, cz)
     this.group.add(pick)
     this.register(pick, {
       title: 'GIN — Generalized Inverted Index',
@@ -699,67 +1012,27 @@ export class PostgresInstance {
     })
 
     const lab = label('GIN')
-    lab.position.set(cx - 1.3, 2.75, cz + 0.3)
-    this.group.add(lab)
-  }
-
-  private buildMetrics() {
-    const cx = ANCHOR.brin.x
-    const cz = ANCHOR.brin.z
-
-    const base = new THREE.Mesh(
-      new RoundedBoxGeometry(4.8, 0.4, 1.9, 2, 0.06),
-      glowMat(0x060c18, 0x1a3c6a, 0.5, { metalness: 0.45, roughness: 0.5 }),
-    )
-    base.position.set(cx, 0.26, cz)
-    base.castShadow = true
-    base.receiveShadow = true
-    this.group.add(base)
-
-    const slabGeo = new RoundedBoxGeometry(0.26, 0.38, 0.34, 1, 0.02)
-    for (let r = 0; r < 3; r++) {
-      for (let c = 0; c < 12; c++) {
-        const mat = glowMat(0x081426, 0x2c5fbf, 0.4)
-        const m = new THREE.Mesh(slabGeo, mat)
-        m.position.set(cx - 2.0 + c * 0.36, 0.66, cz - 0.55 + r * 0.55)
-        this.group.add(m)
-      }
-    }
-
-    const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(5.0, 1.0, 2.1),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    )
-    pick.position.set(cx, 0.5, cz)
-    this.group.add(pick)
-    this.register(pick, {
-      title: 'Heap: metrics (time series)',
-      body: 'Append-only measurements inserted in timestamp order. Because the physical order matches the sort key, ranges of pages hold narrow value ranges — exactly the assumption a BRIN index exploits.',
-      meta: 'heap · insert-only · naturally ordered',
-    })
-
-    const lab = label('METRICS')
-    lab.position.set(cx - 2.2, 0.9, cz + 1.45)
+    lab.position.set(cx - 1.3, 2.75 + RAM_LIFT, cz + 0.3)
     this.group.add(lab)
   }
 
   private buildBrin() {
     const cx = ANCHOR.brin.x
-    const cz = ANCHOR.brin.z
+    const cz = ANCHOR.brin.z + 2.55
     const slabGeo = new RoundedBoxGeometry(0.32, 0.42, 0.78, 2, 0.03)
     const dotGeo = new THREE.BoxGeometry(0.1, 0.1, 0.1)
 
     for (let i = 0; i < 8; i++) {
       const mat = glowMat(0x0c0a24, PALETTE.violet, 0.7)
       const m = new THREE.Mesh(slabGeo, mat)
-      m.position.set(cx - 2.1 + i * 0.6, 1.55, cz)
+      m.position.set(cx - 2.1 + i * 0.6, 0.34 + RAM_LIFT, cz)
       m.castShadow = true
       this.group.add(m)
       this.brinMats.push(mat)
 
       for (const dz of [-0.2, 0.2]) {
         const dot = new THREE.Mesh(dotGeo, mat)
-        dot.position.set(m.position.x, 1.82, cz + dz)
+        dot.position.set(m.position.x, 0.61 + RAM_LIFT, cz + dz)
         this.group.add(dot)
       }
     }
@@ -768,16 +1041,16 @@ export class PostgresInstance {
       new THREE.BoxGeometry(4.8, 0.9, 1.2),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(cx, 1.55, cz)
+    pick.position.set(cx, 0.55 + RAM_LIFT, cz)
     this.group.add(pick)
     this.register(pick, {
       title: 'BRIN — Block Range Index',
-      body: 'Stores only min/max per range of pages (default 128). It is a few kilobytes even for huge tables. Perfect when data is naturally ordered by the indexed column; useless when values are scattered, because every range then matches.',
-      meta: 'brin · min/max per 128 pages · tiny',
+      body: 'Stores only min/max per range of pages (default 128), so the whole index is a few kilobytes even for a huge heap. Floating here because the summary tuples are what lives in memory while a scan runs; it is a tiny file of its own on the plate below. Great when data is ordered by the indexed column, useless when values are scattered.',
+      meta: 'brin · min/max per 128 pages · tiny · summarised in RAM',
     })
 
     const lab = label('BRIN')
-    lab.position.set(cx + 0.1, 2.55, cz + 1.0)
+    lab.position.set(cx + 0.1, 1.35 + RAM_LIFT, cz + 0.85)
     this.group.add(lab)
   }
 
@@ -787,7 +1060,7 @@ export class PostgresInstance {
 
     const hubMat = glowMat(0x0a1a14, PALETTE.teal, 0.8, { metalness: 0.5 })
     const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.5, 16), hubMat)
-    hub.position.set(cx, 0.55, cz)
+    hub.position.set(cx, 0.35 + RAM_LIFT, cz)
     hub.castShadow = true
     this.group.add(hub)
     this.hashMats.push(hubMat)
@@ -797,7 +1070,7 @@ export class PostgresInstance {
       const a = (i / 8) * Math.PI * 2
       const mat = glowMat(0x081a16, PALETTE.teal, 0.5, { metalness: 0.55 })
       const b = new THREE.Mesh(bucketGeo, mat)
-      b.position.set(cx + Math.cos(a) * 1.12, 0.5, cz + Math.sin(a) * 1.12)
+      b.position.set(cx + Math.cos(a) * 1.12, 0.3 + RAM_LIFT, cz + Math.sin(a) * 1.12)
       b.castShadow = true
       this.group.add(b)
       this.hashMats.push(mat)
@@ -807,76 +1080,16 @@ export class PostgresInstance {
       new THREE.BoxGeometry(2.7, 1.0, 2.7),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(cx, 0.6, cz)
+    pick.position.set(cx, 0.45 + RAM_LIFT, cz)
     this.group.add(pick)
     this.register(pick, {
       title: 'Hash index',
-      body: 'Hashes the key into one of N buckets and stores TIDs there. Equality lookups only — no range scans, no ordering. Compact and cheap for exact matches on wide keys; not WAL-logged safely before PostgreSQL 10.',
+      body: 'Hashes the key into one of N buckets and stores TIDs there. Equality lookups only: no range scans, no ordering. Shown in memory: a lookup touches a single bucket page, and those pages sit in shared buffers while the index is being used.',
       meta: 'hash · 32-bit hash → bucket · equality only',
     })
 
     const lab = label('HASH')
-    lab.position.set(cx + 0.2, 1.55, cz + 1.7)
-    this.group.add(lab)
-  }
-
-  private buildDisks() {
-    const cx = ANCHOR.disk.x
-    const cz = ANCHOR.disk.z
-
-    const base = new THREE.Mesh(
-      new RoundedBoxGeometry(5.9, 0.34, 4.0, 3, 0.06),
-      glowMat(0x060c14, 0x123649, 0.3, { metalness: 0.6, roughness: 0.45 }),
-    )
-    base.position.set(cx, 0.28, cz)
-    base.castShadow = true
-    base.receiveShadow = true
-    this.group.add(base)
-
-    const baseEdge = neonEdges(new THREE.BoxGeometry(5.9, 0.34, 4.0), 0xffb03a, 0.4)
-    baseEdge.position.copy(base.position)
-    this.group.add(baseEdge)
-
-    const cols = 12
-    const rows = 8
-    const gx = 0.46
-    const gz = 0.44
-    const ox = cx - ((cols - 1) * gx) / 2
-    const oz = cz - ((rows - 1) * gz) / 2
-    const voxelGeo = new RoundedBoxGeometry(0.37, 0.32, 0.35, 1, 0.025)
-
-    for (let r = 0; r < rows; r++) {
-      for (let c = 0; c < cols; c++) {
-        const mat = glowMat(0x0a1620, 0xffb03a, 0.14 + Math.random() * 0.14, {
-          roughness: 0.5,
-          metalness: 0.35,
-        })
-        const m = new THREE.Mesh(voxelGeo, mat)
-        m.position.set(ox + c * gx, 0.45, oz + r * gz)
-        m.castShadow = true
-        m.receiveShadow = true
-        this.group.add(m)
-        this.diskMats.push(mat)
-
-        // a few blocks carry colour: written pages
-        if (Math.random() < 0.12) mat.emissiveIntensity = 0.6
-      }
-    }
-
-    const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(6.1, 0.9, 4.2),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    )
-    pick.position.set(cx, 0.5, cz)
-    this.group.add(pick)
-    this.register(pick, {
-      title: 'Disk — pages on persistent storage',
-      body: 'The ground level of the whole scene is disk. Every block is an 8 kB page file: heap pages, index pages and WAL segments all live down here. Pages arrive when the buffer pool evicts a dirty page at checkpoint, or when a read misses.',
-      meta: 'disk · 8 kB blocks · ~100 µs–10 ms / read',
-    })
-
-    const lab = label('DISK · PERSISTENT')
-    lab.position.set(cx - 2.5, 1.2, cz + 2.25)
+    lab.position.set(cx + 0.2, 1.35 + RAM_LIFT, cz + 1.7)
     this.group.add(lab)
   }
 
@@ -1153,7 +1366,7 @@ export class PostgresInstance {
 
   private makeScanner() {
     const beam = new THREE.Mesh(
-      new THREE.BoxGeometry(0.05, 0.05, 4.0),
+      new THREE.BoxGeometry(0.05, 0.05, PAGE_GRID.rows * PAGE_GRID.gz + 0.6),
       new THREE.MeshBasicMaterial({
         color: PALETTE.teal,
         transparent: true,
@@ -1161,7 +1374,7 @@ export class PostgresInstance {
         blending: THREE.AdditiveBlending,
       }),
     )
-    beam.position.set(ANCHOR.heap.x, 1.05, ANCHOR.heap.z + 2)
+    beam.position.set(pageX(0), 1.15, DISK_PLATE.cz)
     this.group.add(beam)
     return beam
   }
@@ -1180,7 +1393,7 @@ export class PostgresInstance {
     ring.rotation.x = Math.PI / 2
     drone.add(ring)
     drone.add(halo(0xc7ff5a, 2.4, 0.4))
-    drone.position.set(-8.5, 2.6, 5.4)
+    drone.position.set(-8.5, 2.9, DISK_PLATE.cz)
     const lab = label('AUTOVACUUM')
     lab.position.set(0.55, 0.35, 0)
     drone.add(lab)
@@ -1208,12 +1421,12 @@ export class PostgresInstance {
   async scanHeap(): Promise<number> {
     const beam = this.scanner
     beam.visible = true
-    const speed = 0.9
-    const from = ANCHOR.heap.z - 1.9
-    const to = ANCHOR.heap.z + 1.9
-    await this.ticker.add(speed, (k) => {
-      beam.position.z = from + (to - from) * k
-        ; (beam.material as THREE.MeshBasicMaterial).opacity = 0.15 + 0.5 * Math.sin(k * Math.PI)
+    const from = pageX(0) - 0.6
+    const to = pageX(PAGE_GRID.cols - 1) + 0.6
+    await this.ticker.add(1.1, (k) => {
+      beam.position.x = from + (to - from) * k
+        ; (beam.material as THREE.MeshBasicMaterial).opacity =
+          0.1 + 0.55 * Math.sin(k * Math.PI)
     })
     beam.visible = false
     return 0
@@ -1250,46 +1463,36 @@ export class PostgresInstance {
   }
 
   async vacuum(): Promise<number> {
-    const dead = this.tuples.filter((t) => t.dead)
+    const dead = this.tableBlocks.filter((p) => p.dead)
     if (dead.length === 0) return 0
     this.droneBusy = true
-    // drone flies to the heap
     const drone = this.vacuumDrone
-    const start = drone.position.clone()
-    const end = new THREE.Vector3(ANCHOR.heap.x - 3.4, 1.8, ANCHOR.heap.z + 2.2)
-    await this.ticker.add(0.9, (k) => {
-      drone.position.lerpVectors(start, end, k)
-      drone.position.y += Math.sin(k * Math.PI) * 1.2
-    })
 
-    for (const t of dead) {
-      const from = t.mesh.position.clone()
-      t.dead = false
-      void this.ticker.add(0.55, (k) => {
-        t.mesh.position.lerpVectors(from, end, k)
-        t.mesh.position.y += Math.sin(k * Math.PI) * 0.6
-        t.mesh.scale.setScalar(1 - 0.9 * k)
-        t.mat.emissiveIntensity = 1.6 * (1 - k)
-        t.mat.emissive.setHex(0xc7ff5a)
+    for (const p of dead) {
+      // the drone hovers over the page, scrubs it, and moves on
+      const over = p.home.clone().add(new THREE.Vector3(0, 2.2, 0))
+      const from = drone.position.clone()
+      await this.ticker.add(0.28, (k) => {
+        drone.position.lerpVectors(from, over, easeInOutCubic(k))
       })
-      await this.ticker.wait(0.06)
-    }
-    await this.ticker.wait(0.5)
-
-    for (const t of this.tuples) {
-      t.dead = false
-      t.mesh.position.copy(t.home)
-      t.mesh.scale.setScalar(1)
-      t.mat.emissive.setHex(PALETTE.teal)
-      t.mat.emissiveIntensity = 0.34
+      p.dead = false
+      this.paintBlock(p, p.color)
+      if (p.glow) {
+        const glow = p.glow
+        p.glow = null
+        void this.ticker.add(0.45, (k) => {
+          const mat = glow.material as THREE.MeshBasicMaterial
+          mat.opacity = 0.5 * (1 - k)
+          mat.color.setHex(0xc7ff5a)
+          glow.scale.setScalar(1 + 0.5 * k)
+        }).then(() => {
+          this.group.remove(glow)
+        })
+      }
+      await this.ticker.wait(0.1)
     }
     this.deadCount = 0
-
-    // drone returns to patrol
-    const back = drone.position.clone()
-    await this.ticker.add(1.0, (k) => {
-      drone.position.lerpVectors(back, start, k)
-    })
+    await this.ticker.wait(0.3)
     this.droneBusy = false
     return dead.length
   }
@@ -1297,12 +1500,15 @@ export class PostgresInstance {
   markDeadTuples(n: number): number {
     let made = 0
     for (let i = 0; i < n; i++) {
-      const live = this.tuples.filter((t) => !t.dead && t.mesh.scale.x > 0.99)
+      const live = this.tableBlocks.filter((p) => !p.dead)
       if (live.length === 0) break
-      const t = live[randInt(0, live.length - 1)]
-      t.dead = true
-      t.mat.emissive.setHex(0xff3ea5)
-      t.mat.emissiveIntensity = 0.55
+      const p = live[randInt(0, live.length - 1)]
+      p.dead = true
+      this.paintBlock(p, 0xff3ea5)
+      const glow = new THREE.Mesh(this.deadGeo, this.deadMat)
+      glow.position.copy(p.home).setY(p.home.y + 0.17)
+      this.group.add(glow)
+      p.glow = glow
       made++
     }
     this.deadCount += made
@@ -1335,14 +1541,50 @@ export class PostgresInstance {
   }
 
   flashDisk(_idx = -1) {
-    for (let k = 0; k < 9; k++) {
-      const mat = this.diskMats[randInt(0, this.diskMats.length - 1)]
-      if (!mat) continue
-      mat.emissiveIntensity = 2.4
-      void this.ticker.add(1.6, (t) => {
-        mat.emissiveIntensity = 2.4 - 1.9 * t
+    void this.ticker.add(0.9, (k) => {
+      this.diskFlash = 0.6 * Math.sin(k * Math.PI)
+    }).then(() => {
+      this.diskFlash = 0
+    })
+  }
+
+  /**
+   * A buffer miss: one block physically lifts out of the disk array, floats up
+   * toward the shared buffers and fades as the page lands in a buffer slot.
+   * The floating is the whole point — it is the block that is now in memory.
+   */
+  liftFromDisk(pageIdx: number) {
+    const free = this.pages8k.filter((b) => !b.busy)
+    if (free.length === 0) return
+    const block = free[randInt(0, free.length - 1)]
+    const page = this.pages[pageIdx]
+    block.busy = true
+    this.hideBlock(block)
+
+    const mesh = this.liftMesh
+    mesh.visible = true
+    mesh.position.copy(block.home)
+    mesh.rotation.set(0, 0, 0)
+    mesh.scale.setScalar(1)
+
+    const home = block.home.clone()
+    const target = page
+      ? page.mesh.position.clone().add(new THREE.Vector3(0, -0.55, 0))
+      : home.clone().add(new THREE.Vector3(0, 3, 0))
+
+    void this.ticker
+      .add(0.85, (k) => {
+        const e = easeInOutCubic(k)
+        mesh.position.lerpVectors(home, target, e)
+        mesh.position.y += Math.sin(e * Math.PI) * 1.1
+        mesh.rotation.y = e * 0.7
+        mesh.scale.setScalar(1 - 0.45 * Math.max(0, (e - 0.55) / 0.45))
       })
-    }
+      .then(() => {
+        mesh.visible = false
+        this.showBlock(block)
+        block.busy = false
+      })
   }
 
   get deadTuples() {
@@ -1350,7 +1592,7 @@ export class PostgresInstance {
   }
 
   walBlockPosition(i: number) {
-    return new THREE.Vector3(ANCHOR.wal.x, 0.85 + i * 0.42, ANCHOR.wal.z)
+    return new THREE.Vector3(ANCHOR.wal.x, WAL_BASE + i * 0.42, ANCHOR.wal.z)
   }
 
   get walFilledSegments() {
@@ -1368,14 +1610,14 @@ export class PostgresInstance {
     }
 
     // WAL head rides the fill level
-    const walTop = 0.85 + this.walFill * 6 * 0.42
+    const walTop = WAL_BASE + this.walFill * 6 * 0.42
     this.walHead.position.y += (walTop - this.walHead.position.y) * Math.min(1, dt * 3)
     this.walHead.rotation.y += dt * 2.2
 
     for (let i = 0; i < this.walMats.length; i++) {
       const on = i / this.walMats.length < this.walFill
       this.walMats[i].emissiveIntensity =
-        (on ? 0.62 : 0.03) + (on ? breathe(time, 1.4, i * 0.6) * 0.1 : 0)
+        (on ? 0.7 : 0.1) + (on ? breathe(time, 1.4, i * 0.6) * 0.12 : 0)
     }
 
     // pipeline nodes drift like slow satellites and breathe when they work
@@ -1448,16 +1690,27 @@ export class PostgresInstance {
     attr.needsUpdate = true
     this.haloRing.rotation.z += dt * 0.12
 
-    // dead tuple pulse
-    for (const t of this.tuples) {
-      if (t.dead) t.mat.emissiveIntensity = 0.4 + 0.35 * breathe(time, 3, t.home.x)
+    // dead pages pulse magenta until VACUUM rewrites them
+    for (const p of this.pages8k) {
+      if (p.dead && p.glow) {
+        const mat = p.glow.material as THREE.MeshBasicMaterial
+        mat.opacity = 0.22 + 0.3 * breathe(time, 3, p.col * 0.4 + p.row)
+      }
     }
 
-    // vacuum drone idle orbit
+    // the block field breathes very slowly so it does not look like a texture
+    const fieldMat = this.pageField.material as THREE.MeshStandardMaterial
+    fieldMat.emissiveIntensity = 0.14 + 0.05 * breathe(time, 0.6, 0) + this.diskFlash
+
+    // vacuum drone patrols the whole disk plate
     if (!this.droneBusy) {
       const a = time * 0.35
-      const target = new THREE.Vector3(-8.6 + Math.cos(a) * 0.9, 2.4 + Math.sin(time * 0.9) * 0.3, 5.5 + Math.sin(a) * 0.9)
-      this.vacuumDrone.position.lerp(target, Math.min(1, dt * 1.5))
+      const target = new THREE.Vector3(
+        Math.cos(a) * 8.6,
+        2.9 + Math.sin(time * 0.9) * 0.35,
+        DISK_PLATE.cz + Math.sin(a) * 3.1,
+      )
+      this.vacuumDrone.position.lerp(target, Math.min(1, dt * 1.2))
       this.vacuumDrone.rotation.y += dt * 0.8
     } else {
       this.vacuumDrone.rotation.y += dt * 2.4
@@ -1465,4 +1718,9 @@ export class PostgresInstance {
   }
 
   droneBusy = false
+  private diskFlash = 0
+  private tmpColor = new THREE.Color()
+  private tmpColorA = new THREE.Color()
+  private tmpColorB = new THREE.Color()
+  private dummy = new THREE.Object3D()
 }

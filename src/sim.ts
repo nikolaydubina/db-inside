@@ -124,7 +124,9 @@ export class EngineSim {
   }
 
   private async querySequence() {
-    const hit = Math.random() < (this.indexScan ? 0.9 : 0.78)
+    const kind: 'select' | 'insert' | 'delete' =
+      Math.random() < 0.22 ? 'insert' : Math.random() < 0.2 ? 'delete' : 'select'
+    const hit = kind === 'select' && Math.random() < (this.indexScan ? 0.9 : 0.78)
     this.queries++
 
     // pick a connection port on the top boundary — every query gets its own
@@ -202,7 +204,43 @@ export class EngineSim {
 
       let pageIdx = this.inst.pickBufferPage()
 
-      if (hit) {
+      if (kind === 'insert' || kind === 'delete') {
+        // a write: the executor goes straight at the heap pages of a table
+        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+          arrows: 3,
+          speed: 0.5,
+          opacity: 0.4,
+        })
+        await travel(this.ticker, packet, this.paths.exec, 0.4)
+        fExec.flash(0.75)
+
+        const touched =
+          kind === 'insert' ? this.inst.insertRows(randInt(1, 3)) : this.inst.deleteRows(randInt(1, 3))
+        const target = touched[0]
+        if (target) {
+          const to = target.home.clone().add(new THREE.Vector3(0, 0.5, 0))
+          const from = packet.position.clone()
+          const down = pathCurve([from, from.clone().lerp(to, 0.5).add(new THREE.Vector3(0, 1.4, 0)), to])
+          const fDown = chain.addCurve(
+            down,
+            kind === 'insert' ? 0xc7ff5a : PALETTE.magenta,
+            { arrows: 3, speed: 0.5, opacity: 0.45 },
+          )
+          await travel(this.ticker, packet, down, 0.55)
+          fDown.flash(0.85)
+        }
+        despawn(this.ticker, this.scene, packet, 0.2)
+
+        this.accesses++
+        this.hits += kind === 'insert' ? 0 : 0
+        this.lastLatency = rand(0.3, 1.4)
+        this.note =
+          kind === 'insert'
+            ? `insert · ${touched.length} heap page${touched.length === 1 ? '' : 's'} written, one may be brand new`
+            : `delete · ${touched.length} heap page${touched.length === 1 ? '' : 's'} marked dead`
+        this.walBytes += kind === 'insert' ? 384 : 320
+        if (kind === 'delete') this.inst.markDeadTuples(1)
+      } else if (hit) {
         const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
           arrows: 4,
           speed: 0.5,
@@ -253,6 +291,7 @@ export class EngineSim {
         this.flows.diskToBuffer.flash(0.8)
         const packetCore = packet.children[0] as THREE.Mesh
           ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
+        this.inst.liftFromDisk(pageIdx)
         await travel(this.ticker, packet, this.paths.diskToBuffer, 0.5)
         fUp.flash(0.8)
         pageIdx = this.inst.pickBufferPage()
