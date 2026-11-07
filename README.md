@@ -175,7 +175,8 @@ regressions show up immediately. Open the page with `?debug` to have telemetry o
   buffers (hit) or down to disk (miss), then rows rise back to the client.
 - **c** — checkpoint: dirty pages flushed, WAL fsynced.
 - **v** — vacuum: dead tuples reclaimed by the autovacuum drone.
-- **i** — toggle index scan vs sequential scan.
+- the access path is not a toggle: each statement arrives with its own plan, so point lookups are
+  answered from the index and range reads walk the heap, the way the planner would choose.
 - drag to orbit, scroll to zoom, hover to identify, click to pin an explanation in the inspector.
 - **double-click** anything — the camera flies to wherever that object is, frames it, and starts
   orbiting it. Double-click empty space to pull back to the whole instance. It keeps the current

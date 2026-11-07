@@ -70,12 +70,48 @@ const despawn = (ticker: Ticker, scene: THREE.Scene, obj: THREE.Object3D, dur = 
     .then(() => scene.remove(obj))
 }
 
+/**
+ * The statements the demo clients send. The access path is a property of the
+ * statement, not a setting: `WHERE id = $1` is a point lookup the planner
+ * answers from a b-tree, while a range or an unfiltered read has to walk the
+ * heap. Postgres picks between them from statistics, so the scene does too —
+ * there is nothing for a viewer to toggle.
+ */
+type Statement = {
+  sql: string
+  kind: 'select' | 'insert' | 'delete'
+  /** answered from an index instead of scanning the heap */
+  viaIndex: boolean
+  /** relative share of the traffic */
+  weight: number
+}
+
+const STATEMENTS: Statement[] = [
+  { sql: 'select … from users where id = $1', kind: 'select', viaIndex: true, weight: 3 },
+  { sql: 'select … from products where doc @> $1', kind: 'select', viaIndex: true, weight: 1.6 },
+  { sql: 'select … from metrics order by ts desc limit 20', kind: 'select', viaIndex: false, weight: 2 },
+  { sql: 'insert into metrics (…) values (…)', kind: 'insert', viaIndex: false, weight: 1.4 },
+  { sql: 'delete from users where id = $1', kind: 'delete', viaIndex: true, weight: 1 },
+]
+
+const STATEMENT_WEIGHT = STATEMENTS.reduce((n, s) => n + s.weight, 0)
+
+const pickStatement = (): Statement => {
+  let r = Math.random() * STATEMENT_WEIGHT
+  for (const s of STATEMENTS) {
+    r -= s.weight
+    if (r <= 0) return s
+  }
+  return STATEMENTS[0]
+}
+
 export class EngineSim {
   queries = 0
   accesses = 0
   hits = 0
   walBytes = 0
   live = 0
+  /** The statement in flight is answered from an index rather than the heap. */
   indexScan = false
   /** bytes already forced to disk since the run started */
   private flushedBytes = 0
@@ -157,21 +193,6 @@ export class EngineSim {
       checkpointing: this.checkpointing,
       vacuuming: this.vacuuming,
       compacting: this.compacting,
-    }
-  }
-
-  setIndexScan(on: boolean) {
-    this.indexScan = on
-    this.inst.indexScan = on
-    this.note = on
-      ? 'index scan · b-tree lookup on (user_id)'
-      : 'sequential scan · heap pages in order'
-    if (on) {
-      this.flows.indexToBuffer.setWeight(1.9)
-      this.flows.heapToBuffer.setWeight(0.5)
-    } else {
-      this.flows.indexToBuffer.setWeight(0.6)
-      this.flows.heapToBuffer.setWeight(1.1)
     }
   }
 
@@ -348,9 +369,14 @@ export class EngineSim {
   }
 
   private async querySequence(pod: BackendPod) {
-    const kind: 'select' | 'insert' | 'delete' =
-      Math.random() < 0.22 ? 'insert' : Math.random() < 0.2 ? 'delete' : 'select'
-    const hit = kind === 'select' && Math.random() < (this.indexScan ? 0.9 : 0.78)
+    const stmt = pickStatement()
+    const kind = stmt.kind
+    const hit = kind === 'select' && Math.random() < (stmt.viaIndex ? 0.9 : 0.78)
+    // what this statement needs decides which structures light up: the index
+    // glows for a point lookup, the heap pages for a sequential scan
+    this.indexScan = stmt.viaIndex
+    this.inst.indexScan = stmt.viaIndex
+    if (stmt.viaIndex) this.flows.indexToBuffer.flash(0.5)
     this.queries++
 
     const origin = pod.group.position.clone()
@@ -467,12 +493,11 @@ export class EngineSim {
         fExec.flash(0.8)
         this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
         this.lastArrowEnd = toPage.clone()
-        this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
+        this.note = `${stmt.viaIndex ? 'index scan' : 'seq scan'} · buffer hit, page already in RAM ≈ 0.1 ms`
         despawn(this.ticker, this.scene, packet, 0.22)
         this.hits++
         this.accesses++
         this.lastLatency = rand(0.04, 0.18)
-        this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
         this.walBytes += 128
       } else {
         // read path: buffer miss → disk → buffer. The slot the clock sweep is
@@ -539,7 +564,7 @@ export class EngineSim {
         despawn(this.ticker, this.scene, packet, 0.25)
         this.accesses++
         this.lastLatency = rand(0.4, 1.9)
-        this.note = 'buffer miss · page fetched from disk ≈ 1 ms'
+        this.note = `${stmt.viaIndex ? 'index scan' : 'seq scan'} · buffer miss, page fetched from disk ≈ 1 ms`
         this.walBytes += 256
         this.inst.markDeadTuples(1)
       }
@@ -770,10 +795,13 @@ export class EngineSim {
     if (this.scanTimer <= 0 && !this.scanning) {
       this.scanTimer = rand(6.5, 11)
       this.scanning = true
-      const flow = this.indexScan ? this.flows.indexToBuffer : this.flows.heapToBuffer
+      // ambient traffic alternates: some clients look things up by key, others
+      // read ranges — nothing external picks the plan
+      const viaIndex = Math.random() < 0.5
+      const flow = viaIndex ? this.flows.indexToBuffer : this.flows.heapToBuffer
       flow.flash(0.7)
-      if (this.indexScan && Math.random() < 0.5) this.flows.ginToBuffer.flash(0.6)
-      const run = this.indexScan ? this.inst.scanIndex() : this.inst.scanHeap()
+      if (viaIndex && Math.random() < 0.5) this.flows.ginToBuffer.flash(0.6)
+      const run = viaIndex ? this.inst.scanIndex() : this.inst.scanHeap()
       void run.then(() => {
         this.scanning = false
       })

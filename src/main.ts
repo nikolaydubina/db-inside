@@ -78,7 +78,6 @@ const hud = initHud({
   setSpeed: (v) => {
     speed = v
   },
-  setIndexScan: (on) => sim.setIndexScan(on),
   setOrbit: (on) => {
     autoOrbit = on
     world.controls.autoRotate = on && !flyMode

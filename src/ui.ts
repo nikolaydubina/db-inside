@@ -7,7 +7,6 @@ export interface HudHandlers {
   vacuum(): void
   compact(): void
   setSpeed(v: number): void
-  setIndexScan(on: boolean): void
   setOrbit(on: boolean): void
   setFly(on: boolean): void
   unpin(): void
@@ -28,7 +27,6 @@ export function initHud(handlers: HudHandlers) {
   const btnCompact = $<HTMLButtonElement>('#btn-compact')
   const speedIn = $<HTMLInputElement>('#speed')
   const speedVal = $<HTMLElement>('#speed-val')
-  const chkIndex = $<HTMLInputElement>('#chk-index')
   const chkOrbit = $<HTMLInputElement>('#chk-orbit')
   const chkFly = $<HTMLInputElement>('#chk-fly')
   const flyHint = $<HTMLElement>('#fly-hint')
@@ -103,7 +101,6 @@ export function initHud(handlers: HudHandlers) {
     speedVal.textContent = `${v}×`
     handlers.setSpeed(v)
   })
-  chkIndex.addEventListener('change', () => handlers.setIndexScan(chkIndex.checked))
   chkOrbit.addEventListener('change', () => handlers.setOrbit(chkOrbit.checked))
   chkFly.addEventListener('change', () => {
     flyHint.hidden = !chkFly.checked
@@ -122,9 +119,6 @@ export function initHud(handlers: HudHandlers) {
       handlers.vacuum()
     } else if (e.key === 'f') {
       handlers.compact()
-    } else if (e.key === 'i') {
-      chkIndex.checked = !chkIndex.checked
-      handlers.setIndexScan(chkIndex.checked)
     }
   })
 

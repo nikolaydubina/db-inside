@@ -323,7 +323,7 @@ export function floorLabel(
     ctx.font = font
     // Chrome supports per-context tracking; other engines just get plain text
     if ('letterSpacing' in ctx) {
-      ;(ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${tracking}px`
+      ; (ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${tracking}px`
     }
   }
 
@@ -388,12 +388,12 @@ export function floorLabel(
   const known = x1 >= 0
   mesh.userData.ink = known
     ? {
-        // canvas x runs left to right, canvas y runs down: flip y into plane space
-        x0: -worldW / 2 + (x0 / canvas.width) * worldW,
-        x1: -worldW / 2 + ((x1 + 1) / canvas.width) * worldW,
-        y0: worldH / 2 - ((y1 + 1) / canvas.height) * worldH,
-        y1: worldH / 2 - (y0 / canvas.height) * worldH,
-      }
+      // canvas x runs left to right, canvas y runs down: flip y into plane space
+      x0: -worldW / 2 + (x0 / canvas.width) * worldW,
+      x1: -worldW / 2 + ((x1 + 1) / canvas.width) * worldW,
+      y0: worldH / 2 - ((y1 + 1) / canvas.height) * worldH,
+      y1: worldH / 2 - (y0 / canvas.height) * worldH,
+    }
     : { x0: -worldW / 2, x1: worldW / 2, y0: -worldH / 2, y1: worldH / 2 }
   return mesh
 }

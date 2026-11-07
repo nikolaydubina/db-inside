@@ -96,7 +96,6 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
         if (stats.checkpointing) maintenance.push('checkpoint')
         if (stats.vacuuming) maintenance.push('vacuum')
         if (stats.compacting) maintenance.push('vacuum-full')
-        if (sim.indexScan) maintenance.push('index-scan')
 
         const tables: Record<string, TableStat> = {}
         for (const label of ['users', 'products', 'metrics']) tables[label] = tableStat(label)
