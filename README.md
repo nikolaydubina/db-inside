@@ -18,8 +18,9 @@ the roof; results stream back up.
 | visual | PostgreSQL concept |
 | --- | --- |
 | wireframe cage, labelled `POSTGRESQL PROCESS` | the running instance: postmaster, backends, shared memory |
-| four capsules on the left wall, `BACKENDS` | one backend **process** per connection (Postgres forks, it does not use a thread pool) |
-| capsules light up | a backend is busy serving a query |
+| glowing ports on the top rim, `BACKENDS · CONNECTIONS` | one backend **process** per client connection (Postgres forks, it does not use a thread pool). Ports appear and disappear as clients connect and disconnect |
+| a port lights up + vertical beam | that backend is busy serving a query |
+| one thin path per query | a query enters through a port, runs parser → planner → executor → buffers, and its result leaves through the **same** port; the path fades once the query is done |
 | `PARSER` → `PLANNER` → `EXECUTOR` orbs | parse tree, cost-based plan, volcano executor |
 | `SHARED BUFFERS · RAM` deck | `shared_buffers` — the RAM in the picture. 8 kB pages: cyan = cached, amber = dirty, green = just served a hit |
 | everything on the floor | disk — heaps, indexes and WAL all live in files down here |

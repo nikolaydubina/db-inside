@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { ANCHOR, PALETTE } from './instance'
+import { Ticker, easeInOutCubic } from './util'
 
 export interface Paths {
   sky: THREE.CatmullRomCurve3
@@ -22,6 +23,8 @@ export interface Paths {
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 const curve = (pts: THREE.Vector3[], tension = 0.35) =>
   new THREE.CatmullRomCurve3(pts, false, 'catmullrom', tension)
+
+export const pathCurve = (pts: THREE.Vector3[], tension = 0.35) => curve(pts, tension)
 
 export function makePaths(): Paths {
   const bufferTop = V(ANCHOR.bufferCenter.x, 6.15, ANCHOR.bufferCenter.z)
@@ -126,6 +129,7 @@ export class FlowLine {
   private t = Math.random()
   private baseOpacity: number
   private baseScale: number
+  private fade = 1
 
   constructor(points: THREE.Vector3[], color: number, opts: FlowOptions = {}) {
     this.curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35)
@@ -186,8 +190,21 @@ export class FlowLine {
       const s = 1 + b * 0.85
       m.scale.set(s, s, s)
     }
-    this.lineMat.opacity = this.baseOpacity * this.weight + b * 0.45
-    this.arrowMat.opacity = Math.min(1, 0.55 * this.weight + b * 0.5)
+    this.lineMat.opacity = (this.baseOpacity * this.weight + b * 0.45) * this.fade
+    this.arrowMat.opacity = Math.min(1, 0.55 * this.weight + b * 0.5) * this.fade
+  }
+
+  setFade(v: number) {
+    this.fade = v
+  }
+
+  dispose() {
+    this.group.traverse((o) => {
+      const mesh = o as THREE.Mesh
+      if (mesh.geometry) mesh.geometry.dispose()
+    })
+    this.lineMat.dispose()
+    this.arrowMat.dispose()
   }
 
   setWeight(w: number) {
@@ -196,16 +213,10 @@ export class FlowLine {
 }
 
 export interface FlowSet {
-  sky: FlowLine
-  parse: FlowLine
-  plan: FlowLine
-  exec: FlowLine
   execToWal: FlowLine
   walToDisk: FlowLine
   bufferToDisk: FlowLine
   diskToBuffer: FlowLine
-  bufferToResult: FlowLine
-  resultToSky: FlowLine
   heapToBuffer: FlowLine
   indexToBuffer: FlowLine
   ginToBuffer: FlowLine
@@ -219,20 +230,6 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
     return f
   }
 
-  const sky = add(paths.sky.getPoints(24), PALETTE.magenta, {
-    arrows: 3,
-    speed: 0.05,
-    opacity: 0.2,
-    size: 1.2,
-  })
-  const parse = add(paths.parse.getPoints(24), PALETTE.cyan, { arrows: 3, speed: 0.5, opacity: 0.55 })
-  const plan = add(paths.plan.getPoints(24), PALETTE.cyan, { arrows: 3, speed: 0.5, opacity: 0.55 })
-  const exec = add(paths.exec.getPoints(28), PALETTE.teal, {
-    arrows: 4,
-    speed: 0.35,
-    opacity: 0.45,
-    size: 1.15,
-  })
   const execToWal = add(paths.execToWal.getPoints(28), PALETTE.amber, {
     arrows: 3,
     speed: 0.4,
@@ -253,17 +250,6 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
     speed: 0.2,
     opacity: 0.14,
   })
-  const bufferToResult = add(paths.bufferToResult.getPoints(28), PALETTE.ice, {
-    arrows: 4,
-    speed: 0.36,
-    opacity: 0.42,
-    size: 1.1,
-  })
-  const resultToSky = add(paths.resultToSky.getPoints(24), PALETTE.teal, {
-    arrows: 3,
-    speed: 0.24,
-    opacity: 0.22,
-  })
   const heapToBuffer = add(paths.heapToBuffer.getPoints(24), PALETTE.teal, {
     arrows: 2,
     speed: 0.3,
@@ -281,35 +267,76 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
   })
 
   const all = [
-    sky,
-    parse,
-    plan,
-    exec,
     execToWal,
     walToDisk,
     bufferToDisk,
     diskToBuffer,
-    bufferToResult,
-    resultToSky,
     heapToBuffer,
     indexToBuffer,
     ginToBuffer,
   ]
 
   return {
-    sky,
-    parse,
-    plan,
-    exec,
     execToWal,
     walToDisk,
     bufferToDisk,
     diskToBuffer,
-    bufferToResult,
-    resultToSky,
     heapToBuffer,
     indexToBuffer,
     ginToBuffer,
     all,
+  }
+}
+
+/**
+ * The transient path of a single query: sky → connection port → parser → …
+ * → result → the same port → sky. It draws itself segment by segment and
+ * fades out once the query finishes.
+ */
+export class QueryChain {
+  readonly group = new THREE.Group()
+  private flows: FlowLine[] = []
+  disposed = false
+
+  constructor(private scene: THREE.Scene) {
+    scene.add(this.group)
+  }
+
+  add(points: THREE.Vector3[], color: number, opts: FlowOptions = {}) {
+    const f = new FlowLine(points, color, {
+      arrows: 4,
+      speed: 0.55,
+      opacity: 0.42,
+      size: 1.25,
+      ...opts,
+    })
+    this.flows.push(f)
+    this.group.add(f.group)
+    return f
+  }
+
+  addCurve(curve: THREE.CatmullRomCurve3, color: number, opts: FlowOptions = {}) {
+    return this.add(curve.getPoints(28), color, opts)
+  }
+
+  update(dt: number) {
+    for (const f of this.flows) f.update(dt)
+  }
+
+  fadeOut(ticker: Ticker, dur = 1.1) {
+    void ticker
+      .add(dur, (k) => {
+        const f = 1 - easeInOutCubic(k)
+        for (const fl of this.flows) fl.setFade(f)
+      })
+      .then(() => this.dispose())
+  }
+
+  dispose() {
+    if (this.disposed) return
+    this.disposed = true
+    for (const f of this.flows) f.dispose()
+    this.flows = []
+    this.scene.remove(this.group)
   }
 }

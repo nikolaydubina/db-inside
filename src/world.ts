@@ -30,7 +30,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   renderer.shadowMap.enabled = true
   renderer.shadowMap.type = THREE.PCFShadowMap
   renderer.toneMapping = THREE.ACESFilmicToneMapping
-  renderer.toneMappingExposure = 0.98
+  renderer.toneMappingExposure = 1.12
   renderer.outputColorSpace = THREE.SRGBColorSpace
   renderer.setClearColor(0x04070d, 1)
 
@@ -38,10 +38,10 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.fog = new THREE.FogExp2(0x061420, 0.0108)
 
   const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 400)
-  camera.position.set(34.2, 20.5, 37)
+  camera.position.set(32, 21.5, 38)
 
   const controls = new OrbitControls(camera, canvas)
-  controls.target.set(3.0, 6.2, 1.0)
+  controls.target.set(2.4, 6.8, 1.0)
   controls.enableDamping = true
   controls.dampingFactor = 0.055
   controls.minDistance = 12
@@ -265,9 +265,9 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   const renderPass = new RenderPass(scene, camera)
   const bloom = new UnrealBloomPass(
     new THREE.Vector2(window.innerWidth, window.innerHeight),
-    0.52,
-    0.5,
-    0.72,
+    0.68,
+    0.55,
+    0.62,
   )
   const output = new OutputPass()
   const composer = new EffectComposer(renderer)

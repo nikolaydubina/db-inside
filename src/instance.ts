@@ -44,6 +44,18 @@ export interface Tuple {
 
 export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
 
+export interface BackendPod {
+  id: number
+  group: THREE.Group
+  ring: THREE.MeshStandardMaterial
+  beam: THREE.MeshBasicMaterial
+  glow: THREE.SpriteMaterial
+  active: boolean
+  busy: boolean
+  index: number
+  pulse: number
+}
+
 export interface PipelineNode {
   group: THREE.Group
   core: THREE.MeshStandardMaterial
@@ -104,11 +116,8 @@ export class PostgresInstance {
   readonly hashMats: THREE.MeshStandardMaterial[] = []
   readonly eventsMats: THREE.MeshStandardMaterial[] = []
   readonly lockMats: THREE.MeshStandardMaterial[] = []
-  readonly backendPods: {
-    strip: THREE.MeshStandardMaterial
-    glow: THREE.SpriteMaterial
-  }[] = []
-  backendLoad = 0
+  /** One port per client connection, sitting on the top boundary of the box. */
+  readonly backends: BackendPod[] = []
   readonly walHead: THREE.Mesh
   readonly scanner: THREE.Mesh
   readonly vacuumDrone: THREE.Group
@@ -141,6 +150,11 @@ export class PostgresInstance {
     this.bufferFrame = this.group.children.find(
       (o) => o.userData.bufferFrame === true,
     ) as THREE.Mesh
+
+    // a few clients are already connected when the instance starts
+    this.openBackend()
+    this.openBackend()
+    this.openBackend()
   }
 
   /* --------------------------------- building ------------------------------- */
@@ -372,9 +386,9 @@ export class PostgresInstance {
     const z = ANCHOR.wal.z
     const segGeo = new RoundedBoxGeometry(0.85, 0.3, 0.85, 2, 0.04)
     for (let i = 0; i < 7; i++) {
-      const mat = glowMat(0x140d04, 0xff8f2a, 0.5, {
-        roughness: 0.55,
-        metalness: 0.1,
+      const mat = glowMat(0x140d04, 0x8a4a10, 0.62, {
+        roughness: 0.45,
+        metalness: 0.25,
       })
       const seg = new THREE.Mesh(segGeo, mat)
       seg.position.set(x, 0.85 + i * 0.42, z)
@@ -384,7 +398,7 @@ export class PostgresInstance {
       this.walSegments.push(seg)
       this.walMats.push(mat)
 
-      const seam = neonEdges(segGeo, 0xffb03a, 0.7)
+      const seam = neonEdges(segGeo, 0xffb03a, 0.85)
       seam.position.copy(seg.position)
       this.group.add(seam)
     }
@@ -838,9 +852,9 @@ export class PostgresInstance {
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const mat = glowMat(0x0a1620, 0xffb03a, 0.05 + Math.random() * 0.07, {
+        const mat = glowMat(0x0a1620, 0xffb03a, 0.14 + Math.random() * 0.14, {
           roughness: 0.5,
-          metalness: 0.4,
+          metalness: 0.35,
         })
         const m = new THREE.Mesh(voxelGeo, mat)
         m.position.set(ox + c * gx, 0.45, oz + r * gz)
@@ -850,7 +864,7 @@ export class PostgresInstance {
         this.diskMats.push(mat)
 
         // a few blocks carry colour: written pages
-        if (Math.random() < 0.12) mat.emissiveIntensity = 0.45
+        if (Math.random() < 0.12) mat.emissiveIntensity = 0.6
       }
     }
 
@@ -898,48 +912,144 @@ export class PostgresInstance {
   }
 
   private buildBackends() {
-    const bodyGeo = new THREE.CapsuleGeometry(0.17, 0.62, 4, 12)
-    for (let i = 0; i < 4; i++) {
-      const z = -4.7 + i * 2.55
-      const bodyMat = glowMat(0x07131c, 0x1a4d63, 0.3, { metalness: 0.55, roughness: 0.35 })
-      const body = new THREE.Mesh(bodyGeo, bodyMat)
-      body.position.set(-9.2, 4.35, z)
-      body.castShadow = true
-      this.group.add(body)
+    const slots = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
+    const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
+    const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
+    const beamGeo = new THREE.CylinderGeometry(0.026, 0.026, 3.2, 6)
+    const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
+    const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
 
-      const stripMat = new THREE.MeshStandardMaterial({
+    slots.forEach((x, i) => {
+      const g = new THREE.Group()
+      g.position.set(x, 10.0, 7.75)
+      g.visible = false
+      g.scale.setScalar(0.001)
+
+      const base = new THREE.Mesh(baseGeo, baseMat)
+      base.castShadow = true
+      g.add(base)
+
+      const ring = new THREE.MeshStandardMaterial({
         color: 0x0a1018,
         emissive: PALETTE.cyan,
-        emissiveIntensity: 0.28,
+        emissiveIntensity: 0.7,
         roughness: 0.3,
         metalness: 0.4,
       })
-      const strip = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.5, 0.05), stripMat)
-      strip.position.set(-9.03, 4.35, z)
-      this.group.add(strip)
+      const ringMesh = new THREE.Mesh(ringGeo, ring)
+      ringMesh.rotation.x = Math.PI / 2
+      ringMesh.position.y = 0.16
+      g.add(ringMesh)
 
-      const glow = halo(PALETTE.cyan, 1.9, 0)
-      glow.position.set(-9.2, 4.4, z)
-      this.group.add(glow)
+      const ledMat = new THREE.MeshStandardMaterial({
+        color: 0x0a1018,
+        emissive: PALETTE.cyan,
+        emissiveIntensity: 0.9,
+        roughness: 0.4,
+      })
+      const led = new THREE.Mesh(LEDGeo, ledMat)
+      led.position.y = 0.24
+      g.add(led)
 
-      this.backendPods.push({ strip: stripMat, glow: glow.material })
-    }
+      const beam = new THREE.MeshBasicMaterial({
+        color: PALETTE.cyan,
+        transparent: true,
+        opacity: 0,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+      })
+      const beamMesh = new THREE.Mesh(beamGeo, beam)
+      beamMesh.position.y = 1.75
+      g.add(beamMesh)
 
-    const lab = label('BACKENDS')
-    lab.position.set(-9.9, 5.45, 0.6)
+      const gl = halo(PALETTE.cyan, 2.4, 0)
+      gl.position.y = 0.3
+      g.add(gl)
+
+      this.group.add(g)
+      this.backends.push({
+        id: i,
+        group: g,
+        ring,
+        beam,
+        glow: gl.material,
+        active: false,
+        busy: false,
+        index: i,
+        pulse: 0,
+      })
+    })
+
+    const lab = label('BACKENDS · CONNECTIONS')
+    lab.position.set(-10.4, 11.3, 7.75)
     this.group.add(lab)
 
     const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(1.2, 1.6, 9.4),
+      new THREE.BoxGeometry(21.4, 1.8, 1.6),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(-9.2, 4.35, -1.0)
+    pick.position.set(0, 10.2, 7.75)
     this.group.add(pick)
     this.register(pick, {
-      title: 'Backend processes',
-      body: 'PostgreSQL forks one process per client connection — there is no shared thread pool. Each backend parses, plans and executes its own queries. Shared buffers and the WAL are the only state they share; background workers handle checkpoints, WAL flushing and vacuum.',
+      title: 'Backend processes (connections)',
+      body: 'PostgreSQL forks one process per client connection — there is no shared thread pool. Each port on the boundary is one live backend: a query enters here, runs the pipeline inside the box, and its result leaves through the same port. Ports appear and disappear as clients connect and disconnect.',
       meta: 'processes · one per connection · not threads',
     })
+  }
+
+  /* ---------------------------- backends lifecycle --------------------------- */
+
+  private findBackend(id: number) {
+    return this.backends.find((b) => b.id === id)
+  }
+
+  openBackend(): BackendPod | null {
+    const free = this.backends.find((b) => !b.active)
+    if (!free) return null
+    free.active = true
+    free.busy = false
+    return free
+  }
+
+  closeBackend(): boolean {
+    const idle = this.backends.filter((b) => b.active && !b.busy)
+    if (idle.length === 0) return false
+    const victim = idle[randInt(0, idle.length - 1)]
+    victim.active = false
+    victim.busy = false
+    return true
+  }
+
+  acquireBackend(): BackendPod | null {
+    let active = this.backends.filter((b) => b.active)
+    if (active.length === 0) {
+      const opened = this.openBackend()
+      if (!opened) return null
+      active = [opened]
+    }
+    const free = active.filter((b) => !b.busy)
+    const pod =
+      free.length > 0 ? free[randInt(0, free.length - 1)] : active[randInt(0, active.length - 1)]
+    pod.busy = true
+    return pod
+  }
+
+  releaseBackend(pod: BackendPod) {
+    const b = this.findBackend(pod.id)
+    if (b) b.busy = false
+  }
+
+  pulseBackend(pod: BackendPod) {
+    const b = this.findBackend(pod.id)
+    if (b) b.pulse = 1
+  }
+
+  get activeBackendCount() {
+    return this.backends.filter((b) => b.active).length
+  }
+
+  get busyBackendCount() {
+    return this.backends.filter((b) => b.active && b.busy).length
   }
 
   private buildPipeline(): Record<NodeName, PipelineNode> {
@@ -1291,14 +1401,24 @@ export class PostgresInstance {
       m.emissiveIntensity = 0.25 + 0.3 * breathe(time, 1.7, i)
     })
 
-    // backend process pods light up while they serve a query
-    for (let i = 0; i < this.backendPods.length; i++) {
-      const pod = this.backendPods[i]
-      const on = i < this.backendLoad
-      const target = on ? 2.3 : 0.28
-      pod.strip.emissiveIntensity += (target - pod.strip.emissiveIntensity) * Math.min(1, dt * 7)
-      const glowTarget = on ? 0.5 : 0
-      pod.glow.opacity += (glowTarget - pod.glow.opacity) * Math.min(1, dt * 6)
+    // backend connection ports: scale in/out, glow while busy
+    for (const b of this.backends) {
+      b.pulse = Math.max(0, b.pulse - dt * 2.2)
+      const target = b.active ? 1 : 0
+      const s = b.group.scale.x + (target - b.group.scale.x) * Math.min(1, dt * 7)
+      b.group.scale.setScalar(Math.max(0.001, s + b.pulse * 0.07))
+      b.group.visible = s > 0.02
+
+      if (b.busy) {
+        b.ring.emissiveIntensity = 2.2 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
+        b.beam.opacity = 0.3 + 0.14 * Math.sin(time * 8 + b.id)
+        b.glow.opacity = 0.45
+      } else {
+        b.ring.emissiveIntensity =
+          (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
+        b.beam.opacity = 0
+        b.glow.opacity = b.active ? 0.08 : 0
+      }
     }
 
     // index structures shimmer at different rhythms

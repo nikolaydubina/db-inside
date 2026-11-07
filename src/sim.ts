@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { ANCHOR, PALETTE, PostgresInstance } from './instance'
+import { QueryChain, pathCurve } from './flow'
 import type { FlowSet, Paths } from './flow'
 import {
   Ticker,
@@ -19,8 +20,8 @@ export interface SimStats {
   walBytes: number
   dead: number
   note: string
-  activeBackends: number
-  backendCapacity: number
+  connections: number
+  busyBackends: number
   checkpointing: boolean
   vacuuming: boolean
 }
@@ -65,9 +66,11 @@ export class EngineSim {
   private deadTimer = 2.5
   private scanTimer = 5
   private pageTimer = 0.6
+  private connTimer = 3.5
   private checkpointing = false
   private vacuuming = false
   private scanning = false
+  private chains: QueryChain[] = []
 
   constructor(
     private inst: PostgresInstance,
@@ -86,8 +89,8 @@ export class EngineSim {
       walBytes: this.walBytes,
       dead: this.inst.deadTuples,
       note: this.note,
-      activeBackends: this.live,
-      backendCapacity: 4,
+      connections: this.inst.activeBackendCount,
+      busyBackends: this.inst.busyBackendCount,
       checkpointing: this.checkpointing,
       vacuuming: this.vacuuming,
     }
@@ -111,12 +114,10 @@ export class EngineSim {
   async runQuery() {
     if (this.live >= 3) return
     this.live++
-    this.inst.backendLoad = this.live
     try {
       await this.querySequence()
     } finally {
       this.live--
-      this.inst.backendLoad = this.live
     }
   }
 
@@ -124,90 +125,196 @@ export class EngineSim {
     const hit = Math.random() < (this.indexScan ? 0.9 : 0.78)
     this.queries++
 
+    // pick a connection port on the top boundary — every query gets its own
+    const pod = this.inst.acquireBackend()
+    if (!pod) return
+    const origin = pod.group.position.clone()
+    const chain = new QueryChain(this.scene)
+    this.chains.push(chain)
+
     const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
-    packet.position.copy(ANCHOR.sky)
-    this.flows.sky.flash(0.6)
+    packet.position.set(origin.x, 27.5, origin.z)
 
-    await travel(this.ticker, packet, this.paths.sky, 0.85, easeInQuad)
-    this.inst.pulseNode('parse', 0.8)
-    this.flows.parse.flash(0.8)
-    await this.ticker.wait(0.06)
-
-    await travel(this.ticker, packet, this.paths.parse, 0.4)
-    this.inst.pulseNode('plan', 0.9)
-    this.flows.plan.flash(0.8)
-    await this.ticker.wait(0.1)
-
-    await travel(this.ticker, packet, this.paths.plan, 0.4)
-    this.inst.pulseNode('exec', 1)
-    this.flows.exec.flash(1)
-
-    // WAL append happens regardless of read/write
-    const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
-    walPack.position.copy(ANCHOR.exec)
-    void travel(this.ticker, walPack, this.paths.execToWal, 0.62).then(() => {
-      this.inst.walFill = Math.min(1, this.inst.walFill + 0.09)
-      despawn(this.ticker, this.scene, walPack, 0.22)
-    })
-    this.flows.execToWal.flash(0.7)
-
-    let pageIdx = this.inst.pickBufferPage()
-
-    if (hit) {
-      await travel(this.ticker, packet, this.paths.exec, 0.5)
-      const page = this.inst.pages[pageIdx]
-      const from = packet.position.clone()
-      const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
-      await this.ticker.add(0.18, (k) => {
-        packet.position.lerpVectors(from, to, easeOutCubic(k))
+    try {
+      // 1. client packet falls into its connection port
+      const inbound = pathCurve([
+        new THREE.Vector3(origin.x, 27.5, origin.z),
+        new THREE.Vector3(origin.x, 18, origin.z + 0.9),
+        new THREE.Vector3(origin.x, 12.4, origin.z + 0.35),
+        new THREE.Vector3(origin.x, 10.35, origin.z),
+      ])
+      const fIn = chain.addCurve(inbound, PALETTE.magenta, {
+        arrows: 3,
+        speed: 0.7,
+        opacity: 0.32,
       })
-      this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
-      despawn(this.ticker, this.scene, packet, 0.22)
-      this.hits++
-      this.accesses++
-      this.lastLatency = rand(0.04, 0.18)
-      this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
-      this.walBytes += 128
-    } else {
-      // read path: buffer miss → disk → buffer
-      await travel(this.ticker, packet, this.paths.exec, 0.35)
-      this.flows.bufferToDisk.flash(1.2)
-      this.flows.diskToBuffer.flash(0.8)
-      await travel(this.ticker, packet, this.paths.bufferToDisk, 0.42, easeInOutCubic)
-      this.inst.flashDisk()
-      this.inst.flashDisk(randInt(0, 2))
-      await this.ticker.wait(0.14)
-      const packetCore = packet.children[0] as THREE.Mesh
-        ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
-      await travel(this.ticker, packet, this.paths.diskToBuffer, 0.5)
-      pageIdx = this.inst.pickBufferPage()
-      const page = this.inst.pages[pageIdx]
-      const from = packet.position.clone()
-      const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
-      await this.ticker.add(0.2, (k) => {
-        packet.position.lerpVectors(from, to, easeOutCubic(k))
+      await travel(this.ticker, packet, inbound, 0.95, easeInQuad)
+      fIn.flash(0.9)
+      this.inst.pulseBackend(pod)
+
+      // 2. backend hands the query to the parser, through the roof
+      const toParse = pathCurve([
+        new THREE.Vector3(origin.x, 10.2, origin.z - 0.2),
+        new THREE.Vector3(origin.x * 0.9, 8.6, 4.6),
+        new THREE.Vector3(ANCHOR.parse.x + 2.8, 7.5, 0.6),
+        ANCHOR.parse.clone(),
+      ])
+      const fToParse = chain.addCurve(toParse, PALETTE.cyan, {
+        arrows: 3,
+        speed: 0.55,
+        opacity: 0.36,
       })
-      this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
-      void this.ticker.add(0.7, (k) => {
-        page.base.lerpColors(new THREE.Color(PALETTE.amber), new THREE.Color(PALETTE.cyan), k)
+      await travel(this.ticker, packet, toParse, 0.5)
+      this.inst.pulseNode('parse', 0.8)
+      fToParse.flash(0.8)
+
+      // 3. parser → planner
+      const fParse = chain.addCurve(this.paths.parse, PALETTE.cyan, {
+        arrows: 3,
+        speed: 0.55,
+        opacity: 0.4,
       })
-      despawn(this.ticker, this.scene, packet, 0.25)
-      this.accesses++
-      this.lastLatency = rand(0.4, 1.9)
-      this.note = 'buffer miss · page fetched from disk ≈ 1 ms'
-      this.walBytes += 256
-      this.inst.markDeadTuples(1)
+      await travel(this.ticker, packet, this.paths.parse, 0.4)
+      this.inst.pulseNode('plan', 0.9)
+      fParse.flash(0.8)
+      await this.ticker.wait(0.08)
+
+      // 4. planner → executor
+      const fPlan = chain.addCurve(this.paths.plan, PALETTE.cyan, {
+        arrows: 3,
+        speed: 0.55,
+        opacity: 0.4,
+      })
+      await travel(this.ticker, packet, this.paths.plan, 0.4)
+      this.inst.pulseNode('exec', 1)
+      fPlan.flash(0.8)
+
+      // WAL append happens regardless of read/write
+      const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
+      walPack.position.copy(ANCHOR.exec)
+      void travel(this.ticker, walPack, this.paths.execToWal, 0.62).then(() => {
+        this.inst.walFill = Math.min(1, this.inst.walFill + 0.09)
+        despawn(this.ticker, this.scene, walPack, 0.22)
+      })
+      this.flows.execToWal.flash(0.7)
+
+      let pageIdx = this.inst.pickBufferPage()
+
+      if (hit) {
+        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+          arrows: 4,
+          speed: 0.5,
+          opacity: 0.44,
+        })
+        await travel(this.ticker, packet, this.paths.exec, 0.5)
+        fExec.flash(0.8)
+        const page = this.inst.pages[pageIdx]
+        const from = packet.position.clone()
+        const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
+        await this.ticker.add(0.18, (k) => {
+          packet.position.lerpVectors(from, to, easeOutCubic(k))
+        })
+        this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
+        despawn(this.ticker, this.scene, packet, 0.22)
+        this.hits++
+        this.accesses++
+        this.lastLatency = rand(0.04, 0.18)
+        this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
+        this.walBytes += 128
+      } else {
+        // read path: buffer miss → disk → buffer
+        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+          arrows: 3,
+          speed: 0.5,
+          opacity: 0.4,
+        })
+        await travel(this.ticker, packet, this.paths.exec, 0.35)
+        fExec.flash(0.7)
+
+        const fDown = chain.addCurve(this.paths.bufferToDisk, PALETTE.amber, {
+          arrows: 3,
+          speed: 0.5,
+          opacity: 0.42,
+        })
+        this.flows.bufferToDisk.flash(1.2)
+        await travel(this.ticker, packet, this.paths.bufferToDisk, 0.42, easeInOutCubic)
+        fDown.flash(0.9)
+        this.inst.flashDisk()
+        this.inst.flashDisk(randInt(0, 2))
+        await this.ticker.wait(0.14)
+
+        const fUp = chain.addCurve(this.paths.diskToBuffer, PALETTE.amber, {
+          arrows: 3,
+          speed: 0.5,
+          opacity: 0.42,
+        })
+        this.flows.diskToBuffer.flash(0.8)
+        const packetCore = packet.children[0] as THREE.Mesh
+        ;(packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
+        await travel(this.ticker, packet, this.paths.diskToBuffer, 0.5)
+        fUp.flash(0.8)
+        pageIdx = this.inst.pickBufferPage()
+        const page = this.inst.pages[pageIdx]
+        const from = packet.position.clone()
+        const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
+        await this.ticker.add(0.2, (k) => {
+          packet.position.lerpVectors(from, to, easeOutCubic(k))
+        })
+        this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
+        void this.ticker.add(0.7, (k) => {
+          page.base.lerpColors(new THREE.Color(PALETTE.amber), new THREE.Color(PALETTE.cyan), k)
+        })
+        despawn(this.ticker, this.scene, packet, 0.25)
+        this.accesses++
+        this.lastLatency = rand(0.4, 1.9)
+        this.note = 'buffer miss · page fetched from disk ≈ 1 ms'
+        this.walBytes += 256
+        this.inst.markDeadTuples(1)
+      }
+
+      // 5. rows → result node
+      const rows = makePacket(PALETTE.teal, 0.3, this.scene)
+      rows.position.copy(this.paths.bufferTop)
+      const fRows = chain.addCurve(this.paths.bufferToResult, PALETTE.ice, {
+        arrows: 4,
+        speed: 0.55,
+        opacity: 0.46,
+      })
+      await travel(this.ticker, rows, this.paths.bufferToResult, 0.6)
+      this.inst.pulseNode('result', 0.8)
+      fRows.flash(0.8)
+
+      // 6. result goes back out through the same connection
+      const toPort = pathCurve([
+        ANCHOR.result.clone(),
+        new THREE.Vector3(ANCHOR.result.x + 0.5, 7.9, 0.2),
+        new THREE.Vector3(origin.x * 0.95, 9.2, origin.z - 2.0),
+        new THREE.Vector3(origin.x, 10.3, origin.z - 0.3),
+      ])
+      const fBack = chain.addCurve(toPort, PALETTE.teal, {
+        arrows: 3,
+        speed: 0.55,
+        opacity: 0.4,
+      })
+      await travel(this.ticker, rows, toPort, 0.7)
+      this.inst.pulseBackend(pod)
+      fBack.flash(0.9)
+      despawn(this.ticker, this.scene, rows, 0.2)
+
+      // 7. answer leaves to the client
+      const outbound = pathCurve([
+        new THREE.Vector3(origin.x, 10.45, origin.z),
+        new THREE.Vector3(origin.x, 17, origin.z),
+        new THREE.Vector3(origin.x, 26.5, origin.z),
+      ])
+      chain.addCurve(outbound, PALETTE.teal, { arrows: 3, speed: 0.7, opacity: 0.3 })
+      const out = makePacket(PALETTE.teal, 0.26, this.scene)
+      await travel(this.ticker, out, outbound, 0.8, easeOutCubic)
+      despawn(this.ticker, this.scene, out, 0.3)
+    } finally {
+      this.inst.releaseBackend(pod)
+      chain.fadeOut(this.ticker, 1.25)
     }
-
-    // rows travel back to the client
-    const rows = makePacket(PALETTE.teal, 0.3, this.scene)
-    rows.position.copy(this.paths.bufferTop)
-    this.flows.bufferToResult.flash(0.9)
-    await travel(this.ticker, rows, this.paths.bufferToResult, 0.62)
-    this.inst.pulseNode('result', 0.8)
-    this.flows.resultToSky.flash(0.7)
-    await travel(this.ticker, rows, this.paths.resultToSky, 0.8, easeOutCubic)
-    despawn(this.ticker, this.scene, rows, 0.3)
   }
 
   async checkpoint() {
@@ -270,7 +377,23 @@ export class EngineSim {
   update(dt: number) {
     for (const f of this.flows.all) f.update(dt)
 
+    // per-query paths: animate, then drop the finished ones
+    this.chains = this.chains.filter((c) => {
+      c.update(dt)
+      return !c.disposed
+    })
+
     this.inst.update(dt, performance.now() * 0.001)
+
+    // clients connect and disconnect
+    this.connTimer -= dt
+    if (this.connTimer <= 0) {
+      this.connTimer = rand(3.5, 8.5)
+      const active = this.inst.activeBackendCount
+      if (active < 2) this.inst.openBackend()
+      else if (active < 6 && Math.random() < 0.6) this.inst.openBackend()
+      else if (active > 2) this.inst.closeBackend()
+    }
 
     // ambient MVCC churn
     this.deadTimer -= dt

@@ -84,8 +84,8 @@ export function initHud(handlers: HudHandlers) {
       stBar.style.width = `${Math.min(100, s.hitRate)}%`
       addNote(stNote, s.note)
 
-      setText(prBe, `${s.activeBackends} / ${s.backendCapacity}`)
-      prBeDot.classList.toggle('on', s.activeBackends > 0)
+      setText(prBe, `${s.busyBackends} / ${s.connections}`)
+      prBeDot.classList.toggle('on', s.busyBackends > 0)
       setText(prCk, s.checkpointing ? 'flushing' : 'idle')
       prCkDot.classList.toggle('on', s.checkpointing)
       setText(prWl, s.walBytes > 0 ? 'streaming' : 'idle')
