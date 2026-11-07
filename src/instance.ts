@@ -34,6 +34,8 @@ export interface Page {
   row: number
   col: number
   dirty: boolean
+  /** How packed the page is with live tuples, 0..1 — same meaning as on disk. */
+  fill: number
 }
 
 export interface Tuple {
@@ -112,6 +114,13 @@ export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0
  */
 const WAL_ROW = 16
 const WAL_BUF_LEN = 4
+
+/* shared_buffers sits on the same 0.5 lattice as the disk, floating above it */
+const BUFFER_COLS = 12
+const BUFFER_ROWS = 6
+const BUFFER_Y = 5.35
+const bufferSlotX = (c: number) => -3.75 + c * PAGE_GRID.gx
+const bufferSlotZ = (r: number) => -2.75 + r * PAGE_GRID.gz
 /** Leftmost slot of the run — the free space it grows into sits just below. */
 const WAL_C0 = 10
 const WAL_LEN = 12
@@ -126,6 +135,10 @@ const BLOCK_FREE = 0x6b4a1c
 /** Page fill ramp: empty slot → packed page. */
 const FILL_DARK = 0x0e0a04
 const FILL_BRIGHT = 0xd28f2c
+/** Same idea for the page copies in RAM: dim = sparse, bright = packed. */
+const BUF_DARK = 0x081a24
+const BUF_FILL_DARK = new THREE.Color(0x081a24)
+const BUF_FILL_BRIGHT = new THREE.Color(0x9fe8ff)
 
 interface TableRegion {
   anchor: 'heap' | 'events' | 'metrics'
@@ -193,7 +206,7 @@ export const ANCHOR = {
   plan: V(-4.4, 6.85, -2.4),
   exec: V(1.6, 6.85, -2.4),
   result: V(8.2, 6.6, -1.8),
-  bufferCenter: V(-1.0, 5.5, -1.4),
+  bufferCenter: V(-1.0, 5.35, -1.5),
   wal: V(-4.0, 0.55, 7.25),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
@@ -248,13 +261,27 @@ export class PostgresInstance {
   pageField!: THREE.InstancedMesh
   /** Reusable block mesh used while a page is being read up into RAM. */
   private liftMesh!: THREE.Mesh
+  /** Pool corners for attaching labels to the actual block grid. */
+  bufferCorners!: {
+    nearLeft: THREE.Vector3
+    nearRight: THREE.Vector3
+    farLeft: THREE.Vector3
+    farRight: THREE.Vector3
+  }
+  /** The one geometry every 8 kB block in the scene uses. */
+  readonly pageBlockGeo = new RoundedBoxGeometry(
+    PAGE_GRID.bw,
+    PAGE_GRID.bh,
+    PAGE_GRID.bd,
+    1,
+    0.02,
+  )
   private markGeo!: THREE.TorusGeometry
   private markMat!: THREE.MeshBasicMaterial
   /** One port per client connection, sitting on the top boundary of the box. */
   readonly backends: BackendPod[] = []
   readonly scanner: THREE.Mesh
   readonly vacuumDrone: THREE.Group
-  readonly bufferFrame: THREE.Mesh
   motes!: THREE.Points
   haloRing!: THREE.Mesh
 
@@ -277,9 +304,6 @@ export class PostgresInstance {
     this.nodes = this.buildPipeline()
     this.scanner = this.makeScanner()
     this.vacuumDrone = this.makeVacuumDrone()
-    this.bufferFrame = this.group.children.find(
-      (o) => o.userData.bufferFrame === true,
-    ) as THREE.Mesh
 
     // a few clients are already connected when the instance starts
     this.openBackend()
@@ -474,62 +498,37 @@ export class PostgresInstance {
     })
   }
 
+  /**
+   * shared_buffers: the same 8 kB page blocks as the disk, but floating in RAM.
+   * Same size, same shape, same lattice alignment — nothing is bolted down.
+   */
   private buildBufferPool() {
-    const frameW = 11.4
-    const frameD = 4.3
-    const frame = new THREE.Mesh(
-      new RoundedBoxGeometry(frameW, 0.26, frameD, 2, 0.06),
-      glowMat(0x071420, 0x1f6f8c, 0.38, { metalness: 0.3, roughness: 0.55 }),
-    )
-    frame.position.set(ANCHOR.bufferCenter.x, 5.06, ANCHOR.bufferCenter.z)
-    frame.castShadow = true
-    frame.receiveShadow = true
-    frame.userData.bufferFrame = true
-    this.group.add(frame)
-    this.register(frame, {
-      title: 'Shared buffers',
-      body: 'The only RAM in the picture: a page cache every backend shares. Reads and writes hit 8 kB page copies here first; a miss pulls the page up from disk and evicts another one with the clock-sweep algorithm. The table itself never moves — only copies do.',
-      meta: 'shared_buffers · RAM · 8 kB pages · clock sweep',
-    })
+    const cols = BUFFER_COLS
+    const rows = BUFFER_ROWS
 
-    const frameEdge = neonEdges(new THREE.BoxGeometry(frameW, 0.26, frameD), 0x35e0ff, 0.5)
-    frameEdge.position.copy(frame.position)
-    this.group.add(frameEdge)
-
-    // the pool floats — RAM is not bolted to the floor. A soft ring underneath
-    // makes the levitation legible instead of accidental.
-    const levitation = new THREE.Mesh(
-      new THREE.TorusGeometry(5.6, 0.05, 6, 128),
-      new THREE.MeshBasicMaterial({
-        color: 0x35e0ff,
-        transparent: true,
-        opacity: 0.35,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    )
-    levitation.rotation.x = Math.PI / 2
-    levitation.position.set(ANCHOR.bufferCenter.x, 4.72, ANCHOR.bufferCenter.z)
-    levitation.scale.set(1, 0.48, 1)
-    this.group.add(levitation)
-
-    const cols = 8
-    const rows = 4
-    const gapX = 1.3
-    const gapZ = 0.93
-    const originX = ANCHOR.bufferCenter.x - ((cols - 1) * gapX) / 2
-    const originZ = ANCHOR.bufferCenter.z - ((rows - 1) * gapZ) / 2
-    const pageGeo = new RoundedBoxGeometry(1.08, 0.12, 0.64, 2, 0.03)
+    // corners of the floating grid, handy for labels and camera framing
+    const corner = (col: number, row: number) =>
+      new THREE.Vector3(
+        bufferSlotX(col) + Math.sign(col === 0 ? -1 : 1) * PAGE_GRID.bw * 0.5,
+        BUFFER_Y + PAGE_GRID.bh * 0.5,
+        bufferSlotZ(row) + (row === 0 ? -1 : 1) * PAGE_GRID.bd * 0.5,
+      )
+    this.bufferCorners = {
+      nearLeft: corner(0, rows - 1),
+      nearRight: corner(cols - 1, rows - 1),
+      farLeft: corner(0, 0),
+      farRight: corner(cols - 1, 0),
+    }
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
-        const mat = glowMat(0x0b2230, PALETTE.cyan, 0.22, { metalness: 0.5, roughness: 0.35 })
-        const mesh = new THREE.Mesh(pageGeo, mat)
-        mesh.position.set(originX + c * gapX, 5.28, originZ + r * gapZ)
-        mesh.castShadow = true
-        mesh.receiveShadow = true
+        const mat = glowMat(BUF_DARK, PALETTE.cyan, 0.22, { metalness: 0.5, roughness: 0.35 })
+        const mesh = new THREE.Mesh(this.pageBlockGeo, mat)
+        mesh.castShadow = false
+        mesh.receiveShadow = false
         this.group.add(mesh)
-        this.pages.push({
+        const fill = rand(0.18, 1)
+        const page: Page = {
           mesh,
           mat,
           base: new THREE.Color(PALETTE.cyan),
@@ -537,22 +536,60 @@ export class PostgresInstance {
           row: r,
           col: c,
           dirty: false,
-        })
+          fill,
+        }
+        this.pages.push(page)
+        this.setBufferFill(page, fill)
       }
     }
 
     // invisible pick volume over the whole pool
+    const w = cols * PAGE_GRID.gx
+    const d = rows * PAGE_GRID.gz
     const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(cols * gapX, 0.9, rows * gapZ),
+      new THREE.BoxGeometry(w, 0.8, d),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(ANCHOR.bufferCenter.x, 5.35, ANCHOR.bufferCenter.z)
+    pick.position.set(ANCHOR.bufferCenter.x, BUFFER_Y, ANCHOR.bufferCenter.z)
     this.group.add(pick)
     this.register(pick, {
-      title: 'Shared buffer pages',
-      body: 'Each tile is one 8 kB page of a table or index. Cyan means cached and clean, amber means dirty (changed, waiting to be written), green means a hit just served a query.',
-      meta: '40 pages · ~320 kB shown',
+      title: 'Shared buffers',
+      body: 'The page cache every backend shares. Each block is one buffer slot holding a full 8 kB page — identical to a page on disk. The slot is always 8 kB; what varies is how packed the page inside is, and that is what brightness and height show. Lifecycle: a miss picks a victim with the clock sweep (usage_count 0), writes it back if it is dirty, then reads the new page in. The slot itself never moves — only which page lives in it changes. Hue is state: cyan = cached and clean, amber = dirty (waiting to be written), green = just served a hit.',
+      meta: 'shared_buffers · RAM · 8 kB pages · clock sweep',
     })
+  }
+
+  /** Colour + height of one buffer page, driven by how packed it is. */
+  private setBufferFill(page: Page, fill: number) {
+    page.fill = Math.max(0, Math.min(1, fill))
+    page.mat.color.copy(BUF_FILL_DARK).lerp(BUF_FILL_BRIGHT, page.fill)
+    const h = 0.5 + 0.5 * page.fill
+    page.mesh.scale.y = h
+    // keep the slot pinned to the lattice; only its height changes
+    page.mesh.position.set(
+      bufferSlotX(page.col),
+      BUFFER_Y - PAGE_GRID.bh * (1 - h) * 0.5,
+      bufferSlotZ(page.row),
+    )
+  }
+
+  /** Public hook: a page landed in this slot (its fill comes from the disk copy). */
+  setPageFill(idx: number, fill: number) {
+    const p = this.pages[idx]
+    if (p) this.setBufferFill(p, fill)
+  }
+
+  /**
+   * A miss evicts the current occupant of the slot (clock sweep) and reads a new
+   * page into it. Layout never moves — only which page lives in the slot.
+   */
+  async swapBufferPage(idx: number, fill: number) {
+    const p = this.pages[idx]
+    if (!p) return
+    const from = p.fill
+    await this.ticker.add(0.16, (k) => this.setBufferFill(p, from * (1 - k)))
+    const to = fill
+    await this.ticker.add(0.2, (k) => this.setBufferFill(p, to * k))
   }
 
   /**

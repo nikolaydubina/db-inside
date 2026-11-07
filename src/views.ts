@@ -79,7 +79,8 @@ export const VIEWS: ViewDef[] = [
         label: 'buffers',
         entity: 'shared buffers',
         hint: 'the RAM deck: page tiles, dirty pages, buffer hits',
-        pose: () => shot(ANCHOR.bufferCenter, [1.0, 6.0, 9.5], 34),
+        // steeper than before: at a shallow angle the buffers merge into ridges
+        pose: () => shot(ANCHOR.bufferCenter, [0.8, 9.2, 5.8], 36),
     },
     {
         id: 'pipeline',

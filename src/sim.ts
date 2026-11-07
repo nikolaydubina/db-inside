@@ -272,6 +272,7 @@ export class EngineSim {
           packet.position.lerpVectors(from, to, easeOutCubic(k))
         })
         this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
+        this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
         despawn(this.ticker, this.scene, packet, 0.22)
         this.hits++
         this.accesses++
@@ -337,6 +338,8 @@ export class EngineSim {
           packet.position.lerpVectors(from, to, easeOutCubic(k))
         })
         this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
+        // the copy that arrives carries the density of the page it came from
+        void this.inst.swapBufferPage(pageIdx, target ? target.fill : 0.5)
         void this.ticker.add(0.7, (k) => {
           page.base.lerpColors(new THREE.Color(PALETTE.amber), new THREE.Color(PALETTE.cyan), k)
         })

@@ -1,7 +1,7 @@
 import './style.css'
 import * as THREE from 'three'
 import { createWorld } from './world'
-import { ANCHOR, PostgresInstance } from './instance'
+import { PostgresInstance } from './instance'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
@@ -21,7 +21,8 @@ scene.add(instance.group)
 
 // extra labels
 const bufferLabel = label('SHARED BUFFERS · RAM')
-bufferLabel.position.set(ANCHOR.bufferCenter.x - 4.6, 4.95, ANCHOR.bufferCenter.z + 3.2)
+// pinned to the far-left corner of the floating pool, text flowing inward
+bufferLabel.position.copy(instance.bufferCorners.farLeft).add(new THREE.Vector3(-0.02, 0.34, -0.06))
 instance.group.add(bufferLabel)
 
 const paths = makePaths()
@@ -50,7 +51,7 @@ const telemetry = installTelemetry({
 if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
 // deep link straight into a walkthrough view: ?view=wal
 const startView = new URLSearchParams(location.search).get('view')
-if (startView) window.setTimeout(() => rig.snap(startView), 260)
+if (startView) window.setTimeout(() => rig.snap(startView), 1500)
 else
   console.info(
     '%cpsql%c telemetry available: __psqlDebug.on() · .snapshot() · .history() · .table("users")',
