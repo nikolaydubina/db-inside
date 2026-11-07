@@ -91,7 +91,7 @@ export interface Page8K {
   busy: boolean
 }
 
-export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
+export type NodeName = 'parse' | 'plan' | 'exec'
 
 /**
  * Cells in a backend's input buffer. Slot 0 is whatever it is executing right
@@ -276,7 +276,6 @@ export const ANCHOR = {
   parse: V(-9.4, 6.55, -2.0),
   plan: V(-4.4, 6.85, -2.4),
   exec: V(1.6, 6.85, -2.4),
-  result: V(8.2, 6.6, -1.8),
   bufferCenter: V(-1.0, 5.35, -1.5),
   wal: V(-4.0, 0.55, 7.25),
   heap: V(-7.4, 0.5, 4.0),
@@ -1819,19 +1818,8 @@ export class PostgresInstance {
         text: 'EXECUTOR',
         info: {
           title: 'Executor',
-          body: 'Walks the plan tree tuple by tuple, evaluating quals, joins and aggregates. Every page request goes through the buffer manager.',
-          meta: 'executor · volcano model',
-        },
-      },
-      {
-        name: 'result',
-        pos: ANCHOR.result,
-        color: PALETTE.ice,
-        text: 'RESULT',
-        info: {
-          title: 'Result → client',
-          body: 'Rows stream back over the wire protocol as DataRow messages. A query ends when the portal is closed and the transaction commits.',
-          meta: 'DataRow · CommandComplete',
+          body: 'Walks the plan tree tuple by tuple, evaluating quals, joins and aggregates. Every page request goes through the buffer manager. Rows do not go to a separate stage: the executor hands them to the connection protocol as it produces them, so the answer streams out of the same port the query came in on.',
+          meta: 'executor · volcano model · rows stream to the client',
         },
       },
     ]

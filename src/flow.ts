@@ -19,7 +19,6 @@ export interface Paths {
   plan: THREE.CatmullRomCurve3
   exec: THREE.CatmullRomCurve3
   execToWal: THREE.CatmullRomCurve3
-  bufferToResult: THREE.CatmullRomCurve3
   heapToBuffer: THREE.CatmullRomCurve3
   indexToBuffer: THREE.CatmullRomCurve3
   ginToBuffer: THREE.CatmullRomCurve3
@@ -64,12 +63,6 @@ export function makePaths(): Paths {
       V(6.8, 6.1, 0.0),
       V(9.4, 5.4, 0.9),
       V(ANCHOR.wal.x, PAGE_TOP_Y, ANCHOR.wal.z),
-    ]),
-    bufferToResult: curve([
-      V(ANCHOR.bufferCenter.x + 2.2, BUFFER_TOP_Y + 0.05, ANCHOR.bufferCenter.z + 0.9),
-      V(4.4, 6.35, 0.7),
-      V(6.9, 6.55, -0.5),
-      ANCHOR.result,
     ]),
     heapToBuffer: curve([
       V(ANCHOR.heap.x + 1.0, PAGE_TOP_Y + 0.3, ANCHOR.heap.z - 1.2),

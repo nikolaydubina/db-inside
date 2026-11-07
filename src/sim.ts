@@ -587,31 +587,25 @@ export class EngineSim {
       // that arrives in the same window rides the same flush (group commit).
       await this.walDurable()
 
-      // 5. rows → result node
+      // 5. rows leave the executor and go straight back out through the same
+      // connection. There is no "result" stage in postgres: tuples are handed
+      // to the wire protocol as they are produced, so they stream out of the
+      // port the query arrived on.
       const rows = makePacket(PALETTE.teal, 0.3, this.scene)
       rows.position.copy(this.paths.bufferTop)
-      const fRows = chain.addCurve(this.paths.bufferToResult, PALETTE.ice, {
-        speed: 0.55,
-        opacity: 0.46,
-      })
-      await travel(this.ticker, rows, this.paths.bufferToResult, 0.6)
-      this.inst.pulseNode('result', 0.8)
-      fRows.flash(0.8)
-
-      // 6. result goes back out through the same connection
       const toPort = pathCurve([
-        ANCHOR.result.clone(),
-        new THREE.Vector3(ANCHOR.result.x + 0.5, 7.9, 0.2),
+        this.paths.bufferTop,
+        new THREE.Vector3(2.4, 6.6, 0.4),
         new THREE.Vector3(origin.x * 0.95, 9.2, origin.z - 2.0),
         outPort.clone(),
       ])
-      const fBack = chain.addCurve(toPort, PALETTE.teal, {
+      const fRows = chain.addCurve(toPort, PALETTE.ice, {
         speed: 0.55,
-        opacity: 0.4,
+        opacity: 0.44,
       })
-      await travel(this.ticker, rows, toPort, 0.7)
+      await travel(this.ticker, rows, toPort, 0.75)
       this.inst.pulseBackend(pod)
-      fBack.flash(0.9)
+      fRows.flash(0.85)
       despawn(this.ticker, this.scene, rows, 0.2)
 
       // 7. answer leaves along the same run of cable, a strand to the side of
