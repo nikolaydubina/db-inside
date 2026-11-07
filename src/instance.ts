@@ -1569,6 +1569,8 @@ export class PostgresInstance {
       }),
     )
     beam.position.set(pageX(0), 1.15, DISK_PLATE.cz)
+    // only shown while a scan is actually sweeping the heap
+    beam.visible = false
     this.group.add(beam)
     return beam
   }
