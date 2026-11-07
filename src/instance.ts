@@ -62,6 +62,8 @@ export interface PipelineNode {
   cage: THREE.MeshStandardMaterial
   ring: THREE.Mesh
   baseScale: number
+  home: THREE.Vector3
+  pulse: number
 }
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
@@ -1146,7 +1148,15 @@ export class PostgresInstance {
 
       this.register(group, def.info)
       this.group.add(group)
-      out[def.name] = { group, core: coreMat, cage: cageMat, ring, baseScale: 1 }
+      out[def.name] = {
+        group,
+        core: coreMat,
+        cage: cageMat,
+        ring,
+        baseScale: 1,
+        home: def.pos.clone(),
+        pulse: 0,
+      }
     }
     return out
   }
@@ -1331,11 +1341,7 @@ export class PostgresInstance {
 
   pulseNode(name: NodeName, strength = 1) {
     const n = this.nodes[name]
-    if (!n) return
-    void this.ticker.add(0.55, (k) => {
-      n.core.emissiveIntensity = 1.0 + 1.6 * Math.sin(k * Math.PI) * strength
-      n.group.scale.setScalar(1 + 0.14 * Math.sin(k * Math.PI) * strength)
-    })
+    if (n) n.pulse = Math.max(n.pulse, strength)
   }
 
   flashDisk(_idx = -1) {
@@ -1382,12 +1388,23 @@ export class PostgresInstance {
         (on ? 0.62 : 0.03) + (on ? breathe(time, 1.4, i * 0.6) * 0.1 : 0)
     }
 
-    // pipeline nodes breathe
+    // pipeline nodes drift like slow satellites and breathe when they work
     for (const key of Object.keys(this.nodes) as NodeName[]) {
       const n = this.nodes[key]
+      const phase = n.home.x * 0.7 + n.home.z
+      n.pulse = Math.max(0, n.pulse - dt * 1.9)
       n.ring.rotation.z += dt * (key === 'exec' ? 1.5 : 0.7)
-      const s = 1 + Math.sin(time * 1.2 + n.group.position.x) * 0.03
-      n.group.scale.setScalar(s)
+      n.group.position.set(
+        n.home.x + Math.sin(time * 0.42 + phase) * 0.1,
+        n.home.y +
+          Math.sin(time * 0.75 + phase * 1.3) * 0.16 +
+          Math.sin(time * 1.9 + phase) * 0.04 +
+          n.pulse * 0.12,
+        n.home.z + Math.cos(time * 0.5 + phase) * 0.1,
+      )
+      n.group.rotation.y += dt * 0.12
+      n.core.emissiveIntensity = 1.0 + n.pulse * 1.6
+      n.group.scale.setScalar(1 + Math.sin(time * 1.2 + phase) * 0.035 + n.pulse * 0.12)
     }
 
     // index highlight when index scan is on
