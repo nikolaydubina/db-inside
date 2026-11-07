@@ -57,19 +57,7 @@ the roof; results stream back up.
 TypeScript + [three.js](https://threejs.org) + Vite, with an `EffectComposer` bloom pass, PCF shadows,
 CSS2D labels and a small promise-based tween engine driving the simulation.
 
-## Deploy (Cloudflare)
-
-Live at **https://postgresql-inside.nikolay-dubina-pub.workers.dev** — a Worker serving static assets.
-`wrangler.toml` handles everything:
-
-- `[build] command = "npm ci && npm run build"` — wrangler builds before uploading, so the deploy
-  works even if the Cloudflare build command is left empty.
-- `[assets] directory = "./dist"` — the Vite output becomes the served site.
-
-Cloudflare's GitHub integration (Workers Builds) deploys **every push to `master`** — no CI needed.
-Deploy command: `npx wrangler deploy` (root directory `/`, Node 20+).
-
-Manual deploy from a machine:
+## Deploy 
 
 ```bash
 npx wrangler login
