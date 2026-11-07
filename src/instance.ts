@@ -29,6 +29,23 @@ export interface Info {
   meta?: string
 }
 
+/**
+ * What the pointer found inside the instanced page field: the info for that one
+ * block, a stable key for hover bookkeeping, and bounds tight enough to draw an
+ * outline around a single block rather than around the whole field.
+ */
+export interface BlockPick {
+  key: string
+  info: Info
+  box: THREE.Box3
+}
+
+/** Camera distance inside which individual blocks can be picked. */
+export const BLOCK_PICK_RANGE = 7
+
+/** Postgres page size. One block is exactly this many bytes, always. */
+export const PAGE_BYTES = 8192
+
 export interface Page {
   mesh: THREE.Mesh
   mat: THREE.MeshStandardMaterial
@@ -768,6 +785,10 @@ export class PostgresInstance {
     field.receiveShadow = true
     this.group.add(field)
     this.pageField = field
+    // registered by hand: the field answers with a different object per
+    // instance, so it has no single info of its own
+    field.userData.infoFor = (hit: THREE.Intersection) => this.blockPick(hit)
+    this.pickables.push(field)
 
     const inTable = (r: number, c: number) =>
       TABLE_REGIONS.some((t) => r >= t.r0 && r <= t.r1 && c >= t.c0 && c <= t.c1)
@@ -909,11 +930,12 @@ export class PostgresInstance {
 
   /**
    * Centre of the top face of a page block — the exact point an arrow should
-   * land on. A block is PAGE_GRID.bh tall before its fill scale is applied, so
-   * the top sits half of that above `home`.
+   * land on. Blocks stand on the plate and grow upwards, so the top is the
+   * bottom plus the scaled height, not half a block above the centre.
    */
   blockTop(p: Page8K): THREE.Vector3 {
-    return p.home.clone().setY(p.home.y + (PAGE_GRID.bh / 2) * this.blockScale(p.fill))
+    const h = PAGE_GRID.bh * this.blockScale(p.fill)
+    return p.home.clone().setY(p.home.y - PAGE_GRID.bh / 2 + h)
   }
 
   /** The same point for a page living in shared buffers. */
@@ -921,12 +943,68 @@ export class PostgresInstance {
     return p.mesh.position.clone().setY(p.mesh.position.y + (PAGE_GRID.bh / 2) * p.mesh.scale.y)
   }
 
+  /**
+   * The field is one InstancedMesh, so what the pointer lands on is an
+   * instance, not an object. From a distance a single 0.5-unit block is a few
+   * pixels across and the whole field would swallow every click meant for the
+   * plate, so blocks only become pickable once the camera is close to them.
+   */
+  blockPick(hit: THREE.Intersection): BlockPick | null {
+    const id = hit.instanceId
+    if (id === undefined) return null
+    const p = this.pages8k[id]
+    if (!p || p.free) return null
+    if (hit.distance > BLOCK_PICK_RANGE) return null
+    return { key: `page-${p.i}`, info: this.blockInfo(p), box: this.blockBox(p) }
+  }
+
+  /** Tight bounds of one block, for the hover outline. */
+  private blockBox(p: Page8K): THREE.Box3 {
+    const half = PAGE_GRID.bh / 2
+    const h = PAGE_GRID.bh * this.blockScale(p.fill)
+    const y0 = p.home.y - half
+    return new THREE.Box3(
+      new THREE.Vector3(p.home.x - PAGE_GRID.bw / 2, y0, p.home.z - PAGE_GRID.bd / 2),
+      new THREE.Vector3(p.home.x + PAGE_GRID.bw / 2, y0 + h, p.home.z + PAGE_GRID.bd / 2),
+    )
+  }
+
+  blockInfo(p: Page8K): Info {
+    // pages are numbered from 0 in the relation's file, and each one is exactly
+    // 8 kB, so the byte range is arithmetic rather than a lookup
+    const start = p.i * PAGE_BYTES
+    const end = start + PAGE_BYTES - 1
+    const packed = Math.round(p.fill * 100)
+    const owner = p.table ? `the heap file of TABLE: ${p.table}` : 'a relation the scene does not label'
+    const kB = (n: number) => (n / 1024).toFixed(1).replace(/\.0$/, '')
+    const dead = p.dead
+      ? ' It currently holds dead row versions — VACUUM will reclaim the space inside this page.'
+      : ''
+    return {
+      title: `Page ${p.i} · 8 kB contiguous`,
+      body:
+        `A block is one contiguous 8 kB stretch of a file — the smallest unit Postgres ever reads or ` +
+        `writes, and the unit shared_buffers caches. It is not a row and not a table: rows are packed ` +
+        `into the front of it, left to right, and the free space left over sits in the middle. Reading ` +
+        `"one page" therefore means one 8192-byte request, never a partial read. This one belongs to ` +
+        `${owner} and is ${packed}% full: taller and brighter means more of its bytes are in use.` +
+        dead,
+      meta: `bytes ${start}–${end} · page ${p.i} of the file · ${packed}% packed` +
+        ` · ${kB(PAGE_BYTES)} kB block${p.dead ? ' · dead tuples' : ''}`,
+    }
+  }
+
   private applyTransform(p: Page8K, scale: number, sy?: number) {
     const d = this.dummy
     d.position.copy(p.home)
     d.rotation.set(0, 0, 0)
     d.scale.set(scale, scale, scale)
-    if (sy !== undefined) d.scale.y = sy
+    if (sy !== undefined) {
+      d.scale.y = sy
+      // scaled around its centre a block would sink into the plate as it fills
+      // and float as it empties; keep the bottom face planted instead
+      d.position.y = p.home.y + (PAGE_GRID.bh / 2) * (sy - 1)
+    }
     d.updateMatrix()
     this.pageField.setMatrixAt(p.i, d.matrix)
     this.pageField.instanceMatrix.needsUpdate = true

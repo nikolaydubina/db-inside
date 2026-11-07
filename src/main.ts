@@ -2,6 +2,7 @@ import './style.css'
 import * as THREE from 'three'
 import { createWorld } from './world'
 import { PostgresInstance } from './instance'
+import type { BlockPick } from './instance'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
@@ -41,7 +42,16 @@ let flyMode = false
 const flyKeys = new Set<string>()
 const flyVel = new THREE.Vector3()
 let speed = 1
-let pinned: THREE.Object3D | null = null
+/** What is currently pinned in the inspector, and what the pointer is over. */
+interface PickInfo {
+  root: THREE.Object3D
+  /** stable identity, so hover does not churn when the info object is rebuilt */
+  key: string
+  info: { title: string; body: string; meta?: string }
+  /** tight bounds, when `root` is an instanced mesh covering many things */
+  box?: THREE.Box3
+}
+let pinned: PickInfo | null = null
 
 // console telemetry: __psqlDebug.on() / .snapshot() / .history() / .table()
 const telemetry = installTelemetry({
@@ -264,7 +274,7 @@ const raycaster = new THREE.Raycaster()
 raycaster.params.Line = { threshold: 0.1 }
 const pointer = new THREE.Vector2(-2, -2)
 let pointerPx = { x: 0, y: 0 }
-let hovered: THREE.Object3D | null = null
+let hovered: PickInfo | null = null
 
 const hoverBox = new OutlineBox(1, 1, 1, 0x35e0ff, 0.6)
 hoverBox.visible = false
@@ -289,10 +299,35 @@ function infoRoot(o: THREE.Object3D | null): THREE.Object3D | null {
   return null
 }
 
-function pick(ndc: THREE.Vector2) {
+/** The nearest ancestor that answers per-hit rather than per-object. */
+function infoForRoot(o: THREE.Object3D | null) {
+  let cur: THREE.Object3D | null = o
+  while (cur) {
+    const f = cur.userData.infoFor as ((hit: THREE.Intersection) => BlockPick | null) | undefined
+    if (f) return f
+    cur = cur.parent
+  }
+  return null
+}
+
+function pick(ndc: THREE.Vector2): PickInfo | null {
   raycaster.setFromCamera(ndc, camera)
-  const hit = raycaster.intersectObjects(instance.pickables, true)[0]
-  return infoRoot(hit?.object ?? null)
+  for (const hit of raycaster.intersectObjects(instance.pickables, true)) {
+    // a page block is one instance of one mesh, so the hit answers for itself;
+    // if it declines (too far away, or empty) the ray carries on to what is
+    // behind it instead of the click landing on nothing
+    const provider = infoForRoot(hit.object)
+    if (provider) {
+      const res = provider(hit)
+      if (res) return { root: hit.object, key: res.key, info: res.info, box: res.box }
+      continue
+    }
+    const root = infoRoot(hit.object)
+    if (root?.userData.info) {
+      return { root, key: root.userData.info.title, info: root.userData.info }
+    }
+  }
+  return null
 }
 
 // debug helper: what is under a screen point?
@@ -301,7 +336,7 @@ function pick(ndc: THREE.Vector2) {
     (x / window.innerWidth) * 2 - 1,
     -(y / window.innerHeight) * 2 + 1,
   )
-  return pick(ndc)?.userData.info?.title ?? null
+  return pick(ndc)?.info.title ?? null
 }
 
 let downAt = { x: 0, y: 0 }
@@ -314,13 +349,13 @@ canvas.addEventListener('pointerup', (e) => {
   const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y)
   if (moved > 6) return
   const root = pick(pointer)
-  if (root?.userData.info) {
-    if (pinned === root) {
+  if (root) {
+    if (pinned?.key === root.key) {
       pinned = null
       hud.unpin()
     } else {
       pinned = root
-      hud.inspect(root.userData.info)
+      hud.inspect(root.info)
     }
   } else {
     pinned = null
@@ -382,9 +417,9 @@ canvas.addEventListener('dblclick', (e) => {
   )
   const root = pick(ndc)
   // the two pointerups of a double click leave the pin toggled off; re-pin here
-  if (root?.userData.info) {
+  if (root) {
     pinned = root
-    hud.inspect(root.userData.info)
+    hud.inspect(root.info)
   } else {
     pinned = null
     hud.unpin()
@@ -394,7 +429,7 @@ canvas.addEventListener('dblclick', (e) => {
     flyToggle.checked = false
     flyToggle.dispatchEvent(new Event('change'))
   }
-  void rig.focus(root ?? instance.group).then(() => {
+  void rig.focus(root ? (root.box ?? root.root) : instance.group).then(() => {
     autoOrbit = true
     if (orbitCheckbox) orbitCheckbox.checked = true
     world.controls.autoRotate = true
@@ -494,21 +529,21 @@ function frame() {
 
   // hover highlight
   const root = pick(pointer)
-  if (root !== hovered) {
+  if ((root?.key ?? null) !== (hovered?.key ?? null)) {
     hovered = root
-    const info = (root?.userData.info ?? null) as Parameters<typeof hud.hover>[0]
-    hud.hover(info, pointerPx.x, pointerPx.y)
-    if (!flyMode) canvas.style.cursor = info ? 'pointer' : 'grab'
+    hud.hover(root?.info ?? null, pointerPx.x, pointerPx.y)
+    if (!flyMode) canvas.style.cursor = root ? 'pointer' : 'grab'
   } else if (hovered) {
-    hud.hover(hovered.userData.info, pointerPx.x, pointerPx.y)
+    hud.hover(hovered.info, pointerPx.x, pointerPx.y)
   }
   const target = hovered ?? pinned
   // anything that already owns an outline highlights that outline; drawing a
   // second box around the same volume would just be the same box twice
-  const outline: OutlineBox | null =
-    target instanceof OutlineBox
-      ? target
-      : ((target?.userData.outline as OutlineBox | undefined) ?? null)
+  const outline: OutlineBox | null = target
+    ? target.root instanceof OutlineBox
+      ? target.root
+      : ((target.root.userData.outline as OutlineBox | undefined) ?? null)
+    : null
   if (glowing && glowing !== outline) {
     glowing.highlight(false)
     glowing = null
@@ -518,7 +553,7 @@ function frame() {
     glowing = outline
     hoverBox.visible = false
   } else if (target) {
-    const box = new THREE.Box3().setFromObject(target)
+    const box = target.box ? target.box.clone() : new THREE.Box3().setFromObject(target.root)
     box.expandByScalar(0.08)
     const size = box.getSize(_boxSize)
     const centre = box.getCenter(_boxCentre)

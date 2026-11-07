@@ -253,10 +253,10 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
      * rather than a jump cut.
      */
     function focus(
-        target: THREE.Object3D,
+        target: THREE.Object3D | THREE.Box3,
         opts: { duration?: number; padding?: number } = {},
     ): Promise<boolean> {
-        const box = new THREE.Box3().setFromObject(target)
+        const box = target instanceof THREE.Box3 ? target.clone() : new THREE.Box3().setFromObject(target)
         if (box.isEmpty()) return Promise.resolve(false)
         const centre = box.getCenter(new THREE.Vector3())
 
