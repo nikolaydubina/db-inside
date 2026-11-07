@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PostgreSQL — Inside the Engine</title>
+  <meta name="description" content="An interactive 3D visualization of how PostgreSQL processes a query: parser, planner, executor, shared buffers, WAL and storage." />
+</head>
+
+<body>
+  <div id="app">
+    <canvas id="c"></canvas>
+    <div id="labels" class="layer"></div>
+    <div class="layer vignette"></div>
+    <div class="layer grain"></div>
+
+    <header class="hud top-left">
+      <div class="brand">
+        <span class="pulse-dot"></span>
+        <div>
+          <h1>POSTGRESQL <span>inside the engine</span></h1>
+          <p class="sub">a query's journey through memory, WAL and disks</p>
+        </div>
+      </div>
+    </header>
+
+    <div class="hud top-right">
+      <div class="chip"><span class="k">state</span><span class="v ok">LIVE</span></div>
+    </div>
+
+    <aside class="hud panel right">
+      <section class="card">
+        <h2>Simulate</h2>
+        <div class="buttons">
+          <button id="btn-query" class="btn primary">
+            <span class="glyph">↵</span> run query
+            <kbd>space</kbd>
+          </button>
+          <button id="btn-checkpoint" class="btn">
+            <span class="glyph">⇩</span> checkpoint
+          </button>
+          <button id="btn-vacuum" class="btn">
+            <span class="glyph">✳</span> vacuum
+          </button>
+        </div>
+        <div class="switches">
+          <label class="switch">
+            <input type="checkbox" id="chk-index" />
+            <span class="track"></span>
+            <span class="label">index scan</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="chk-orbit" checked />
+            <span class="track"></span>
+            <span class="label">auto orbit</span>
+          </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <h2>Instrumentation</h2>
+        <dl class="stats">
+          <div>
+            <dt>queries</dt>
+            <dd id="st-queries">0</dd>
+          </div>
+          <div>
+            <dt>buffer hit</dt>
+            <dd id="st-hit" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>latency</dt>
+            <dd id="st-lat">—</dd>
+          </div>
+          <div>
+            <dt>wal bytes</dt>
+            <dd id="st-wal">0</dd>
+          </div>
+          <div>
+            <dt>dead tuples</dt>
+            <dd id="st-dead">0</dd>
+          </div>
+        </dl>
+        <div class="bar"><i id="st-bar"></i></div>
+        <p class="hint" id="st-note">shared_buffers · 8 kB pages</p>
+      </section>
+
+      <section class="card">
+        <h2>Processes</h2>
+        <ul class="procs">
+          <li><i class="pt on"></i><span>postmaster</span><b>listening</b></li>
+          <li><i class="pt" id="pr-be-dot"></i><span>backends</span><b id="pr-be">0 / 4</b></li>
+          <li><i class="pt" id="pr-ck-dot"></i><span>checkpointer</span><b id="pr-ck">idle</b></li>
+          <li><i class="pt" id="pr-wl-dot"></i><span>walwriter</span><b id="pr-wl">idle</b></li>
+          <li><i class="pt" id="pr-av-dot"></i><span>autovacuum</span><b id="pr-av">idle</b></li>
+        </ul>
+        <p class="hint">processes, not threads — one backend per connection</p>
+      </section>
+
+      <section class="card inspector" id="inspector">
+        <h2>Inspector</h2>
+        <h3 id="ins-title">nothing selected</h3>
+        <p id="ins-body">
+          Hover the structures to identify them. Click to pin an explanation here.
+        </p>
+        <p class="ins-meta" id="ins-meta"></p>
+      </section>
+    </aside>
+
+    <div class="hud panel legend">
+      <h2>Legend</h2>
+      <ul>
+        <li><i style="--c: #35e0ff"></i>shared buffers <span>RAM</span></li>
+        <li><i style="--c: #2bffc3"></i>heap &amp; tuples <span>disk</span></li>
+        <li><i style="--c: #ffb03a"></i>wal &amp; page i/o <span>disk</span></li>
+        <li><i style="--c: #ff3ea5"></i>query packets <span>client</span></li>
+        <li><i style="--c: #8a7bff"></i>indexes <span>disk</span></li>
+      </ul>
+      <p class="hint">floor = disk · floating deck = RAM</p>
+    </div>
+
+    <div id="tooltip" class="tooltip"></div>
+    <div id="boot" class="boot">
+      <div class="boot-ring"></div>
+      <p>warming shared buffers…</p>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+
+</html>
