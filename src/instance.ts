@@ -8,6 +8,7 @@ import {
   halo,
   label,
   neonEdges,
+  radialTexture,
   rand,
   randInt,
 } from './util'
@@ -447,9 +448,13 @@ export class PostgresInstance {
       moteGeo,
       new THREE.PointsMaterial({
         color: 0x8fe6ff,
-        size: 0.06,
+        // a point with no map renders as a hard white square, which reads as a
+        // node sitting in the scene — the soft radial sprite reads as dust
+        map: radialTexture(),
+        alphaTest: 0.01,
+        size: 0.13,
         transparent: true,
-        opacity: 0.45,
+        opacity: 0.32,
         depthWrite: false,
         blending: THREE.AdditiveBlending,
         sizeAttenuation: true,

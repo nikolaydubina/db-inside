@@ -121,7 +121,8 @@ export class FlowLine {
     this.baseOpacity = opts.opacity ?? 0.3
     this.weight = 1
 
-    const width = opts.width ?? 0.9
+    // same hairline as the outline boxes, so paths and cages weigh the same
+    const width = opts.width ?? 0.7
     this.lineMat = new LineMaterial({
       color,
       linewidth: width,
@@ -256,7 +257,7 @@ export class QueryChain {
     const f = new FlowLine(points, color, {
       speed: 0.55,
       opacity: 0.42,
-      width: 1.0,
+      width: 0.7,
       ...opts,
     })
     this.flows.push(f)

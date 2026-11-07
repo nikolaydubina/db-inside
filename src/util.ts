@@ -110,9 +110,11 @@ interface FatLine {
 
 const lineMaterials: FatLine[] = []
 let lineDpr = 1
+let lineCssW = 1
+let lineCssH = 1
 
 function applyLineSize(entry: FatLine) {
-  entry.mat.resolution.set(window.innerWidth * lineDpr, window.innerHeight * lineDpr)
+  entry.mat.resolution.set(lineCssW * lineDpr, lineCssH * lineDpr)
   entry.mat.linewidth = entry.cssWidth * lineDpr
 }
 
@@ -130,10 +132,18 @@ export function releaseLineMaterial(m: LineMaterial) {
 }
 
 /** Call on resize — otherwise fat lines render at the wrong width. */
-export function setLineResolution(_w: number, _h: number, dpr = 1) {
+export function setLineResolution(w: number, h: number, dpr = 1) {
   lineDpr = dpr
+  lineCssW = w
+  lineCssH = h
   for (const entry of lineMaterials) applyLineSize(entry)
 }
+
+/** Current device pixel ratio used for screen-space line widths. */
+export const linePixelRatio = () => lineDpr
+/** Drawing-buffer size, for shaders that expand in clip space. */
+export const lineBufferWidth = () => lineCssW * lineDpr
+export const lineBufferHeight = () => lineCssH * lineDpr
 
 /**
  * A box drawn as nothing but its 12 edges — no faces, no thickness, no width.
@@ -161,9 +171,9 @@ export class OutlineBox extends THREE.Group {
     this.baseColor = color
     this.baseOpacity = opacity
 
-    // A hairline: 0.9 CSS px is thin enough to read as an outline, and still
-    // lands on 1.8 device px at DPR 2, so it does not break into dots.
-    const glowWidth = 0.9
+    // A hairline: 0.7 CSS px lands on 1.4 device px at DPR 2, which is the
+    // thinnest a screen-space quad can go before it starts breaking into dots.
+    const glowWidth = 0.7
     this.glowMat = registerLineMaterial(
       new LineMaterial({
         color,
