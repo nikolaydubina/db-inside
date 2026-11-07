@@ -58,14 +58,15 @@ CSS2D labels and a small promise-based tween engine driving the simulation.
 
 ## Deploy (Cloudflare)
 
-The project deploys as **static assets**. `wrangler.toml` handles everything:
+Live at **https://postgresql-inside.nikolay-dubina-pub.workers.dev** — a Worker serving static assets.
+`wrangler.toml` handles everything:
 
 - `[build] command = "npm ci && npm run build"` — wrangler builds before uploading, so the deploy
   works even if the Cloudflare build command is left empty.
 - `[assets] directory = "./dist"` — the Vite output becomes the served site.
 
-Cloudflare deploy command: `npx wrangler deploy` (root directory `/`, Node 20+).
-Every push to `master` rebuilds and deploys.
+Cloudflare's GitHub integration (Workers Builds) deploys **every push to `master`** — no CI needed.
+Deploy command: `npx wrangler deploy` (root directory `/`, Node 20+).
 
 Manual deploy from a machine:
 
@@ -78,8 +79,9 @@ npm run deploy         # wrangler builds and deploys
 
 ### Deploying on tags
 
-Cloudflare's own git integration only reacts to branch pushes, so tags are handled by
-`.github/workflows/deploy.yml`. It deploys on every push to `master` **and** on any `v*` tag.
+Cloudflare's git integration only reacts to branch pushes — a tag push does not trigger a build.
+`.github/workflows/deploy.yml` covers exactly that case: it deploys on `v*` tags (and manual runs) and
+deliberately **not** on `master`, so commits are not deployed twice.
 
 Required repository secrets (Settings → Secrets and variables → Actions):
 
@@ -89,9 +91,6 @@ Required repository secrets (Settings → Secrets and variables → Actions):
 ```bash
 git tag v0.1.0 && git push origin v0.1.0   # triggers a deploy
 ```
-
-If the Cloudflare project is still connected to `master`, remove the `branches:` trigger from the
-workflow — otherwise each commit deploys twice (once from GitHub Actions, once from Cloudflare).
 
 ## Author
 
