@@ -198,7 +198,6 @@ export class EngineSim {
         new THREE.Vector3(origin.x, 10.35, origin.z),
       ])
       const fIn = chain.addCurve(inbound, PALETTE.magenta, {
-        arrows: 3,
         speed: 0.7,
         opacity: 0.32,
       })
@@ -214,7 +213,6 @@ export class EngineSim {
         ANCHOR.parse.clone(),
       ])
       const fToParse = chain.addCurve(toParse, PALETTE.cyan, {
-        arrows: 3,
         speed: 0.55,
         opacity: 0.36,
       })
@@ -224,7 +222,6 @@ export class EngineSim {
 
       // 3. parser → planner
       const fParse = chain.addCurve(this.paths.parse, PALETTE.cyan, {
-        arrows: 3,
         speed: 0.55,
         opacity: 0.4,
       })
@@ -235,7 +232,6 @@ export class EngineSim {
 
       // 4. planner → executor
       const fPlan = chain.addCurve(this.paths.plan, PALETTE.cyan, {
-        arrows: 3,
         speed: 0.55,
         opacity: 0.4,
       })
@@ -259,7 +255,6 @@ export class EngineSim {
       if (kind === 'insert' || kind === 'delete') {
         // a write: the executor goes straight at the heap pages of a table
         const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
-          arrows: 3,
           speed: 0.5,
           opacity: 0.4,
         })
@@ -276,7 +271,7 @@ export class EngineSim {
           const fDown = chain.addCurve(
             down,
             kind === 'insert' ? 0xc7ff5a : PALETTE.magenta,
-            { arrows: 3, speed: 0.5, opacity: 0.45 },
+            { speed: 0.5, opacity: 0.45 },
           )
           await travel(this.ticker, packet, down, 0.55)
           fDown.flash(0.85)
@@ -301,7 +296,6 @@ export class EngineSim {
         const toPage = this.inst.pageTop(page)
         const execCurve = this.execTo(toPage)
         const fExec = chain.addCurve(execCurve, PALETTE.teal, {
-          arrows: 4,
           speed: 0.5,
           opacity: 0.44,
         })
@@ -326,7 +320,6 @@ export class EngineSim {
 
         const execCurve = this.execTo(slotTop)
         const fExec = chain.addCurve(execCurve, PALETTE.teal, {
-          arrows: 3,
           speed: 0.5,
           opacity: 0.4,
         })
@@ -345,7 +338,6 @@ export class EngineSim {
           toBlock,
         ])
         const fDown = chain.addCurve(down, PALETTE.amber, {
-          arrows: 3,
           speed: 0.5,
           opacity: 0.42,
         })
@@ -366,7 +358,6 @@ export class EngineSim {
           slotTop,
         ])
         const fUp = chain.addCurve(up, PALETTE.amber, {
-          arrows: 3,
           speed: 0.5,
           opacity: 0.42,
         })
@@ -393,7 +384,6 @@ export class EngineSim {
       const rows = makePacket(PALETTE.teal, 0.3, this.scene)
       rows.position.copy(this.paths.bufferTop)
       const fRows = chain.addCurve(this.paths.bufferToResult, PALETTE.ice, {
-        arrows: 4,
         speed: 0.55,
         opacity: 0.46,
       })
@@ -409,7 +399,6 @@ export class EngineSim {
         new THREE.Vector3(origin.x, 10.3, origin.z - 0.3),
       ])
       const fBack = chain.addCurve(toPort, PALETTE.teal, {
-        arrows: 3,
         speed: 0.55,
         opacity: 0.4,
       })
@@ -424,7 +413,7 @@ export class EngineSim {
         new THREE.Vector3(origin.x, 17, origin.z),
         new THREE.Vector3(origin.x, 26.5, origin.z),
       ])
-      chain.addCurve(outbound, PALETTE.teal, { arrows: 3, speed: 0.7, opacity: 0.3 })
+      chain.addCurve(outbound, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
       const out = makePacket(PALETTE.teal, 0.26, this.scene)
       await travel(this.ticker, out, outbound, 0.8, easeOutCubic)
       despawn(this.ticker, this.scene, out, 0.3)

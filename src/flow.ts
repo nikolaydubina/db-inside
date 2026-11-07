@@ -1,4 +1,7 @@
 import * as THREE from 'three'
+import { Line2 } from 'three/addons/lines/Line2.js'
+import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import {
   ANCHOR,
   BUFFER_TOP_Y,
@@ -7,6 +10,7 @@ import {
   bufferSlotX,
   bufferSlotZ,
 } from './instance'
+import { registerLineMaterial, releaseLineMaterial } from './util'
 import { Ticker, easeInOutCubic } from './util'
 
 export interface Paths {
@@ -24,15 +28,17 @@ export interface Paths {
 }
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
-const UP = new THREE.Vector3(0, 1, 0)
-/** Scratch vectors — only used inside a single synchronous update() call. */
-const _nrm = new THREE.Vector3()
-const _bnr = new THREE.Vector3()
-const _tan = new THREE.Vector3()
-const curve = (pts: THREE.Vector3[], tension = 0.35) =>
-  new THREE.CatmullRomCurve3(pts, false, 'catmullrom', tension)
 
-export const pathCurve = (pts: THREE.Vector3[], tension = 0.35) => curve(pts, tension)
+/**
+ * Centripetal Catmull-Rom instead of the uniform variant: no cusps, no loops,
+ * and the curve hugs the control polygon instead of ballooning away from it.
+ * The path is exactly the curve through the control points — no extra samples
+ * are displaced, so what you see is the trajectory, not a decoration of it.
+ */
+const curve = (pts: THREE.Vector3[]) =>
+  new THREE.CatmullRomCurve3(pts, false, 'centripetal')
+
+export const pathCurve = (pts: THREE.Vector3[]) => curve(pts)
 
 export function makePaths(): Paths {
   // both anchors sit on a real block's top face, not in the air above it
@@ -49,14 +55,8 @@ export function makePaths(): Paths {
       V(ANCHOR.sky.x + 1.0, 9.6, -0.8),
       ANCHOR.parse,
     ]),
-    parse: curve(
-      [ANCHOR.parse, V(-7.8, 7.35, -2.1), V(-5.9, 7.45, -2.4), ANCHOR.plan],
-      0.4,
-    ),
-    plan: curve(
-      [ANCHOR.plan, V(-2.1, 7.45, -2.5), V(-0.4, 7.35, -2.5), ANCHOR.exec],
-      0.4,
-    ),
+    parse: curve([ANCHOR.parse, V(-7.8, 7.35, -2.1), V(-5.9, 7.45, -2.4), ANCHOR.plan]),
+    plan: curve([ANCHOR.plan, V(-2.1, 7.45, -2.5), V(-0.4, 7.35, -2.5), ANCHOR.exec]),
     exec: curve([ANCHOR.exec, V(1.2, 6.7, -1.6), V(0.4, 6.4, -0.7), bufferTop]),
     execToWal: curve([
       ANCHOR.exec,
@@ -93,150 +93,63 @@ export function makePaths(): Paths {
 }
 
 export interface FlowOptions {
-  arrows?: number
   speed?: number
   opacity?: number
-  size?: number
-  /** Lateral wobble in world units. 0 draws the bare curve. */
-  wiggle?: number
+  /** Stroke width in screen pixels. */
+  width?: number
 }
 
-/**
- * Lateral offset of a trajectory at fraction `u` of its length.
- * Two incommensurate sine waves, tapered to exactly 0 at both ends — so the
- * path still starts and finishes on the exact point it was aimed at.
- */
-const wobble = (u: number, t: number, seed: number) => {
-  const taper = Math.sin(Math.PI * u)
-  const a = Math.sin(u * 8.5 + t * 0.9 + seed)
-  const b = Math.sin(u * 17.3 - t * 1.4 + seed * 1.7)
-  return (a * 0.65 + b * 0.35) * taper
-}
-
-/** A thin glowing curve with travelling arrowheads. */
+/** A glowing curve whose brightness runs along the path. */
 export class FlowLine {
   curve: THREE.CatmullRomCurve3
   readonly group = new THREE.Group()
-  private cones: THREE.Mesh[] = []
-  private line: THREE.Line
-  private lineMat: THREE.LineBasicMaterial
-  private arrowMat: THREE.MeshBasicMaterial
+  private lineMat: LineMaterial
+  private lineGeo = new LineGeometry()
   private speed: number
   private weight: number
   private boost = 0
   private t = Math.random()
   private baseOpacity: number
-  private baseScale: number
   private fade = 1
-  /** Amplitude of the lateral wobble, in world units. */
-  private wiggle: number
-  /** Requested amplitude; the real one is capped by the curve length. */
-  private wiggleOpt: number
-  /** Wave phase and per-flow seed, so no two arrows wobble in step. */
-  private phase = Math.random() * 100
-  private seed = Math.random() * Math.PI * 2
-  /** Undisplaced guide points, arc-length spaced (index ↔ u). */
+  /** Guide points, arc-length spaced (index ↔ u). */
   private basePts: THREE.Vector3[] = []
-  private normals: THREE.Vector3[] = []
-  private binormals: THREE.Vector3[] = []
-  private posAttr!: THREE.BufferAttribute
   private static readonly SEGS = 110
 
   constructor(points: THREE.Vector3[], color: number, opts: FlowOptions = {}) {
-    this.curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35)
-    const count = opts.arrows ?? 4
+    this.curve = curve(points)
     this.speed = opts.speed ?? 0.16
     this.baseOpacity = opts.opacity ?? 0.3
     this.weight = 1
-    this.baseScale = opts.size ?? 1
-    this.wiggleOpt = opts.wiggle ?? 0.1
-    this.wiggle = 0
-    this.updateAmplitude()
 
-    this.lineMat = new THREE.LineBasicMaterial({
+    this.lineMat = new LineMaterial({
       color,
+      linewidth: opts.width ?? 1.35,
       transparent: true,
       opacity: this.baseOpacity,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      // screen-space width: a fat line stays solid even when it is far away
+      worldUnits: false,
+      dashed: false,
     })
-    this.line = new THREE.Line(new THREE.BufferGeometry(), this.lineMat)
-    this.group.add(this.line)
+    registerLineMaterial(this.lineMat)
+    const line = new Line2(this.lineGeo, this.lineMat)
+    line.frustumCulled = false
+    this.group.add(line)
     this.rebuildGuide()
-
-    const size = 0.075 * this.baseScale
-    const coneGeo = new THREE.ConeGeometry(size, size * 3.1, 5)
-    this.arrowMat = new THREE.MeshBasicMaterial({
-      color,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-    for (let i = 0; i < count; i++) {
-      const m = new THREE.Mesh(coneGeo, this.arrowMat)
-      this.cones.push(m)
-      this.group.add(m)
-    }
   }
 
   /**
-   * A long trajectory can afford a wider sway; a 2-unit hop cannot, or it would
-   * look like it is having a fit. Cap the amplitude by curve length.
-   */
-  private updateAmplitude() {
-    const len = this.curve.getLength()
-    this.wiggle = Math.min(this.wiggleOpt, len * 0.022) * this.baseScale
-  }
-
-  /**
-   * Cache the undisplaced polyline plus a perpendicular frame at every sample.
-   * Arc-length spaced, so sample index and the arrowhead parameter `u` mean the
-   * same thing and the cones ride exactly on the drawn line.
+   * Cache the guide polyline. Arc-length spaced, so a sample index and the
+   * march parameter `u` mean the same thing.
    */
   private rebuildGuide() {
     this.basePts = this.curve.getSpacedPoints(FlowLine.SEGS)
-    this.normals = []
-    this.binormals = []
-    const last = this.basePts.length - 1
-    for (let i = 0; i <= last; i++) {
-      const a = this.basePts[Math.max(0, i - 1)]
-      const b = this.basePts[Math.min(last, i + 1)]
-      const tan = new THREE.Vector3().subVectors(b, a).normalize()
-      const nrm = new THREE.Vector3().crossVectors(tan, UP)
-      if (nrm.lengthSq() < 1e-8) nrm.set(1, 0, 0)
-      nrm.normalize()
-      const bnr = new THREE.Vector3().crossVectors(nrm, tan).normalize()
-      this.normals.push(nrm)
-      this.binormals.push(bnr)
+    const flat = new Float32Array(this.basePts.length * 3)
+    for (let i = 0; i < this.basePts.length; i++) {
+      this.basePts[i].toArray(flat, i * 3)
     }
-
-    const pos = new Float32Array(this.basePts.length * 3)
-    this.posAttr = new THREE.BufferAttribute(pos, 3)
-    this.line.geometry.dispose()
-    this.line.geometry = new THREE.BufferGeometry()
-    this.line.geometry.setAttribute('position', this.posAttr)
-    this.writeGuide(0)
-  }
-
-  /** Push the (wobbled) guide polyline into the line geometry. */
-  private writeGuide(time: number) {
-    const n = this.basePts.length
-    const amp = this.wiggle * this.fade
-    for (let i = 0; i < n; i++) {
-      const u = i / (n - 1)
-      const p = this.basePts[i]
-      const w = amp * wobble(u, time, this.seed)
-      const nrm = this.normals[i]
-      const bnr = this.binormals[i]
-      this.posAttr.setXYZ(
-        i,
-        p.x + nrm.x * w + bnr.x * w * 0.45,
-        p.y + nrm.y * w + bnr.y * w * 0.45,
-        p.z + nrm.z * w + bnr.z * w * 0.45,
-      )
-    }
-    this.posAttr.needsUpdate = true
+    this.lineGeo.setPositions(flat)
   }
 
   flash(strength = 1) {
@@ -249,8 +162,7 @@ export class FlowLine {
    * geometry is rewritten in place instead of rebuilt.
    */
   repoint(points: THREE.Vector3[]) {
-    this.curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35)
-    this.updateAmplitude()
+    this.curve = curve(points)
     this.rebuildGuide()
   }
 
@@ -261,29 +173,8 @@ export class FlowLine {
   update(dt: number) {
     this.boost = Math.max(0, this.boost - dt * 1.35)
     const b = this.boost
-    this.phase += dt
     this.t = (this.t + dt * this.speed * (1 + b * 1.8)) % 1
-    const n = this.cones.length
-    const amp = this.wiggle * this.fade
-    for (let i = 0; i < n; i++) {
-      const u = (this.t + i / n) % 1
-      const p = this.curve.getPointAt(u)
-      const tan = _tan.copy(this.curve.getTangentAt(u)).normalize()
-      // same lateral offset as the drawn line, applied along the local frame
-      const w = amp * wobble(u, this.phase, this.seed)
-      const nrm = _nrm.crossVectors(tan, UP)
-      if (nrm.lengthSq() < 1e-8) nrm.set(1, 0, 0)
-      nrm.normalize()
-      const bnr = _bnr.crossVectors(nrm, tan).normalize()
-      const m = this.cones[i]
-      m.position.copy(p).addScaledVector(nrm, w).addScaledVector(bnr, w * 0.45)
-      m.quaternion.setFromUnitVectors(UP, tan)
-      const s = 1 + b * 0.85
-      m.scale.set(s, s, s)
-    }
-    if (this.wiggle > 0.001 && this.fade > 0.001) this.writeGuide(this.phase)
     this.lineMat.opacity = (this.baseOpacity * this.weight + b * 0.45) * this.fade
-    this.arrowMat.opacity = Math.min(1, 0.55 * this.weight + b * 0.5) * this.fade
   }
 
   setFade(v: number) {
@@ -295,8 +186,7 @@ export class FlowLine {
       const mesh = o as THREE.Mesh
       if (mesh.geometry) mesh.geometry.dispose()
     })
-    this.lineMat.dispose()
-    this.arrowMat.dispose()
+    releaseLineMaterial(this.lineMat)
   }
 
   setWeight(w: number) {
@@ -320,28 +210,20 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
   }
 
   const execToWal = add(paths.execToWal.getPoints(28), PALETTE.amber, {
-    arrows: 3,
     speed: 0.4,
     opacity: 0.26,
-    wiggle: 0.07,
   })
   const heapToBuffer = add(paths.heapToBuffer.getPoints(24), PALETTE.teal, {
-    arrows: 2,
     speed: 0.3,
     opacity: 0.12,
-    wiggle: 0.09,
   })
   const indexToBuffer = add(paths.indexToBuffer.getPoints(24), PALETTE.violet, {
-    arrows: 2,
     speed: 0.3,
     opacity: 0.12,
-    wiggle: 0.09,
   })
   const ginToBuffer = add(paths.ginToBuffer.getPoints(24), PALETTE.magenta, {
-    arrows: 2,
     speed: 0.28,
     opacity: 0.12,
-    wiggle: 0.09,
   })
 
   const all = [execToWal, heapToBuffer, indexToBuffer, ginToBuffer]
@@ -371,11 +253,9 @@ export class QueryChain {
 
   add(points: THREE.Vector3[], color: number, opts: FlowOptions = {}) {
     const f = new FlowLine(points, color, {
-      arrows: 4,
       speed: 0.55,
       opacity: 0.42,
-      size: 1.25,
-      wiggle: 0.1,
+      width: 1.6,
       ...opts,
     })
     this.flows.push(f)

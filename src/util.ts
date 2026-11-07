@@ -1,5 +1,8 @@
 import * as THREE from 'three'
 import { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
+import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
+import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
+import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 
 export const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
 export const easeInOutCubic = (t: number) =>
@@ -67,51 +70,106 @@ export function neonEdges(geo: THREE.BufferGeometry, color: number, opacity = 0.
 }
 
 /**
- * 12 edges of a unit cube centred on the origin: two vertices per edge, 24 in
- * total. No faces, no triangles — just the skeleton of a box.
+ * 12 edges of a unit cube centred on the origin, stored as separate segments:
+ * [x1,y1,z1, x2,y2,z2, …] for each edge. No faces, no triangles.
  */
-const UNIT_BOX_EDGES = (() => {
+const UNIT_BOX_EDGE_POINTS: number[] = (() => {
   const v: number[] = []
   const c = [-0.5, 0.5]
   for (const y of c) for (const z of c) v.push(-0.5, y, z, 0.5, y, z) // along x
   for (const x of c) for (const z of c) v.push(x, -0.5, z, x, 0.5, z) // along y
   for (const x of c) for (const y of c) v.push(x, y, -0.5, x, y, 0.5) // along z
+  return v
+})()
+
+/** Plain 1 px line geometry — used only as an invisible picking proxy. */
+const UNIT_BOX_PICK_GEO = (() => {
   const g = new THREE.BufferGeometry()
-  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3))
+  g.setAttribute('position', new THREE.Float32BufferAttribute(UNIT_BOX_EDGE_POINTS, 3))
   return g
 })()
+
+/* ----------------------------- fat line support ---------------------------- */
+
+/**
+ * Fat lines (Line2 / LineSegments2) are rasterised as screen-space quads, which
+ * is the fix for a 1 px GL line breaking into dashes at grazing angles. They
+ * need the viewport size, so every LineMaterial registers here.
+ */
+const lineMaterials: LineMaterial[] = []
+
+export function registerLineMaterial(m: LineMaterial) {
+  m.resolution.set(window.innerWidth, window.innerHeight)
+  lineMaterials.push(m)
+  return m
+}
+
+export function releaseLineMaterial(m: LineMaterial) {
+  const i = lineMaterials.indexOf(m)
+  if (i >= 0) lineMaterials.splice(i, 1)
+  m.dispose()
+}
+
+/** Call on resize — otherwise fat lines render at the wrong width. */
+export function setLineResolution(w: number, h: number) {
+  for (const m of lineMaterials) m.resolution.set(w, h)
+}
 
 /**
  * A box drawn as nothing but its 12 edges — no faces, no thickness, no width.
  * One primitive for every volume we want to point at: the process cage, the
  * disk plates, the table selection marquees. Colour + bounds is the whole API,
  * so anything that outlines something outlines it the same way.
+ *
+ * The visible edges are fat lines, so an outline stays solid at any angle. An
+ * invisible 1 px twin rides along with them purely for picking, because the
+ * world-space pick radius we want cannot be expressed by a screen-space line.
  */
-export class OutlineBox extends THREE.LineSegments {
+export class OutlineBox extends THREE.Group {
+  private glowMat: LineMaterial
   private baseColor: number
   private baseOpacity: number
+  readonly w: number
+  readonly h: number
+  readonly d: number
 
-  constructor(
-    readonly w: number,
-    readonly h: number,
-    readonly d: number,
-    color: number,
-    opacity = 0.7,
-  ) {
-    super(
-      UNIT_BOX_EDGES,
-      new THREE.LineBasicMaterial({
+  constructor(w: number, h: number, d: number, color: number, opacity = 0.7) {
+    super()
+    this.w = w
+    this.h = h
+    this.d = d
+    this.baseColor = color
+    this.baseOpacity = opacity
+
+    this.glowMat = registerLineMaterial(
+      new LineMaterial({
         color,
+        linewidth: 1.2,
         transparent: true,
         opacity,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
-        toneMapped: false,
+        worldUnits: false,
       }),
     )
-    this.baseColor = color
-    this.baseOpacity = opacity
-    this.scale.set(w, h, d)
+    const glow = new LineSegments2(
+      new LineSegmentsGeometry().setPositions(UNIT_BOX_EDGE_POINTS),
+      this.glowMat,
+    )
+    glow.frustumCulled = false
+    glow.scale.set(w, h, d)
+    this.add(glow)
+
+    const pick = new THREE.LineSegments(
+      UNIT_BOX_PICK_GEO,
+      new THREE.LineBasicMaterial({ visible: false }),
+    )
+    pick.name = 'pick'
+    // scale the picker itself, not its parent: three divides the raycast
+    // threshold by the object's own scale, and a unit-scaled line inside a
+    // scaled group would get a pick radius 20x too fat
+    pick.scale.set(w, h, d)
+    this.add(pick)
   }
 
   /** Place by centre point. */
@@ -128,7 +186,7 @@ export class OutlineBox extends THREE.LineSegments {
 
   setColor(color: number) {
     this.baseColor = color
-      ; (this.material as THREE.LineBasicMaterial).color.setHex(color)
+    this.glowMat.color.setHex(color)
     return this
   }
 
@@ -137,7 +195,7 @@ export class OutlineBox extends THREE.LineSegments {
    * Never a second box drawn around the same volume.
    */
   highlight(on: boolean, color = 0xffffff) {
-    const m = this.material as THREE.LineBasicMaterial
+    const m = this.glowMat
     m.color.setHex(on ? color : this.baseColor)
     m.opacity = on ? Math.min(1, this.baseOpacity + 0.5) : this.baseOpacity
     return this

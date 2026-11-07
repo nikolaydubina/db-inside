@@ -7,7 +7,7 @@ import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { initHud } from './ui'
-import { Ticker, label, rand, OutlineBox } from './util'
+import { Ticker, label, rand, OutlineBox, setLineResolution } from './util'
 
 const canvas = document.querySelector<HTMLCanvasElement>('#c')!
 const labelHost = document.querySelector<HTMLElement>('#labels')!
@@ -27,6 +27,8 @@ instance.group.add(bufferLabel)
 
 const paths = makePaths()
 const flows = makeFlows(scene, paths)
+// fat lines are drawn in screen space, so they need the viewport size
+setLineResolution(window.innerWidth, window.innerHeight)
 
 const sim = new EngineSim(instance, ticker, scene, paths, flows)
 
@@ -163,16 +165,14 @@ const pointer = new THREE.Vector2(-2, -2)
 let pointerPx = { x: 0, y: 0 }
 let hovered: THREE.Object3D | null = null
 
-const hoverBox = new THREE.Box3Helper(new THREE.Box3(), 0x35e0ff)
+const hoverBox = new OutlineBox(1, 1, 1, 0x35e0ff, 0.6)
 hoverBox.visible = false
-const hbMat = hoverBox.material as THREE.LineBasicMaterial
-hbMat.transparent = true
-hbMat.opacity = 0.5
-hbMat.depthWrite = false
 scene.add(hoverBox)
 
 /** The outline currently tinted by hover/selection, so it can be restored. */
 let glowing: OutlineBox | null = null
+const _boxSize = new THREE.Vector3()
+const _boxCentre = new THREE.Vector3()
 
 canvas.addEventListener('pointermove', (e) => {
   pointerPx = { x: e.clientX, y: e.clientY }
@@ -416,9 +416,16 @@ function frame() {
   } else if (target) {
     const box = new THREE.Box3().setFromObject(target)
     box.expandByScalar(0.08)
-    hoverBox.box.copy(box)
+    const size = box.getSize(_boxSize)
+    const centre = box.getCenter(_boxCentre)
+    hoverBox.position.copy(centre)
+    hoverBox.scale.set(
+      Math.max(size.x, 0.05),
+      Math.max(size.y, 0.05),
+      Math.max(size.z, 0.05),
+    )
+    hoverBox.setColor(target === pinned ? 0xffffff : 0x35e0ff)
     hoverBox.visible = true
-    hbMat.color.setHex(target === pinned ? 0xffffff : 0x35e0ff)
   } else {
     hoverBox.visible = false
   }
@@ -440,5 +447,8 @@ function frame() {
   requestAnimationFrame(frame)
 }
 
-window.addEventListener('resize', () => world.resize())
+window.addEventListener('resize', () => {
+  world.resize()
+  setLineResolution(window.innerWidth, window.innerHeight)
+})
 requestAnimationFrame(frame)
