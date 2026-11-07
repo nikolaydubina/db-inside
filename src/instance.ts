@@ -48,7 +48,6 @@ export interface BackendPod {
   id: number
   group: THREE.Group
   ring: THREE.MeshStandardMaterial
-  beam: THREE.MeshBasicMaterial
   glow: THREE.SpriteMaterial
   active: boolean
   busy: boolean
@@ -917,7 +916,6 @@ export class PostgresInstance {
     const slots = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
     const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
     const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
-    const beamGeo = new THREE.CylinderGeometry(0.026, 0.026, 3.2, 6)
     const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
     const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
 
@@ -953,17 +951,6 @@ export class PostgresInstance {
       led.position.y = 0.24
       g.add(led)
 
-      const beam = new THREE.MeshBasicMaterial({
-        color: PALETTE.cyan,
-        transparent: true,
-        opacity: 0,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      })
-      const beamMesh = new THREE.Mesh(beamGeo, beam)
-      beamMesh.position.y = 1.75
-      g.add(beamMesh)
-
       const gl = halo(PALETTE.cyan, 2.4, 0)
       gl.position.y = 0.3
       g.add(gl)
@@ -973,7 +960,6 @@ export class PostgresInstance {
         id: i,
         group: g,
         ring,
-        beam,
         glow: gl.material,
         active: false,
         busy: false,
@@ -1428,12 +1414,10 @@ export class PostgresInstance {
 
       if (b.busy) {
         b.ring.emissiveIntensity = 2.2 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
-        b.beam.opacity = 0.3 + 0.14 * Math.sin(time * 8 + b.id)
         b.glow.opacity = 0.45
       } else {
         b.ring.emissiveIntensity =
           (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
-        b.beam.opacity = 0
         b.glow.opacity = b.active ? 0.08 : 0
       }
     }
