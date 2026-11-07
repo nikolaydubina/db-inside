@@ -71,25 +71,8 @@ Deploy command: `npx wrangler deploy` (root directory `/`, Node 20+).
 Manual deploy from a machine:
 
 ```bash
-npx wrangler login     # once
-npm run deploy         # wrangler builds and deploys
-```
-
-`public/_headers` is copied into `dist/` and sets immutable caching for hashed assets.
-
-### Deploying on tags
-
-Cloudflare's git integration only reacts to branch pushes — a tag push does not trigger a build.
-`.github/workflows/deploy.yml` covers exactly that case: it deploys on `v*` tags (and manual runs) and
-deliberately **not** on `master`, so commits are not deployed twice.
-
-Required repository secrets (Settings → Secrets and variables → Actions):
-
-- `CLOUDFLARE_API_TOKEN` — token with the *Edit Cloudflare Workers* template
-- `CLOUDFLARE_ACCOUNT_ID` — from the Cloudflare dashboard URL
-
-```bash
-git tag v0.1.0 && git push origin v0.1.0   # triggers a deploy
+npx wrangler login
+npm run deploy
 ```
 
 ## Author
