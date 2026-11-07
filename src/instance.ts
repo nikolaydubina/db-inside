@@ -88,6 +88,12 @@ export interface Page8K {
   hintAmt: number
   /** No page here at all: free space the files could grow into. */
   free: boolean
+  /**
+   * A page that belongs to postgres itself rather than to user data: a system
+   * catalog, an FSM/VM fork, or the commit log. Drawn grey — the scene's way of
+   * saying "this is not yours".
+   */
+  system: SystemArea | null
   /** Holds dead row versions: VACUUM will reclaim the space inside it. */
   dead: boolean
   busy: boolean
@@ -153,6 +159,56 @@ const RAM_LIFT = 1.15
  * every fourth block edge lands on a grid line.
  */
 export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0.28, bd: 0.46 }
+
+/** Grey tint used for everything postgres owns rather than the user. */
+const SYSTEM_GREY = 0x93a1ae
+
+export type SystemArea = 'catalog' | 'fork' | 'clog'
+
+/**
+ * PGDATA is not only user tables. Every database carries its own copy of the
+ * catalogs, each relation has FSM/VM forks beside it, and pg_xact holds two
+ * bits of commit status per transaction. They are small next to the data, and
+ * that is exactly what the grey runs show: real, but not where the rows live.
+ */
+const SYSTEM_RUNS: {
+  area: SystemArea
+  label: string
+  /** inclusive column span */
+  c0: number
+  c1: number
+  rows: [number, number]
+  files: string[]
+  what: string
+}[] = [
+    {
+      area: 'catalog',
+      label: 'CATALOGS',
+      c0: 24,
+      c1: 29,
+      rows: [12, 13],
+      files: ['pg_class', 'pg_attribute', 'pg_index', 'pg_type', 'pg_proc', 'pg_depend'],
+      what: 'The catalog relations every database carries a copy of: what each table is, which columns it has, which indexes exist, and what depends on what. Same 8 kB page as a heap — they are small because there are few of them, not because the pages are smaller: a fresh cluster keeps the whole set in a few megabytes. Queries read them too — the planner asks pg_class and pg_statistic what it is planning over.',
+    },
+    {
+      area: 'fork',
+      label: 'FSM · VM',
+      c0: 30,
+      c1: 31,
+      rows: [12, 13],
+      files: ['_fsm', '_vm'],
+      what: 'Two thin side files per relation, in 8 kB pages like everything else. One byte of free space map per heap page covers 64 MB of relation; two bits of visibility map per page cover 256 MB. The free space map says which pages have room for a new tuple, so an insert need not read every page; the visibility map says which pages are all-visible, which is what lets VACUUM and index-only scans skip work.',
+    },
+    {
+      area: 'clog',
+      label: 'CLOG',
+      c0: 32,
+      c1: 33,
+      rows: [12, 13],
+      files: ['pg_xact', 'pg_multixact'],
+      what: 'Two bits per transaction, and nothing else: committed, aborted, in progress, or not yet assigned. One 8 kB page therefore covers 32,768 transactions, which is why the commit log stays tiny even on a busy server. Every visibility check starts here.',
+    },
+  ]
 
 /**
  * The WAL is not a column floating in the air: it is a contiguous run of slots
@@ -900,6 +956,7 @@ export class PostgresInstance {
           hint: hints[randInt(0, hints.length - 1)],
           hintAmt: free ? 0 : Math.random() < 0.4 ? rand(0.05, 0.16) : 0,
           free,
+          system: null,
           dead: false,
           busy: false,
         }
@@ -913,6 +970,7 @@ export class PostgresInstance {
     this.pages8k.forEach((p) => {
       if (!p.free) this.setFill(p, p.fill)
     })
+    this.markSystemAreas()
 
     // in the untouched tail, draw the slot lattice only — no pages, just room
     const freeCols = Math.floor(cols * 0.2)
@@ -1024,7 +1082,27 @@ export class PostgresInstance {
     if (walIdx >= 0) {
       return { key: `wal-${walIdx}`, info: this.walSegmentInfo(walIdx), box: this.blockBox(p) }
     }
+    if (p.system) {
+      return { key: `sys-${p.i}`, info: this.systemInfo(p), box: this.blockBox(p) }
+    }
     return { key: `page-${p.i}`, info: this.blockInfo(p), box: this.blockBox(p) }
+  }
+
+  /** A grey block: one page of something postgres keeps for itself. */
+  private systemInfo(p: Page8K): Info {
+    const run = SYSTEM_RUNS.find((r) => r.area === p.system)
+    if (!run) return this.blockInfo(p)
+    const file = run.files[(p.col - run.c0) % run.files.length]
+    const pageInFile = p.row - run.rows[0] + Math.floor((p.col - run.c0) / run.files.length)
+    return {
+      title: `${file} · system page`,
+      body:
+        `${run.what} This particular block is one 8 kB page of ${file}. It is drawn grey because it is ` +
+        `not user data: you cannot query it as a table, and VACUUM writes into it rather than reclaiming ` +
+        `it. In a real PGDATA these live in base/<dboid>/ next to the heap files, plus pg_xact for the ` +
+        `commit status — small, but every query touches them.`,
+      meta: `${run.label.toLowerCase()} · page ${pageInFile} of ${file} · postgres-owned, not your data`,
+    }
   }
 
   /** Tight bounds of one block, for the hover outline. */
@@ -1144,6 +1222,76 @@ export class PostgresInstance {
         this.showBlock(p)
       })
     }
+  }
+
+  /**
+   * Paint the grey runs that belong to postgres rather than to user data, cage
+   * them together and tag the cage. They stay low: these files are small next
+   * to the heaps, and the cage says "same disk, different owner".
+   */
+  private markSystemAreas() {
+    let c0 = Infinity
+    let c1 = -Infinity
+    let r0 = Infinity
+    let r1 = -Infinity
+    for (const run of SYSTEM_RUNS) {
+      for (let r = run.rows[0]; r <= run.rows[1]; r++) {
+        for (let c = run.c0; c <= run.c1; c++) {
+          const p = this.pages8k.find((b) => b.row === r && b.col === c)
+          if (!p || p.free) continue
+          p.system = run.area
+          p.hint = SYSTEM_GREY
+          p.hintAmt = 0.92
+          p.shade = rand(0.86, 1.04)
+          this.setFill(p, rand(0.16, 0.42))
+          c0 = Math.min(c0, c)
+          c1 = Math.max(c1, c)
+          r0 = Math.min(r0, r)
+          r1 = Math.max(r1, r)
+        }
+      }
+    }
+    if (c1 < c0) return
+
+    const x0 = pageX(c0) - PAGE_GRID.gx / 2
+    const x1 = pageX(c1) + PAGE_GRID.gx / 2
+    const z0 = pageZ(r0) - PAGE_GRID.gz / 2
+    const z1 = pageZ(r1) + PAGE_GRID.gz / 2
+    const cx = (x0 + x1) / 2
+    const cz = (z0 + z1) / 2
+
+    const cage = new OutlineBox(x1 - x0, 0.55, z1 - z0, SYSTEM_GREY, 0.5).centre(
+      cx,
+      PAGE_Y,
+      cz,
+    )
+    this.group.add(cage)
+
+    const pick = new THREE.Mesh(
+      new THREE.BoxGeometry(x1 - x0, 1.2, z1 - z0),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    pick.position.set(cx, PAGE_Y + 0.2, cz)
+    this.group.add(pick)
+    this.register(
+      pick,
+      {
+        title: 'PG SYSTEM — what postgres keeps for itself',
+        body:
+          'Not all of pgdata is your data. Inside this cage: the catalog relations every database carries ' +
+          'a copy of (what each table is, what columns it has, what depends on what), the free space and ' +
+          'visibility maps that sit beside each relation, and the commit log. They are ordinary 8 kB pages ' +
+          'like everything else here — the same block size, the same buffer pool — they are just small, ' +
+          'because there are few of them: a fresh cluster holds the whole set in a few megabytes. Hover a ' +
+          'grey block to see which file it belongs to.',
+        meta: 'catalogs · free space map · visibility map · commit log · 8 kB pages',
+      },
+      cage,
+    )
+
+    const lab = label('PG SYSTEM')
+    lab.position.set(x0 + 0.45, PAGE_Y + 0.95, z1 + 0.1)
+    this.group.add(lab)
   }
 
   /** Expanding ring on top of one page: "the arrow landed exactly here". */
