@@ -9,6 +9,7 @@ export interface HudHandlers {
   setSpeed(v: number): void
   setIndexScan(on: boolean): void
   setOrbit(on: boolean): void
+  setFly(on: boolean): void
   unpin(): void
 }
 
@@ -29,6 +30,8 @@ export function initHud(handlers: HudHandlers) {
   const speedVal = $<HTMLElement>('#speed-val')
   const chkIndex = $<HTMLInputElement>('#chk-index')
   const chkOrbit = $<HTMLInputElement>('#chk-orbit')
+  const chkFly = $<HTMLInputElement>('#chk-fly')
+  const flyHint = $<HTMLElement>('#fly-hint')
 
   const stQueries = $<HTMLElement>('#st-queries')
   const stHit = $<HTMLElement>('#st-hit')
@@ -100,8 +103,14 @@ export function initHud(handlers: HudHandlers) {
   })
   chkIndex.addEventListener('change', () => handlers.setIndexScan(chkIndex.checked))
   chkOrbit.addEventListener('change', () => handlers.setOrbit(chkOrbit.checked))
+  chkFly.addEventListener('change', () => {
+    flyHint.hidden = !chkFly.checked
+    handlers.setFly(chkFly.checked)
+  })
 
   window.addEventListener('keydown', (e) => {
+    const el = e.target as HTMLElement | null
+    if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
     if (e.code === 'Space') {
       e.preventDefault()
       handlers.runQuery()

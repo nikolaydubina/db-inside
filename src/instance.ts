@@ -111,7 +111,8 @@ export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0
  * grows into. Segments are appended left to right and recycled in place.
  */
 const WAL_ROW = 16
-const WAL_C0 = 28
+/** Leftmost slot of the run — the free space it grows into sits just below. */
+const WAL_C0 = 10
 const WAL_LEN = 12
 const PAGE_Y = 0.25
 const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
@@ -192,7 +193,7 @@ export const ANCHOR = {
   exec: V(1.6, 6.85, -2.4),
   result: V(8.2, 6.6, -1.8),
   bufferCenter: V(-1.0, 5.5, -1.4),
-  wal: V(5.25, 0.55, 7.25),
+  wal: V(1.25, 0.55, 7.25),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
   disk: V(7.0, 0.5, 5.6),
@@ -590,7 +591,8 @@ export class PostgresInstance {
       wb.add(m)
       this.walBufferMats.push(mat)
     }
-    wb.position.set(pageX(WAL_C0 + 3), 1.75, pageZ(WAL_ROW) + 0.3)
+    const walMid = pageX(WAL_C0 + (WAL_LEN - 1) / 2)
+    wb.position.set(walMid, 1.75, pageZ(WAL_ROW) + 0.3)
     this.group.add(wb)
 
     const wbPick = new THREE.Mesh(
@@ -606,11 +608,11 @@ export class PostgresInstance {
     })
 
     const wbLab = label('WAL BUFFERS · RAM')
-    wbLab.position.set(pageX(WAL_C0 + 3), 2.35, pageZ(WAL_ROW) + 0.3)
+    wbLab.position.set(walMid, 2.35, pageZ(WAL_ROW) + 0.3)
     this.group.add(wbLab)
 
     const lab = label('WAL · DISK')
-    lab.position.set(x0, PAGE_Y + 0.75, z1 + 0.15)
+    lab.position.set(x0 + 0.4, PAGE_Y + 0.85, z1 + 0.15)
     this.group.add(lab)
   }
 
@@ -649,7 +651,9 @@ export class PostgresInstance {
 
   /** Centre of WAL segment `i` in the page lattice. */
   walSlot(i: number) {
-    return new THREE.Vector3(pageX(WAL_C0 + i), PAGE_Y, pageZ(WAL_ROW))
+    // index 0 is the oldest segment: it sits at the far end, and appends walk
+    // leftwards towards the unallocated space
+    return new THREE.Vector3(pageX(WAL_C0 + (WAL_LEN - 1 - i)), PAGE_Y, pageZ(WAL_ROW))
   }
 
   /** The disk plate is tiled edge to edge with 8 kB pages — this *is* the disk. */
@@ -720,7 +724,9 @@ export class PostgresInstance {
           busy: false,
         }
         this.pages8k.push(block)
-        if (onWal) this.walBlocks.push(block)
+        // unshift keeps walBlocks in *write* order: index 0 is the oldest
+        // segment at the far end, so appends walk towards the free space
+        if (onWal) this.walBlocks.unshift(block)
         i++
       }
     }
@@ -991,8 +997,10 @@ export class PostgresInstance {
       this.group.add(pick)
       this.register(pick, region.info)
 
+      // centred above the run, at staggered heights so labels never collide
+      const stagger = TABLE_REGIONS.findIndex((r) => r.label === region.label) * 0.45
       const lab = label(`TABLE: ${region.label}`)
-      lab.position.set(cx - w / 2, PAGE_Y + h + 0.55, z0)
+      lab.position.set(cx, PAGE_Y + h + 0.55 + stagger, cz)
       this.group.add(lab)
 
       ANCHOR[region.anchor].set(cx, PAGE_Y, cz)
@@ -1530,7 +1538,7 @@ export class PostgresInstance {
     drone.add(halo(0xc7ff5a, 2.4, 0.4))
     drone.position.set(-8.5, 2.9, DISK_PLATE.cz)
     const lab = label('AUTOVACUUM')
-    lab.position.set(0.55, 0.35, 0)
+    lab.position.set(0.6, 0.95, 0)
     drone.add(lab)
 
     this.group.add(drone)

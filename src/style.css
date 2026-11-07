@@ -646,13 +646,16 @@ h2::after {
 
 .tag {
   font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.2em;
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: rgba(180, 220, 240, 0.72);
-  text-shadow: 0 0 10px rgba(0, 12, 20, 0.95), 0 0 3px rgba(0, 10, 18, 0.9);
+  color: rgba(196, 230, 246, 0.92);
+  text-shadow: 0 0 12px rgba(0, 8, 14, 1), 0 0 4px rgba(0, 8, 14, 1);
   white-space: nowrap;
-  padding-left: 10px;
+  padding: 2px 8px 2px 12px;
+  border-radius: 3px;
+  background: rgba(4, 11, 18, 0.55);
+  backdrop-filter: blur(2px);
   position: relative;
   transition: color 0.25s, opacity 0.25s;
 }
@@ -672,6 +675,44 @@ h2::after {
 
 .tag.hot {
   color: #e6faff;
+}
+
+/* ---------- fly crosshair ---------- */
+
+.crosshair {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  pointer-events: none;
+  z-index: 30;
+  opacity: 0.75;
+}
+
+.crosshair::before,
+.crosshair::after {
+  content: '';
+  position: absolute;
+  background: rgba(140, 230, 255, 0.85);
+  box-shadow: 0 0 6px rgba(53, 224, 255, 0.9);
+}
+
+.crosshair::before {
+  left: 50%;
+  top: 0;
+  width: 1px;
+  height: 100%;
+  margin-left: -0.5px;
+}
+
+.crosshair::after {
+  top: 50%;
+  left: 0;
+  height: 1px;
+  width: 100%;
+  margin-top: -0.5px;
 }
 
 /* ---------- tooltip ---------- */

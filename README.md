@@ -116,6 +116,10 @@ regressions show up immediately. Open the page with `?debug` to have telemetry o
 
 ## Interactions
 
+- **fly · wasd** (checkbox in Simulate) — `W A S D` to move, `Q`/`E` down/up, `Shift` for 3× boost.
+  **Hold the mouse button and drag to look around** (no pointer lock, no mode you cannot escape); release
+  and it stops. While flying, a drag rotates the view instead of orbiting the island. Flying suspends
+  auto-orbit.
 - **space** or `run query` — send a query: falls from the sky, through parser/planner/executor, into
   buffers (hit) or down to disk (miss), then rows rise back to the client.
 - **c** — checkpoint: dirty pages flushed, WAL fsynced.

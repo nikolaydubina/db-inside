@@ -72,6 +72,7 @@
             <span class="glyph">⇄</span> vacuum full
           </button>
         </div>
+        <p class="hint" id="fly-hint" hidden>hold mouse to look · w a s d + q e · shift</p>
         <label class="slider">
           <span class="slider-label">speed</span>
           <input type="range" id="speed" min="0.25" max="4" step="0.25" value="1" />
@@ -87,6 +88,11 @@
             <input type="checkbox" id="chk-orbit" checked />
             <span class="track"></span>
             <span class="label">auto orbit</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="chk-fly" />
+            <span class="track"></span>
+            <span class="label">fly · wasd</span>
           </label>
         </div>
       </section>
@@ -144,6 +150,7 @@
       <p class="hint">orange blocks = disk pages · floating = in RAM · grid = floor</p>
     </div>
 
+    <div id="crosshair" class="crosshair" hidden></div>
     <div id="tooltip" class="tooltip"></div>
     <div id="boot" class="boot">
       <div class="boot-ring"></div>
