@@ -161,6 +161,9 @@ export function initHud(handlers: HudHandlers) {
       insTitle.textContent = info.title
       insBody.textContent = info.body
       insMeta.textContent = info.meta ?? ''
+      // the card may be below the fold of a tall column; bring it into view
+      // rather than letting the reader hunt for what they just clicked
+      inspector.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     },
     unpin() {
       inspector.hidden = true

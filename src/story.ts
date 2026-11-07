@@ -16,10 +16,97 @@ import type { EngineSim, SimStats } from './sim'
  * `audit()`. If a step ever stops matching, it says so instead of lying.
  */
 
+/**
+ * The write-ahead log. The interesting claim is not "there is a log" but the
+ * ordering rule: the record describing a change reaches durable storage before
+ * the page it changes ever could, and a commit is exactly the wait for that.
+ */
+export const WAL_STORY: StoryStep[] = [
+    {
+        title: 'a log beside the data',
+        body: 'PostgreSQL never writes a changed page straight to disk. Every change is first appended to this run of 16 MB segment blocks — the write-ahead log. If the server dies mid-write, the log is what it replays to rebuild the data files.',
+        subject: (s) => ({ id: 'wal run', box: s.walRun() }),
+        dir: [0.15, 0.6, 1],
+        fov: 30,
+        padding: 1.25,
+        expect: (c) => c.walSegments >= 1,
+        waitFor: 'at least one segment in use',
+    },
+    {
+        title: 'the head moves',
+        body: 'Records are appended at the head, and the head walks along the run as segments fill. Only the tail is active; everything behind it is already written and can be recycled at the next checkpoint.',
+        subject: (s) => s.walHead(),
+        dir: [0.2, 0.5, 1],
+        fov: 26,
+        padding: 2.2,
+        lookShift: [0, -0.5, 0],
+        send: 6,
+        delay: 700,
+        sustain: 4,
+        speed: 4,
+        expect: (c) => c.walSegments >= 3,
+        waitFor: 'the run filling past the third segment',
+    },
+    {
+        title: 'wal_buffers is memory',
+        body: 'The newest records sit in wal_buffers — a small circular strip of shared memory above the head, not on disk. These cubes are a staging area: if the machine loses power now, everything in them is gone. That is why they float.',
+        subject: (s) => ({ id: 'wal_buffers', box: s.walBuffers() }),
+        dir: [0, 0.42, 1],
+        fov: 26,
+        padding: 1.35,
+        lookShift: [0, -0.55, 0],
+        send: 4,
+        delay: 700,
+        speed: 3,
+        expect: (c) => c.walPending > 0,
+        waitFor: 'bytes sitting in the in-memory buffer',
+    },
+    {
+        title: 'commit waits for the flush',
+        body: 'COMMIT does not return when the statement finishes — it returns when the log up to that commit record has been written and fsynced. That fsync is the durability guarantee, and it is also why synchronous commits cost what they do.',
+        subject: (s) => ({ id: 'wal_buffers', box: s.walBuffers() }),
+        dir: [0, 0.42, 1],
+        fov: 26,
+        padding: 1.35,
+        lookShift: [0, -0.55, 0],
+        act: (s) => {
+            void s.flush()
+        },
+        delay: 600,
+        speed: 2,
+        expect: (c) => c.walBytes > 0 && c.walPending === 0,
+        waitFor: 'the buffer tail forced to disk',
+    },
+    {
+        title: 'checkpoint recycles the run',
+        body: 'A checkpoint flushes everything, marks the data files consistent, then recycles the old segments: they are overwritten in place, never moved elsewhere. The run does not grow forever — it comes back around to the start.',
+        subject: (s) => ({ id: 'wal run', box: s.walRun() }),
+        dir: [0.15, 0.6, 1],
+        fov: 30,
+        padding: 1.25,
+        act: (s) => {
+            void s.checkpoint()
+        },
+        delay: 500,
+        speed: 2,
+        expect: (c) => c.walSegments <= 2,
+        waitFor: 'old segments recycled back to the start',
+    },
+]
+
 /** The slice of simulation state a caption is allowed to talk about. */
 export type StoryFacts = Pick<
     SimStats,
-    'connections' | 'maxConnections' | 'busyBackends' | 'buffered' | 'queued' | 'rps' | 'queries'
+    | 'connections'
+    | 'maxConnections'
+    | 'busyBackends'
+    | 'buffered'
+    | 'queued'
+    | 'rps'
+    | 'queries'
+    | 'walBytes'
+    | 'walSegments'
+    | 'walPending'
 >
 
 /**
@@ -44,6 +131,12 @@ export interface StoryScene {
     executing(): StorySubject | null
     /** is an already-locked subject still worth looking at? */
     valid(id: string): boolean
+    /** the on-disk WAL run */
+    walRun(): THREE.Box3
+    /** the floating wal_buffers cubes */
+    walBuffers(): THREE.Box3
+    /** the segment being appended to right now */
+    walHead(): StorySubject | null
 }
 
 export interface StoryStep {
@@ -67,6 +160,8 @@ export interface StoryStep {
     send?: number
     /** wait before firing, so the caption lands before the motion */
     delay?: number
+    /** something to trigger, e.g. a checkpoint */
+    act?: (sim: EngineSim) => void
     /**
      * Slider speed to run at while this step is showing. Saturation steps want
      * the clock a few times faster or the pool takes four seconds per query to
@@ -210,6 +305,12 @@ export const STORIES: StoryDef[] = [
         hint: 'what happens when more queries arrive than the connections can run',
         steps: QUEUE_STORY,
     },
+    {
+        id: 'wal',
+        label: 'the write-ahead log',
+        hint: 'why a change is written to a log before the page it changes',
+        steps: WAL_STORY,
+    },
 ]
 
 export interface StoryOptions {
@@ -273,6 +374,9 @@ export function createStory({
             queued: s.queued,
             rps: s.rps,
             queries: s.queries,
+            walBytes: s.walBytes,
+            walSegments: s.walSegments,
+            walPending: s.walPending,
         }
     }
 
@@ -389,10 +493,11 @@ export function createStory({
         }
         window.setTimeout(() => lockOn(step, mine), 400)
         const n = step.send ?? 0
-        if (n <= 0 && !step.sustain) return
+        if (n <= 0 && !step.sustain && !step.act) return
         window.setTimeout(() => {
             if (mine !== token || !running) return
             for (let i = 0; i < n; i++) void sim.runQuery()
+            step.act?.(sim)
             hold(mine, step)
         }, step.delay ?? 800)
     }

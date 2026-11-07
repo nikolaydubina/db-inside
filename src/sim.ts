@@ -19,6 +19,10 @@ export interface SimStats {
   hitRate: number
   latency: number
   walBytes: number
+  /** how many of the visual segments the log has reached */
+  walSegments: number
+  /** WAL bytes written but not yet fsynced — memory only, not durable */
+  walPending: number
   dead: number
   note: string
   connections: number
@@ -73,6 +77,9 @@ export class EngineSim {
   walBytes = 0
   live = 0
   indexScan = false
+  /** bytes already forced to disk since the run started */
+  private flushedBytes = 0
+  private flushing = false
   /** ambient background traffic; a story turns it off so its own taps are the only load */
   ambient = true
   note = 'shared_buffers · 8 kB pages'
@@ -133,6 +140,8 @@ export class EngineSim {
       hitRate,
       latency: this.lastLatency,
       walBytes: this.walBytes,
+      walSegments: this.inst.walFilledSegments,
+      walPending: Math.max(0, this.walBytes - this.flushedBytes),
       dead: this.inst.deadTuples,
       note:
         this.queued > 0
@@ -582,6 +591,23 @@ export class EngineSim {
     }
   }
 
+  /**
+   * A commit-level flush: the tail of the log is written and fsynced, and the
+   * commit returns. This is the only moment WAL bytes become durable.
+   */
+  async flush() {
+    if (this.flushing) return
+    this.flushing = true
+    try {
+      this.note = 'commit · XLogFlush waiting for the WAL tail to reach disk'
+      await this.inst.flushWal()
+      this.flushedBytes = this.walBytes
+      this.note = 'commit returned · everything up to this LSN is durable'
+    } finally {
+      this.flushing = false
+    }
+  }
+
   async checkpoint() {
     if (this.checkpointing) return
     this.checkpointing = true
@@ -589,6 +615,7 @@ export class EngineSim {
     try {
       await this.inst.dirtyPages(12)
       await this.inst.flushWal()
+      this.flushedBytes = this.walBytes
 
       // the WAL is already on disk: at checkpoint its old segments are simply
       // recycled in place — nothing is moved to another place

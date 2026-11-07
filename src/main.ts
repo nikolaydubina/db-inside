@@ -8,6 +8,7 @@ import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { createStory } from './story'
 import type { StoryScene } from './story'
+import { initCredits } from './credits'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox } from './util'
 
@@ -169,6 +170,9 @@ const storyScene: StoryScene = {
     const pod = instance.backends[n - 1]
     return !!pod && pod.active && pod.busy
   },
+  walRun: () => instance.walRunBox(),
+  walBuffers: () => instance.walBuffersBox(),
+  walHead: () => ({ id: `wal head`, box: instance.walHeadBox() }),
 }
 
 const story = createStory({
@@ -199,19 +203,20 @@ const story = createStory({
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlStory = story
+initCredits()
 
 // build the story list from the same registry the stories themselves come from
 const storiesEl = document.getElementById('stories')
 if (storiesEl) {
   for (const s of story.stories) {
     const b = document.createElement('button')
-    b.className = 'vbtn'
+    b.className = 'sitem'
     b.dataset.story = s.id
     b.textContent = s.label
     b.title = s.hint
     b.addEventListener('click', () => {
       story.start(s.id)
-      for (const el of storiesEl.querySelectorAll('.vbtn')) el.classList.remove('on')
+      for (const el of storiesEl.querySelectorAll('.sitem')) el.classList.remove('on')
       b.classList.add('on')
     })
     storiesEl.appendChild(b)

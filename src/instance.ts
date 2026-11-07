@@ -5,6 +5,7 @@ import {
   OutlineBox,
   breathe,
   easeInOutCubic,
+  floorLabel,
   halo,
   label,
   neonEdges,
@@ -451,8 +452,23 @@ export class PostgresInstance {
       plateEdge,
     )
 
-    const floorLab = label('DISK · ALL PAGE FILES')
-    floorLab.position.set(-10.2, 0.5, DISK_PLATE.cz + PAGE_D / 2 + 0.75)
+    // On the floor and off the plate, along the short axis, starting at the
+    // front corner past the metrics run. Same treatment as FREE SPACE: it is
+    // painted on the ground, so it foreshortens and goes away with the surface.
+    // Placement is on the ink, not the quad (the quad carries padding), so the
+    // first glyph begins on the corner and the text sits just off the edge.
+    const floorLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
+    floorLab.rotation.z = Math.PI / 2
+    const ink = floorLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
+    // Line the first glyph up with the corner of the block field itself, not
+    // the plate: the plate carries a margin, and that margin read as a gap
+    // between the D and the last block.
+    const fieldX = PAGE_W / 2
+    const fieldZ = pageZ(0) - PAGE_GRID.gz / 2 + PAGE_D
+    // rotation.z of +90° maps plane +x onto world -z and plane +y onto world
+    // -x, so the ink's left edge sets the start along the field edge and its
+    // top edge sits on that edge
+    floorLab.position.set(fieldX + ink.y1, 0.235, fieldZ + ink.x0)
     this.group.add(floorLab)
 
     const processLabel = label('POSTGRESQL')
@@ -1099,10 +1115,33 @@ export class PostgresInstance {
       ANCHOR[region.anchor].set(cx, PAGE_Y, cz)
     }
 
-    // point at a genuine hole in the field: space the files can grow into
-    const freeLab = label('FREE SPACE · ALLOCATABLE')
-    freeLab.position.set(pageX(5), PAGE_Y + 1.5, pageZ(7))
+    // point at a genuine hole in the field: space the files can grow into.
+    // Secondary by design — mid-grey and small, lying in the middle of the
+    // emptiness rather than sitting above it. Turned to run along the disk's
+    // shorter axis so it fits the gap instead of sprawling across the field.
+    const freeLab = floorLabel('FREE SPACE', {
+      height: 0.58,
+      color: 'rgba(128, 158, 178, 0.85)',
+      opacity: 0.55,
+      weight: 400,
+    })
+    freeLab.rotation.z = Math.PI / 2
+    freeLab.position.set(pageX(5), 0.235, pageZ(7))
     this.group.add(freeLab)
+
+    // tappable: the hole needs somewhere to send its explanation, now that the
+    // label only says two words
+    const freePick = new THREE.Mesh(
+      new THREE.BoxGeometry(3.2, 0.7, 4.6),
+      new THREE.MeshBasicMaterial({ visible: false }),
+    )
+    freePick.position.set(pageX(5), PAGE_Y, pageZ(7))
+    this.group.add(freePick)
+    this.register(freePick, {
+      title: 'Free space — room the files can grow into',
+      body: 'These slots hold no page at all. A table or index is a contiguous run of 8 kB pages, so when a relation runs out of pages it simply takes the next slots in its own file — this is where that growth comes from. Free space is not a fixed size and nothing owns it in advance: the files claim it as they fill. A table that was rewritten by VACUUM FULL gives slots back here.',
+      meta: 'unallocated · no page on disk · allocated on demand',
+    })
   }
 
   private buildIndex() {
@@ -1481,7 +1520,7 @@ export class PostgresInstance {
       })
     })
 
-    const lab = label('BACKENDS · CONNECTIONS')
+    const lab = label('BACKENDS')
     lab.position.set(-10.6, 11.05, 5.8)
     this.group.add(lab)
   }
@@ -1946,6 +1985,31 @@ export class PostgresInstance {
   walHeadTop(): THREE.Vector3 {
     const head = this.walHeadBlock
     return head ? this.blockTop(head) : this.walSlot(0).setY(PAGE_Y + PAGE_GRID.bh / 2)
+  }
+
+  /** Box around the whole on-disk WAL run. */
+  walRunBox() {
+    const box = new THREE.Box3()
+    for (let i = 0; i < this.walBlocks.length; i++) box.expandByPoint(this.walSlot(i))
+    return box.isEmpty() ? box : box.expandByScalar(PAGE_GRID.bh)
+  }
+
+  /** Box around the floating wal_buffers cubes. */
+  walBuffersBox() {
+    const box = new THREE.Box3()
+    const v = new THREE.Vector3()
+    for (const m of this.walBufBlocks) {
+      m.getWorldPosition(v)
+      box.expandByPoint(v)
+    }
+    return box.isEmpty() ? box : box.expandByScalar(PAGE_GRID.bh * 0.9)
+  }
+
+  /** Box around the segment being appended to right now. */
+  walHeadBox() {
+    const c = this.walSlot(this.walHeadIndex)
+    const r = new THREE.Vector3(PAGE_GRID.bw / 2, PAGE_GRID.bh / 2, PAGE_GRID.bd / 2)
+    return new THREE.Box3(c.clone().sub(r), c.clone().add(r))
   }
 
   get walFilledSegments() {

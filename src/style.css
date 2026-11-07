@@ -182,7 +182,9 @@ h1 span {
   align-items: flex-end;
   gap: 10px;
   pointer-events: auto;
-  max-height: calc(100% - 150px);
+  /* leave room for the credits block pinned to the bottom right, so a long
+     column never slides underneath the star badge */
+  max-height: calc(100% - 196px);
   overflow: auto;
   scrollbar-width: none;
 }
@@ -615,6 +617,39 @@ h2::after {
   color: #8ba6ba;
 }
 
+/*
+ * Long descriptions scroll inside the card instead of stretching the whole
+ * right-hand column and pushing the other cards around. The meta line stays
+ * outside the scroll area so it is always readable.
+ */
+.inspector #ins-body {
+  max-height: min(30vh, 220px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding-right: 7px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(120, 190, 230, 0.32) transparent;
+}
+
+.inspector #ins-body::-webkit-scrollbar {
+  width: 4px;
+}
+
+.inspector #ins-body::-webkit-scrollbar-thumb {
+  background: rgba(120, 190, 230, 0.3);
+  border-radius: 2px;
+}
+
+.inspector #ins-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@media (max-height: 720px) {
+  .inspector #ins-body {
+    max-height: 24vh;
+  }
+}
+
 .inspector p.ins-meta {
   margin-top: 8px;
   font-family: var(--mono);
@@ -686,13 +721,16 @@ h2::after {
   font-size: 9.5px;
   letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: rgba(196, 230, 246, 0.92);
-  text-shadow: 0 0 12px rgba(0, 8, 14, 1), 0 0 4px rgba(0, 8, 14, 1);
+  color: rgba(214, 240, 252, 0.95);
+  /* no chip behind the text: the label floats free, held legible by its own
+     glow instead of a panel that fights the scene behind it */
+  text-shadow:
+    0 0 12px rgba(0, 7, 12, 1),
+    0 0 4px rgba(0, 7, 12, 1),
+    0 1px 2px rgba(0, 7, 12, 0.9);
   white-space: nowrap;
-  padding: 2px 8px 2px 12px;
-  border-radius: 3px;
-  background: rgba(4, 11, 18, 0.55);
-  backdrop-filter: blur(2px);
+  padding: 0 0 0 12px;
+  background: none;
   position: relative;
   transition: color 0.25s, opacity 0.25s;
 }
@@ -865,8 +903,15 @@ h2::after {
 }
 
 @keyframes story-in {
-  from { opacity: 0; transform: translateX(-50%) translateY(8px); }
-  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(8px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
 }
 
 .story-head {
@@ -954,6 +999,7 @@ h2::after {
     width: calc(100vw - 24px);
     padding: 12px 13px 10px;
   }
+
   .story p {
     font-size: 11px;
   }
@@ -975,4 +1021,172 @@ h2::after {
 .story-state.ok {
   color: var(--teal);
   border-color: rgba(43, 255, 195, 0.3);
+}
+
+/* ---------- credits & star badge ---------- */
+
+.credits {
+  right: 26px;
+  bottom: 26px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 9px;
+  pointer-events: auto;
+}
+
+.gh {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px 7px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(120, 190, 230, 0.2);
+  background: linear-gradient(155deg, rgba(13, 24, 37, 0.82), rgba(6, 12, 20, 0.7));
+  backdrop-filter: blur(12px);
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: #a7c2d4;
+  text-decoration: none;
+  transition: border-color 0.18s, color 0.18s, box-shadow 0.18s;
+}
+
+.gh-icon {
+  width: 14px;
+  height: 14px;
+  fill: #8fa9bb;
+  transition: fill 0.18s, transform 0.18s;
+}
+
+.gh-label {
+  text-transform: uppercase;
+}
+
+/* the hairline GitHub puts between the label and the count */
+.gh-div {
+  width: 1px;
+  align-self: stretch;
+  min-height: 14px;
+  background: rgba(120, 190, 230, 0.22);
+  transition: background 0.18s;
+}
+
+.gh-count {
+  font-weight: 500;
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  color: var(--cyan);
+  min-width: 12px;
+  text-align: center;
+}
+
+.gh:hover {
+  border-color: rgba(53, 224, 255, 0.5);
+  color: #e4f4ff;
+  box-shadow: 0 0 24px rgba(53, 224, 255, 0.18);
+}
+
+.gh:hover .gh-icon {
+  fill: #e4f4ff;
+}
+
+.gh:hover .gh-div {
+  background: rgba(53, 224, 255, 0.45);
+}
+
+.fine {
+  margin: 0;
+  max-width: 300px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  line-height: 1.7;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #4d6a7c;
+}
+
+.fine b {
+  font-weight: 500;
+  color: #7fd7ee;
+}
+
+.fine a {
+  color: #7fa8c0;
+  text-decoration: none;
+  border-bottom: 1px solid rgba(120, 190, 230, 0.22);
+}
+
+.fine a:hover {
+  color: var(--cyan);
+  border-bottom-color: rgba(53, 224, 255, 0.5);
+}
+
+@media (max-width: 900px) {
+  .credits {
+    right: 12px;
+    bottom: 12px;
+  }
+
+  .fine {
+    display: none;
+  }
+}
+
+/* ---------- story list ---------- */
+
+/* plain clickable text, one per line — these are prose titles, not buttons */
+.stories {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 1px;
+}
+
+.sitem {
+  appearance: none;
+  width: 100%;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  color: #93b0c3;
+  transition: color 0.16s;
+}
+
+.sitem::before {
+  content: '▸';
+  display: inline-block;
+  width: 12px;
+  color: #3f5a6c;
+  transition: color 0.16s;
+}
+
+/* colour only: nothing in this HUD shifts on hover */
+.sitem:hover {
+  color: #e0f2fd;
+}
+
+.sitem:hover::before {
+  color: #7fd7ee;
+}
+
+.sitem.on {
+  color: var(--cyan);
+}
+
+.sitem.on::before {
+  color: var(--cyan);
+}
+
+.sitem:focus-visible {
+  outline: 1px solid rgba(53, 224, 255, 0.5);
+  outline-offset: 2px;
+  border-radius: 3px;
 }

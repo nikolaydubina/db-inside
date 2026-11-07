@@ -296,3 +296,104 @@ export function travel(
 /** Oscillating shimmer used for idle life. */
 export const breathe = (t: number, speed = 1, phase = 0) =>
   0.5 + 0.5 * Math.sin(t * speed + phase)
+
+/**
+ * Text drawn into a surface rather than floating in front of it: the string is
+ * rasterised to a canvas and mapped onto a flat quad lying on the floor plane.
+ * That way a label foreshortens with whatever it names — read it from above,
+ * lose it at a grazing angle — instead of always turning to face the camera the
+ * way the CSS2D tags do. Returns a mesh; caller positions and rotates it.
+ */
+export function floorLabel(
+  text: string,
+  opts: {
+    /** height of the text in world units */
+    height?: number
+    color?: string
+    opacity?: number
+    tracking?: number
+    weight?: number
+  } = {},
+): THREE.Mesh {
+  const fontPx = 44
+  const tracking = opts.tracking ?? 9
+  const weight = opts.weight ?? 500
+  const font = `${weight} ${fontPx}px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`
+  const paint = (ctx: CanvasRenderingContext2D) => {
+    ctx.font = font
+    // Chrome supports per-context tracking; other engines just get plain text
+    if ('letterSpacing' in ctx) {
+      ;(ctx as CanvasRenderingContext2D & { letterSpacing: string }).letterSpacing = `${tracking}px`
+    }
+  }
+
+  const probe = document.createElement('canvas').getContext('2d')!
+  paint(probe)
+  const pad = 14
+  const w = Math.ceil(probe.measureText(text).width) + pad * 2
+  const h = Math.ceil(fontPx * 1.55)
+
+  const canvas = document.createElement('canvas')
+  canvas.width = w * 2
+  canvas.height = h * 2
+  const ctx = canvas.getContext('2d')!
+  ctx.scale(2, 2)
+  paint(ctx)
+  ctx.textAlign = 'center'
+  ctx.textBaseline = 'middle'
+  ctx.fillStyle = opts.color ?? 'rgba(160, 214, 238, 0.9)'
+  ctx.fillText(text, w / 2, h / 2)
+
+  const tex = new THREE.CanvasTexture(canvas)
+  tex.colorSpace = THREE.SRGBColorSpace
+  tex.anisotropy = 8
+
+  const worldH = opts.height ?? 1.0
+  const worldW = worldH * (w / h)
+  const mesh = new THREE.Mesh(
+    new THREE.PlaneGeometry(worldW, worldH),
+    new THREE.MeshBasicMaterial({
+      map: tex,
+      transparent: true,
+      opacity: opts.opacity ?? 0.92,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      toneMapped: false,
+    }),
+  )
+  // lay it flat: the plane's +y then points away from the default camera, so
+  // the text reads normally from the front
+  mesh.rotation.x = -Math.PI / 2
+  mesh.userData.width = worldW
+  // Where the glyphs actually are, in plane coordinates. Measured off the
+  // pixels rather than estimated from the font metrics: letter tracking, side
+  // bearings and the line-height box all add space the quad carries but the
+  // ink does not, so anything lining this text up against an edge would
+  // otherwise leave a visible gap.
+  const px = ctx.getImageData(0, 0, canvas.width, canvas.height).data
+  let x0 = canvas.width
+  let x1 = -1
+  let y0 = canvas.height
+  let y1 = -1
+  for (let py = 0; py < canvas.height; py++) {
+    for (let pxi = 0; pxi < canvas.width; pxi++) {
+      if (px[(py * canvas.width + pxi) * 4 + 3] > 8) {
+        if (pxi < x0) x0 = pxi
+        if (pxi > x1) x1 = pxi
+        if (py < y0) y0 = py
+        if (py > y1) y1 = py
+      }
+    }
+  }
+  const known = x1 >= 0
+  mesh.userData.ink = known
+    ? {
+        // canvas x runs left to right, canvas y runs down: flip y into plane space
+        x0: -worldW / 2 + (x0 / canvas.width) * worldW,
+        x1: -worldW / 2 + ((x1 + 1) / canvas.width) * worldW,
+        y0: worldH / 2 - ((y1 + 1) / canvas.height) * worldH,
+        y1: worldH / 2 - (y0 / canvas.height) * worldH,
+      }
+    : { x0: -worldW / 2, x1: worldW / 2, y0: -worldH / 2, y1: worldH / 2 }
+  return mesh
+}
