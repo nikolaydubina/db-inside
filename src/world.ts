@@ -278,11 +278,21 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   function resize() {
     const w = window.innerWidth
     const h = window.innerHeight
-    camera.aspect = w / h
+    const aspect = w / h
+
+    // keep the horizontal framing on portrait screens: widen the vertical fov
+    const baseFov = 40
+    camera.aspect = aspect
+    camera.fov =
+      aspect < 1
+        ? Math.min(86, (2 * Math.atan(Math.tan((baseFov * Math.PI) / 360) / aspect) * 180) / Math.PI)
+        : baseFov
     camera.updateProjectionMatrix()
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+
+    const dpr = Math.min(window.devicePixelRatio, w < 760 ? 1.5 : 2)
+    renderer.setPixelRatio(dpr)
     renderer.setSize(w, h)
-    composer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+    composer.setPixelRatio(dpr)
     composer.setSize(w, h)
     bloom.setSize(w, h)
     labelRenderer.setSize(w, h)
@@ -301,6 +311,8 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   const deckEdges = neonEdges(new THREE.CylinderGeometry(18.05, 18.05, 0.35, 12, 1), 0x2b6d88, 0.22)
   deckEdges.position.y = -0.18
   island.add(deckEdges)
+
+  resize()
 
   return { renderer, scene, camera, composer, controls, labelRenderer, sun, render, resize }
 }

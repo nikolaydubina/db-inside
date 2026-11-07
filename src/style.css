@@ -212,13 +212,49 @@ h2 {
   display: flex;
   align-items: center;
   gap: 8px;
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
 }
 
 h2::after {
   content: '';
+  order: 2;
   flex: 1;
   height: 1px;
   background: linear-gradient(90deg, rgba(90, 150, 190, 0.24), transparent);
+}
+
+.chev {
+  order: 3;
+  width: 0;
+  height: 0;
+  border-left: 3.5px solid transparent;
+  border-right: 3.5px solid transparent;
+  border-top: 4.5px solid #5f7d95;
+  transition: transform 0.2s ease, border-color 0.2s;
+  flex: none;
+}
+
+.card:hover .chev {
+  border-top-color: var(--cyan);
+}
+
+.card.collapsed > *:not(h2) {
+  display: none;
+}
+
+.card.collapsed > h2 {
+  margin-bottom: 0;
+}
+
+.card.collapsed .chev {
+  transform: rotate(-90deg);
+}
+
+.card.collapsed {
+  padding-top: 9px;
+  padding-bottom: 9px;
 }
 
 .buttons {

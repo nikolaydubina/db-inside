@@ -49,6 +49,8 @@ export function initHud(handlers: HudHandlers) {
   const tooltip = $<HTMLElement>('#tooltip')
   const boot = $<HTMLElement>('#boot')
 
+  setupCards()
+
   btnQuery.addEventListener('click', () => handlers.runQuery())
   btnCheckpoint.addEventListener('click', () => handlers.checkpoint())
   btnVacuum.addEventListener('click', () => handlers.vacuum())
@@ -119,6 +121,67 @@ export function initHud(handlers: HudHandlers) {
 }
 
 let lastNote = ''
+
+const CARDS_KEY = 'psql.cards'
+const COMPACT = () =>
+  window.matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)').matches
+
+function setupCards() {
+  const cards = Array.from(document.querySelectorAll<HTMLElement>('.card'))
+  let saved: Record<string, boolean> = {}
+  try {
+    saved = JSON.parse(localStorage.getItem(CARDS_KEY) ?? '{}') as Record<string, boolean>
+  } catch {
+    saved = {}
+  }
+  const compact = COMPACT()
+
+  for (const card of cards) {
+    const head = card.querySelector<HTMLElement>('h2')
+    if (!head) continue
+
+    const key = head.textContent?.trim() ?? ''
+    const chev = document.createElement('span')
+    chev.className = 'chev'
+    head.appendChild(chev)
+    head.setAttribute('role', 'button')
+    head.setAttribute('tabindex', '0')
+
+    const startCollapsed = key in saved ? saved[key] : compact
+    card.classList.toggle('collapsed', startCollapsed)
+    head.setAttribute('aria-expanded', String(!startCollapsed))
+
+    const toggle = () => {
+      const collapsed = card.classList.toggle('collapsed')
+      head.setAttribute('aria-expanded', String(!collapsed))
+      saved[key] = collapsed
+      try {
+        localStorage.setItem(CARDS_KEY, JSON.stringify(saved))
+      } catch {
+        /* private mode */
+      }
+    }
+
+    head.addEventListener('click', toggle)
+    head.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault()
+        toggle()
+      }
+    })
+  }
+
+  // going from desktop to a phone layout collapses the whole stack
+  window
+    .matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)')
+    .addEventListener('change', (e) => {
+      if (!e.matches) return
+      for (const card of cards) {
+        card.classList.add('collapsed')
+        card.querySelector('h2')?.setAttribute('aria-expanded', 'false')
+      }
+    })
+}
 function setText(el: HTMLElement, v: string) {
   if (el.textContent !== v) el.textContent = v
 }
