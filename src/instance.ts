@@ -405,13 +405,6 @@ export class PostgresInstance {
       this.group.add(seam)
     }
 
-    const rail = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.06, 0.06, 6.6, 12),
-      new THREE.MeshBasicMaterial({ color: 0x6b4a1c, transparent: true, opacity: 0.6 }),
-    )
-    rail.position.set(x - 1.05, 3.4, z + 0.9)
-    this.group.add(rail)
-
     const pick = new THREE.Mesh(
       new THREE.BoxGeometry(1.5, 5.4, 1.5),
       new THREE.MeshBasicMaterial({ visible: false }),
