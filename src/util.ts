@@ -88,6 +88,9 @@ const UNIT_BOX_EDGES = (() => {
  * so anything that outlines something outlines it the same way.
  */
 export class OutlineBox extends THREE.LineSegments {
+  private baseColor: number
+  private baseOpacity: number
+
   constructor(
     readonly w: number,
     readonly h: number,
@@ -106,6 +109,8 @@ export class OutlineBox extends THREE.LineSegments {
         toneMapped: false,
       }),
     )
+    this.baseColor = color
+    this.baseOpacity = opacity
     this.scale.set(w, h, d)
   }
 
@@ -122,7 +127,19 @@ export class OutlineBox extends THREE.LineSegments {
   }
 
   setColor(color: number) {
-    ; (this.material as THREE.LineBasicMaterial).color.setHex(color)
+    this.baseColor = color
+    ;(this.material as THREE.LineBasicMaterial).color.setHex(color)
+    return this
+  }
+
+  /**
+   * Hover / selection state of an outline is the outline itself changing colour.
+   * Never a second box drawn around the same volume.
+   */
+  highlight(on: boolean, color = 0xffffff) {
+    const m = this.material as THREE.LineBasicMaterial
+    m.color.setHex(on ? color : this.baseColor)
+    m.opacity = on ? Math.min(1, this.baseOpacity + 0.5) : this.baseOpacity
     return this
   }
 }

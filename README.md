@@ -12,12 +12,13 @@ npm run build    # static build in dist/
 
 ## What you are looking at
 
-The floating island is **one PostgreSQL process**. Clients live in the sky and drop queries through
-the roof; results stream back up.
+The floating island is **a running PostgreSQL instance** — deliberately not called "one process",
+because it is several: a postmaster, one backend per connection, and the auxiliary processes.
+Clients live in the sky and drop queries through the roof; results stream back up.
 
 | visual | PostgreSQL concept |
 | --- | --- |
-| wireframe cage, labelled `POSTGRESQL PROCESS` | the running instance: postmaster, backends, shared memory |
+| wireframe cage, labelled `POSTGRESQL` | the running instance: postmaster, backends, auxiliaries, shared memory |
 | glowing ports on the top rim, `BACKENDS · CONNECTIONS` | one backend **process** per client connection (Postgres forks, it does not use a thread pool). Ports appear and disappear as clients connect and disconnect |
 | a port lights up + vertical beam | that backend is busy serving a query |
 | one thin path per query | a query enters through a port, runs parser → planner → executor → buffers, and its result leaves through the **same** port; the path fades once the query is done |
@@ -168,6 +169,9 @@ regressions show up immediately. Open the page with `?debug` to have telemetry o
 - **v** — vacuum: dead tuples reclaimed by the autovacuum drone.
 - **i** — toggle index scan vs sequential scan.
 - drag to orbit, scroll to zoom, hover to identify, click to pin an explanation in the inspector.
+- **double-click** anything — the camera flies to wherever that object is, frames it, and starts
+  orbiting it. Double-click empty space to pull back to the whole instance. It keeps the current
+  viewing direction, so it reads as a dolly rather than a jump cut, and it re-enables auto-orbit.
 
 ## Stack
 

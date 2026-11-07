@@ -153,6 +153,96 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
 
     const find = (id: string) => ALL_VIEWS.find((v) => v.id === id)
 
+    /**
+     * Smallest distance along `dir` at which every corner of `box` is inside the
+     * frustum. Bisection instead of a bounding sphere, because a sphere over a
+     * wide flat box (the cage, the disk plate) is much larger than the box looks
+     * on screen and would push the camera far too far away.
+     */
+    const fitDistance = (box: THREE.Box3, dir: THREE.Vector3) => {
+        const centre = box.getCenter(new THREE.Vector3())
+        const tanV = Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)
+        const tanH = tanV * camera.aspect
+        const fwd = dir.clone().negate()
+        const right = new THREE.Vector3().crossVectors(fwd, camera.up)
+        if (right.lengthSq() < 1e-8) right.set(1, 0, 0)
+        right.normalize()
+        const up = new THREE.Vector3().crossVectors(right, fwd).normalize()
+
+        const corners: THREE.Vector3[] = []
+        for (let i = 0; i < 8; i++) {
+            corners.push(
+                new THREE.Vector3(
+                    i & 1 ? box.max.x : box.min.x,
+                    i & 2 ? box.max.y : box.min.y,
+                    i & 4 ? box.max.z : box.min.z,
+                ),
+            )
+        }
+        const inView = (d: number) => {
+            const cam = centre.clone().addScaledVector(dir, d)
+            return corners.every((c) => {
+                const v = c.clone().sub(cam)
+                const z = v.dot(fwd)
+                return (
+                    z > 0.01 &&
+                    Math.abs(v.dot(right)) <= tanH * z &&
+                    Math.abs(v.dot(up)) <= tanV * z
+                )
+            })
+        }
+
+        let lo = 0.4
+        let hi = 160
+        for (let i = 0; i < 28; i++) {
+            const mid = (lo + hi) / 2
+            if (inView(mid)) hi = mid
+            else lo = mid
+        }
+        return hi * 1.06 // a little air around it
+    }
+
+    /**
+     * Frame something and leave the camera pointed at it — the double-click
+     * behaviour. Keeps the current viewing direction, so it reads as a dolly
+     * rather than a jump cut.
+     */
+    function focus(
+        target: THREE.Object3D,
+        opts: { duration?: number; padding?: number } = {},
+    ): Promise<boolean> {
+        const box = new THREE.Box3().setFromObject(target)
+        if (box.isEmpty()) return Promise.resolve(false)
+        const centre = box.getCenter(new THREE.Vector3())
+
+        // keep the direction we are already looking from
+        const dir = camera.position.clone().sub(controls.target)
+        if (dir.lengthSq() < 1e-6) dir.set(0, 0.35, 1)
+        dir.normalize()
+
+        const dist = THREE.MathUtils.clamp(
+            fitDistance(box, dir) * (opts.padding ?? 1),
+            1.6,
+            55, // never further out than the overview shot
+        )
+        const toPos = centre.clone().addScaledVector(dir, dist)
+        const fromPos = camera.position.clone()
+        const fromTarget = controls.target.clone()
+
+        current = null
+        beforeNavigate?.()
+
+        const dur = opts.duration ?? 0.95
+        return ticker
+            .add(dur, (k) => {
+                const e = easeInOutCubic(k)
+                camera.position.lerpVectors(fromPos, toPos, e)
+                controls.target.lerpVectors(fromTarget, centre, e)
+                controls.update()
+            })
+            .then(() => true)
+    }
+
     /** Fly to a named view. `instant` cuts instead of tweening (tests, links). */
     function go(id: string, opts: { instant?: boolean; duration?: number } = {}): boolean {
         const view = find(id)
@@ -188,6 +278,7 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
     return {
         go,
         snap: (id: string) => go(id, { instant: true }),
+        focus,
         list: () => ALL_VIEWS.map(({ id, label, entity, hint }) => ({ id, label, entity, hint })),
         current: () => current,
         /** Live anchor vector for an entity, handy when writing new views. */

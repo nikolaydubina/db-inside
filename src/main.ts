@@ -7,7 +7,7 @@ import { EngineSim } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { initHud } from './ui'
-import { Ticker, label, rand } from './util'
+import { Ticker, label, rand, OutlineBox } from './util'
 
 const canvas = document.querySelector<HTMLCanvasElement>('#c')!
 const labelHost = document.querySelector<HTMLElement>('#labels')!
@@ -156,6 +156,9 @@ window.addEventListener('keydown', (e) => {
 /* ------------------------------- hover picking ----------------------------- */
 
 const raycaster = new THREE.Raycaster()
+// the process cage is a bare line box, so its edges need a pick radius — small
+// enough that an edge crossing the view does not steal picks from what is behind
+raycaster.params.Line = { threshold: 0.1 }
 const pointer = new THREE.Vector2(-2, -2)
 let pointerPx = { x: 0, y: 0 }
 let hovered: THREE.Object3D | null = null
@@ -167,6 +170,9 @@ hbMat.transparent = true
 hbMat.opacity = 0.5
 hbMat.depthWrite = false
 scene.add(hoverBox)
+
+/** The outline currently tinted by hover/selection, so it can be restored. */
+let glowing: OutlineBox | null = null
 
 canvas.addEventListener('pointermove', (e) => {
   pointerPx = { x: e.clientX, y: e.clientY }
@@ -263,6 +269,37 @@ document.addEventListener('mousemove', (e) => {
 
 const FLY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'])
 const flyToggle = document.querySelector<HTMLInputElement>('#chk-fly')!
+
+/* ------------------------------ double click ------------------------------ */
+
+// Double-click frames whatever is under the cursor and hands the orbit to it.
+// Empty space frames the whole instance, which doubles as "zoom out".
+canvas.addEventListener('dblclick', (e) => {
+  const ndc = new THREE.Vector2(
+    (e.clientX / window.innerWidth) * 2 - 1,
+    -(e.clientY / window.innerHeight) * 2 + 1,
+  )
+  const root = pick(ndc)
+  // the two pointerups of a double click leave the pin toggled off; re-pin here
+  if (root?.userData.info) {
+    pinned = root
+    hud.inspect(root.userData.info)
+  } else {
+    pinned = null
+    hud.unpin()
+  }
+  // flying moves the camera and its target together, which fights a fixed orbit
+  if (flyMode) {
+    flyToggle.checked = false
+    flyToggle.dispatchEvent(new Event('change'))
+  }
+  void rig.focus(root ?? instance.group).then(() => {
+    autoOrbit = true
+    if (orbitCheckbox) orbitCheckbox.checked = true
+    world.controls.autoRotate = true
+  })
+  lastInteraction = performance.now()
+})
 
 window.addEventListener('keydown', (e) => {
   if (isTyping(e.target)) return
@@ -362,7 +399,21 @@ function frame() {
     hud.hover(hovered.userData.info, pointerPx.x, pointerPx.y)
   }
   const target = hovered ?? pinned
-  if (target) {
+  // anything that already owns an outline highlights that outline; drawing a
+  // second box around the same volume would just be the same box twice
+  const outline: OutlineBox | null =
+    target instanceof OutlineBox
+      ? target
+      : ((target?.userData.outline as OutlineBox | undefined) ?? null)
+  if (glowing && glowing !== outline) {
+    glowing.highlight(false)
+    glowing = null
+  }
+  if (target && outline) {
+    outline.highlight(true, target === pinned ? 0xffffff : 0x8fe6ff)
+    glowing = outline
+    hoverBox.visible = false
+  } else if (target) {
     const box = new THREE.Box3().setFromObject(target)
     box.expandByScalar(0.08)
     hoverBox.box.copy(box)

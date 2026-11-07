@@ -314,8 +314,11 @@ export class PostgresInstance {
 
   /* --------------------------------- building ------------------------------- */
 
-  private register(obj: THREE.Object3D, info: Info) {
+  private register(obj: THREE.Object3D, info: Info, outline?: OutlineBox) {
     obj.userData.info = info
+    // a pickable that already owns an outline highlights that outline rather
+    // than having a second box drawn around it
+    if (outline) obj.userData.outline = outline
     this.pickables.push(obj)
     return obj
   }
@@ -326,19 +329,16 @@ export class PostgresInstance {
     const shellD = 16.0
 
     // The process boundary is one outline box — the same primitive the table
-    // selection marquees use. No posts, no rim, nothing with thickness.
+    // selection marquees use. No posts, no rim, nothing with thickness. It is
+    // picked by its edges, so it never occludes anything inside it.
     const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34)
     cage.fromFloor(0, 0, 0)
     this.group.add(cage)
-
-    // pickable ceiling: a thin invisible slab on the top face of the cage, so
-    // hovering the boundary picks the process but nothing inside is blocked
-    const roof = new THREE.Mesh(
-      new THREE.BoxGeometry(shellW, 0.4, shellD),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    )
-    roof.position.y = shellH
-    this.group.add(roof)
+    this.register(cage, {
+      title: 'PostgreSQL',
+      body: 'One running postgres instance — not a single process but a small family of them: a postmaster that listens and forks, one backend process per connection, plus the checkpointer, the WAL writer and autovacuum. Everything inside this cage — parser, planner, executor, buffers, WAL — is shared by them. Clients sit outside, in the sky.',
+      meta: 'postmaster + backends + auxiliaries · shared memory',
+    })
 
     // city-block pad: the blue grid floor everything floats over
     const pad = new THREE.Mesh(
@@ -407,17 +407,21 @@ export class PostgresInstance {
     )
     diskFloorPick.position.set(0, 0.12, DISK_PLATE.cz)
     this.group.add(diskFloorPick)
-    this.register(diskFloorPick, {
-      title: 'Disk — a field of 8 kB pages',
-      body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
-      meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
-    })
+    this.register(
+      diskFloorPick,
+      {
+        title: 'Disk — a field of 8 kB pages',
+        body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
+        meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
+      },
+      plateEdge,
+    )
 
     const floorLab = label('DISK · ALL PAGE FILES')
     floorLab.position.set(-10.2, 0.5, DISK_PLATE.cz + PAGE_D / 2 + 0.75)
     this.group.add(floorLab)
 
-    const processLabel = label('POSTGRESQL PROCESS')
+    const processLabel = label('POSTGRESQL')
     processLabel.position.set(-12.3, 10.15, 8.1)
     this.group.add(processLabel)
 
@@ -460,12 +464,6 @@ export class PostgresInstance {
     haloRing.position.y = 9.15
     this.group.add(haloRing)
     this.haloRing = haloRing
-
-    this.register(roof, {
-      title: 'PostgreSQL process',
-      body: 'One running postgres instance: a postmaster, backend processes and shared memory. Everything inside this cage — parser, planner, executor, buffers, WAL — is part of it. Clients sit outside, in the sky.',
-      meta: 'process · postmaster + backends · shared memory',
-    })
   }
 
   /**
@@ -587,11 +585,15 @@ export class PostgresInstance {
     )
     pick.position.set((x0 + x1) / 2, PAGE_Y + 0.5, (z0 + z1) / 2)
     this.group.add(pick)
-    this.register(pick, {
-      title: 'Write-ahead log (on disk)',
-      body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. At checkpoint the old segments are recycled: they are dimmed in place and written over, never moved.',
-      meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
-    })
+    this.register(
+      pick,
+      {
+        title: 'Write-ahead log (on disk)',
+        body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. At checkpoint the old segments are recycled: they are dimmed in place and written over, never moved.',
+        meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
+      },
+      runEdge,
+    )
 
     // wal_buffers: page-sized cubes of shared memory holding the tail of the
     // log. They hover in the same lattice columns as the segments below and
@@ -1022,7 +1024,7 @@ export class PostgresInstance {
       )
       pick.position.set(cx, PAGE_Y + h / 2, cz)
       this.group.add(pick)
-      this.register(pick, region.info)
+      this.register(pick, region.info, edges)
 
       // centred above the run, at staggered heights so labels never collide
       const stagger = TABLE_REGIONS.findIndex((r) => r.label === region.label) * 0.45
