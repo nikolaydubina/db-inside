@@ -47,9 +47,9 @@ export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
 export interface BackendPod {
   id: number
   group: THREE.Group
-  strip: THREE.MeshStandardMaterial
-  edge: THREE.LineBasicMaterial
+  ring: THREE.MeshStandardMaterial
   glow: THREE.SpriteMaterial
+  pick: THREE.Mesh
   active: boolean
   busy: boolean
   index: number
@@ -915,49 +915,68 @@ export class PostgresInstance {
 
   private buildBackends() {
     const slots = [-9.6, -5.75, -1.9, 1.9, 5.75, 9.6]
-    const bodyGeo = new RoundedBoxGeometry(1.3, 0.22, 0.78, 2, 0.05)
-    const stripGeo = new THREE.BoxGeometry(0.86, 0.02, 0.07)
-    const bodyMat = glowMat(0x07131c, 0x1a4d63, 0.35, { metalness: 0.65, roughness: 0.3 })
+    const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
+    const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
+    const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
+    const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
+    const pickGeo = new THREE.BoxGeometry(1.36, 0.62, 1.36)
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
-      g.position.set(x, 9.9, 5.8)
+      g.position.set(x, 9.88, 5.8)
       g.visible = false
       g.scale.setScalar(0.001)
 
-      const body = new THREE.Mesh(bodyGeo, bodyMat)
-      body.castShadow = true
-      g.add(body)
+      const base = new THREE.Mesh(baseGeo, baseMat)
+      base.castShadow = true
+      g.add(base)
 
-      // glowing outline of the slot
-      const edge = neonEdges(bodyGeo, PALETTE.cyan, 0.5)
-      const edgeMat = edge.material as THREE.LineBasicMaterial
-      edgeMat.transparent = true
-      g.add(edge)
-
-      // status strip on top of the slot
-      const strip = new THREE.MeshStandardMaterial({
+      const ring = new THREE.MeshStandardMaterial({
         color: 0x0a1018,
         emissive: PALETTE.cyan,
         emissiveIntensity: 0.7,
-        roughness: 0.35,
-        metalness: 0.3,
+        roughness: 0.3,
+        metalness: 0.4,
       })
-      const stripMesh = new THREE.Mesh(stripGeo, strip)
-      stripMesh.position.y = 0.1
-      g.add(stripMesh)
+      const ringMesh = new THREE.Mesh(ringGeo, ring)
+      ringMesh.rotation.x = Math.PI / 2
+      ringMesh.position.y = 0.16
+      g.add(ringMesh)
 
-      const gl = halo(PALETTE.cyan, 1.9, 0)
-      gl.position.y = 0.18
+      const ledMat = new THREE.MeshStandardMaterial({
+        color: 0x0a1018,
+        emissive: PALETTE.cyan,
+        emissiveIntensity: 0.9,
+        roughness: 0.4,
+      })
+      const led = new THREE.Mesh(LEDGeo, ledMat)
+      led.position.y = 0.24
+      g.add(led)
+
+      const gl = halo(PALETTE.cyan, 2.4, 0)
+      gl.position.y = 0.3
       g.add(gl)
 
+      // invisible hover/selection box that hugs this connection
+      const pick = new THREE.Mesh(
+        pickGeo,
+        new THREE.MeshBasicMaterial({ visible: false }),
+      )
+      pick.position.copy(g.position)
+      pick.userData.info = {
+        title: `Backend · connection ${i + 1}`,
+        body: 'One live client connection, handled by its own backend process. It parses, plans and executes its own queries, then returns the result through this same slot. Ports appear and disappear as clients connect and disconnect.',
+        meta: 'process · one per connection · not a thread',
+      }
+
       this.group.add(g)
+      this.group.add(pick)
       this.backends.push({
         id: i,
         group: g,
-        strip,
-        edge: edgeMat,
+        ring,
         glow: gl.material,
+        pick,
         active: false,
         busy: false,
         index: i,
@@ -968,18 +987,6 @@ export class PostgresInstance {
     const lab = label('BACKENDS · CONNECTIONS')
     lab.position.set(-10.6, 11.05, 5.8)
     this.group.add(lab)
-
-    const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(21.4, 1.8, 1.6),
-      new THREE.MeshBasicMaterial({ visible: false }),
-    )
-    pick.position.set(0, 10.05, 5.8)
-    this.group.add(pick)
-    this.register(pick, {
-      title: 'Backend processes (connections)',
-      body: 'PostgreSQL forks one process per client connection — there is no shared thread pool. Each port on the boundary is one live backend: a query enters here, runs the pipeline inside the box, and its result leaves through the same port. Ports appear and disappear as clients connect and disconnect.',
-      meta: 'processes · one per connection · not threads',
-    })
   }
 
   /* ---------------------------- backends lifecycle --------------------------- */
@@ -993,6 +1000,7 @@ export class PostgresInstance {
     if (!free) return null
     free.active = true
     free.busy = false
+    if (!this.pickables.includes(free.pick)) this.pickables.push(free.pick)
     return free
   }
 
@@ -1002,6 +1010,8 @@ export class PostgresInstance {
     const victim = idle[randInt(0, idle.length - 1)]
     victim.active = false
     victim.busy = false
+    const idx = this.pickables.indexOf(victim.pick)
+    if (idx >= 0) this.pickables.splice(idx, 1)
     return true
   }
 
@@ -1410,14 +1420,12 @@ export class PostgresInstance {
       b.group.visible = s > 0.02
 
       if (b.busy) {
-        b.strip.emissiveIntensity = 2.6 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
-        b.edge.opacity = 1
+        b.ring.emissiveIntensity = 2.2 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
         b.glow.opacity = 0.45
       } else {
-        b.strip.emissiveIntensity =
-          (b.active ? 1.1 + 0.3 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
-        b.edge.opacity = b.active ? 0.8 : 0.15
-        b.glow.opacity = b.active ? 0.12 : 0
+        b.ring.emissiveIntensity =
+          (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
+        b.glow.opacity = b.active ? 0.08 : 0
       }
     }
 

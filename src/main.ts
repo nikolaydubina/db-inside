@@ -94,6 +94,15 @@ function pick(ndc: THREE.Vector2) {
   return infoRoot(hit?.object ?? null)
 }
 
+// debug helper: what is under a screen point?
+;(window as unknown as Record<string, unknown>).__pickAt = (x: number, y: number) => {
+  const ndc = new THREE.Vector2(
+    (x / window.innerWidth) * 2 - 1,
+    -(y / window.innerHeight) * 2 + 1,
+  )
+  return pick(ndc)?.userData.info?.title ?? null
+}
+
 let downAt = { x: 0, y: 0 }
 canvas.addEventListener('pointerdown', (e) => {
   downAt = { x: e.clientX, y: e.clientY }
