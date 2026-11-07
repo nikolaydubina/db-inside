@@ -1,3 +1,7 @@
 name = "postgresql-inside"
 compatibility_date = "2026-11-07"
-pages_build_output_dir = "./dist"
+
+# Static site: `wrangler deploy` uploads the Vite build output as Worker assets.
+# The Cloudflare build must run `npm ci && npm run build` before this command.
+[assets]
+directory = "./dist"

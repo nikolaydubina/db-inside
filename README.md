@@ -56,21 +56,27 @@ the roof; results stream back up.
 TypeScript + [three.js](https://threejs.org) + Vite, with an `EffectComposer` bloom pass, PCF shadows,
 CSS2D labels and a small promise-based tween engine driving the simulation.
 
-## Deploy (Cloudflare Pages)
+## Deploy (Cloudflare)
 
-The project is wired for Pages — `wrangler.toml` sets the project name and `pages_build_output_dir`.
+The project deploys as **static assets** on Cloudflare. `wrangler.toml` points `wrangler deploy` at
+`dist/`, so the build has to run before the deploy command.
 
-Git-connected project (recommended): every push to `master` builds and deploys.
+Cloudflare build settings:
 
-- Build command: `npm run build`
-- Build output directory: `dist`
-- Node version: 20 or newer
+| setting | value |
+| --- | --- |
+| Build command | `npm ci && npm run build` |
+| Deploy command | `npx wrangler deploy` |
+| Root directory | `/` (default) |
+| Node version | 20 or newer |
+
+Every push to `master` rebuilds and deploys.
 
 Manual deploy from a machine:
 
 ```bash
 npx wrangler login     # once
-npm run deploy         # build + wrangler pages deploy
+npm run deploy         # builds, then `wrangler deploy`
 ```
 
 `public/_headers` is copied into `dist/` and sets immutable caching for hashed assets.
