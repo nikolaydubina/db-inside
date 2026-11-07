@@ -2183,10 +2183,18 @@ export class PostgresInstance {
     this.flashWalSegment(this.walHeadIndex)
     // advance the ring: a batch of records is worth part of a segment, and the
     // head wraps round rather than running out of run
+    const before = this.walWritten
     this.walProgress += moved * 0.9
     while (this.walProgress >= 1) {
       this.walProgress -= 1
       this.walWritten++
+    }
+    // a segment just filled: mark it, because the head leaving it is the only
+    // moment a WAL block becomes complete. Nothing moves — it stays exactly
+    // where it is until the head comes round to overwrite it.
+    if (this.walWritten > before) {
+      this.sealedSegments += this.walWritten - before
+      this.flashWalSegment((this.walWritten - 1) % this.walBlocks.length)
     }
     // the staging memory is simply reused once its contents are on disk
     for (const mat of this.walBufferMats) {
@@ -2336,6 +2344,8 @@ export class PostgresInstance {
   private walWritten = 4
   /** How much of the head segment is actually written, 0..1. */
   walProgress = 0
+  /** Segments that have been filled to the brim and left behind. */
+  sealedSegments = 0
 
   /** Index of the block currently being written — the WAL head. */
   get walHeadIndex() {
