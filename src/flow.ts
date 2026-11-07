@@ -1,5 +1,12 @@
 import * as THREE from 'three'
-import { ANCHOR, PALETTE } from './instance'
+import {
+  ANCHOR,
+  BUFFER_TOP_Y,
+  PAGE_TOP_Y,
+  PALETTE,
+  bufferSlotX,
+  bufferSlotZ,
+} from './instance'
 import { Ticker, easeInOutCubic } from './util'
 
 export interface Paths {
@@ -8,11 +15,7 @@ export interface Paths {
   plan: THREE.CatmullRomCurve3
   exec: THREE.CatmullRomCurve3
   execToWal: THREE.CatmullRomCurve3
-  walToDisk: THREE.CatmullRomCurve3
-  bufferToDisk: THREE.CatmullRomCurve3
-  diskToBuffer: THREE.CatmullRomCurve3
   bufferToResult: THREE.CatmullRomCurve3
-  resultToSky: THREE.CatmullRomCurve3
   heapToBuffer: THREE.CatmullRomCurve3
   indexToBuffer: THREE.CatmullRomCurve3
   ginToBuffer: THREE.CatmullRomCurve3
@@ -27,8 +30,9 @@ const curve = (pts: THREE.Vector3[], tension = 0.35) =>
 export const pathCurve = (pts: THREE.Vector3[], tension = 0.35) => curve(pts, tension)
 
 export function makePaths(): Paths {
-  const bufferTop = V(ANCHOR.bufferCenter.x, 6.15, ANCHOR.bufferCenter.z)
-  const diskTop = V(ANCHOR.disk.x, 1.15, ANCHOR.disk.z)
+  // both anchors sit on a real block's top face, not in the air above it
+  const bufferTop = V(bufferSlotX(6), BUFFER_TOP_Y, bufferSlotZ(3))
+  const diskTop = V(ANCHOR.disk.x, PAGE_TOP_Y, ANCHOR.disk.z)
 
   return {
     bufferTop,
@@ -54,57 +58,31 @@ export function makePaths(): Paths {
       V(3.8, 6.7, -1.4),
       V(6.8, 6.1, 0.0),
       V(9.4, 5.4, 0.9),
-      V(ANCHOR.wal.x, 4.85, ANCHOR.wal.z),
-    ]),
-    walToDisk: curve([
-      V(ANCHOR.wal.x, 4.6, ANCHOR.wal.z),
-      V(10.4, 3.4, 2.9),
-      V(9.3, 2.2, 4.2),
-      diskTop,
-    ]),
-    bufferToDisk: curve([
-      V(ANCHOR.bufferCenter.x - 1.6, 5.1, ANCHOR.bufferCenter.z - 0.6),
-      V(0.4, 3.9, 1.0),
-      V(3.6, 2.6, 3.4),
-      V(6.6, 1.5, 4.9),
-      diskTop,
-    ]),
-    diskToBuffer: curve([
-      diskTop,
-      V(6.4, 1.8, 4.4),
-      V(3.4, 3.4, 2.4),
-      V(0.0, 4.8, 0.6),
-      V(ANCHOR.bufferCenter.x - 0.8, 6.15, ANCHOR.bufferCenter.z - 0.4),
+      V(ANCHOR.wal.x, PAGE_TOP_Y, ANCHOR.wal.z),
     ]),
     bufferToResult: curve([
-      V(ANCHOR.bufferCenter.x + 2.2, 6.15, ANCHOR.bufferCenter.z + 0.9),
+      V(ANCHOR.bufferCenter.x + 2.2, BUFFER_TOP_Y + 0.05, ANCHOR.bufferCenter.z + 0.9),
       V(4.4, 6.35, 0.7),
       V(6.9, 6.55, -0.5),
       ANCHOR.result,
     ]),
-    resultToSky: curve([
-      ANCHOR.result,
-      V(9.2, 10.0, -1.4),
-      V(9.8, 17.0, -1.0),
-      V(ANCHOR.resultSky.x - 0.4, 25.5, 0.2),
-    ]),
     heapToBuffer: curve([
-      V(ANCHOR.heap.x + 1.0, 1.1, ANCHOR.heap.z - 1.2),
+      V(ANCHOR.heap.x + 1.0, PAGE_TOP_Y + 0.3, ANCHOR.heap.z - 1.2),
       V(-6.2, 2.8, 2.4),
       V(-3.8, 4.4, 1.2),
-      V(ANCHOR.bufferCenter.x - 2.6, 5.9, ANCHOR.bufferCenter.z - 0.2),
+      V(ANCHOR.bufferCenter.x - 2.6, BUFFER_TOP_Y + 0.05, ANCHOR.bufferCenter.z - 0.2),
     ]),
     indexToBuffer: curve([
       V(ANCHOR.index.x, 3.2, ANCHOR.index.z),
       V(5.2, 4.4, -4.4),
       V(2.4, 5.3, -2.2),
-      V(ANCHOR.bufferCenter.x + 1.2, 6.0, ANCHOR.bufferCenter.z - 0.6),
+      V(ANCHOR.bufferCenter.x + 1.2, BUFFER_TOP_Y + 0.05, ANCHOR.bufferCenter.z - 0.6),
     ]),
     ginToBuffer: curve([
       V(ANCHOR.gin.x, 2.1, ANCHOR.gin.z),
       V(8.6, 3.6, -2.4),
       V(5.0, 5.1, -1.2),
-      V(ANCHOR.bufferCenter.x + 1.6, 6.0, ANCHOR.bufferCenter.z - 0.2),
+      V(ANCHOR.bufferCenter.x + 1.6, BUFFER_TOP_Y + 0.05, ANCHOR.bufferCenter.z - 0.2),
     ]),
   }
 }
@@ -118,7 +96,7 @@ export interface FlowOptions {
 
 /** A thin glowing curve with travelling arrowheads. */
 export class FlowLine {
-  readonly curve: THREE.CatmullRomCurve3
+  curve: THREE.CatmullRomCurve3
   readonly group = new THREE.Group()
   private cones: THREE.Mesh[] = []
   private lineMat: THREE.LineBasicMaterial
@@ -168,6 +146,23 @@ export class FlowLine {
 
   flash(strength = 1) {
     this.boost = Math.max(this.boost, strength)
+  }
+
+  /**
+   * Re-aim the flow at a new set of points — used when the thing it points at
+   * moves (the WAL head advances as the log fills). Same point count, so the
+   * geometry is rewritten in place instead of rebuilt.
+   */
+  repoint(points: THREE.Vector3[]) {
+    this.curve = new THREE.CatmullRomCurve3(points, false, 'catmullrom', 0.35)
+    const pts = this.curve.getPoints(110)
+    const line = this.group.children[0] as THREE.Line
+    const attr = line.geometry.getAttribute('position') as THREE.BufferAttribute
+    for (let i = 0; i < pts.length && i < attr.count; i++) {
+      attr.setXYZ(i, pts[i].x, pts[i].y, pts[i].z)
+    }
+    attr.needsUpdate = true
+    line.geometry.computeBoundingSphere()
   }
 
   setVisible(v: boolean) {

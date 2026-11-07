@@ -122,6 +122,7 @@ const BUFFER_ROWS = 6
 const BUFFER_Y = 5.35
 const bufferSlotX = (c: number) => -3.75 + c * PAGE_GRID.gx
 const bufferSlotZ = (r: number) => -2.75 + r * PAGE_GRID.gz
+export { bufferSlotX, bufferSlotZ }
 /** Leftmost slot of the run — the free space it grows into sits just below. */
 const WAL_C0 = 10
 const WAL_LEN = 12
@@ -130,6 +131,13 @@ export const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
 export const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
 const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
 const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
+
+/**
+ * World Y of the top face of a resting block, on disk and in RAM. Every arrow
+ * that lands on a page aims at one of these planes, never at thin air.
+ */
+export const PAGE_TOP_Y = PAGE_Y + PAGE_GRID.bh / 2
+export const BUFFER_TOP_Y = BUFFER_Y + PAGE_GRID.bh / 2
 
 /** Albedo of a free (unassigned) page block. */
 const BLOCK_FREE = 0x6b4a1c
@@ -834,6 +842,20 @@ export class PostgresInstance {
     return 0.45 + 0.55 * fill
   }
 
+  /**
+   * Centre of the top face of a page block — the exact point an arrow should
+   * land on. A block is PAGE_GRID.bh tall before its fill scale is applied, so
+   * the top sits half of that above `home`.
+   */
+  blockTop(p: Page8K): THREE.Vector3 {
+    return p.home.clone().setY(p.home.y + (PAGE_GRID.bh / 2) * this.blockScale(p.fill))
+  }
+
+  /** The same point for a page living in shared buffers. */
+  pageTop(p: Page): THREE.Vector3 {
+    return p.mesh.position.clone().setY(p.mesh.position.y + (PAGE_GRID.bh / 2) * p.mesh.scale.y)
+  }
+
   private applyTransform(p: Page8K, scale: number, sy?: number) {
     const d = this.dummy
     d.position.copy(p.home)
@@ -910,7 +932,7 @@ export class PostgresInstance {
     const mat = ring.material as THREE.MeshBasicMaterial
     mat.color.setHex(hex)
     ring.rotation.x = -Math.PI / 2
-    ring.position.copy(p.home).setY(p.home.y + 0.2)
+    ring.position.copy(this.blockTop(p))
     ring.scale.setScalar(0.35)
     this.group.add(ring)
     void this.ticker
@@ -1767,6 +1789,17 @@ export class PostgresInstance {
   /** Index of the block currently being written — the WAL head. */
   get walHeadIndex() {
     return Math.min(WAL_LEN - 1, Math.max(0, this.walFilledSegments - 1))
+  }
+
+  /** The WAL block being appended to right now. */
+  get walHeadBlock(): Page8K | undefined {
+    return this.walBlocks[this.walHeadIndex]
+  }
+
+  /** Top face of the WAL head block — where a WAL append arrow should land. */
+  walHeadTop(): THREE.Vector3 {
+    const head = this.walHeadBlock
+    return head ? this.blockTop(head) : this.walSlot(0).setY(PAGE_Y + PAGE_GRID.bh / 2)
   }
 
   get walFilledSegments() {

@@ -65,6 +65,8 @@ export class EngineSim {
   note = 'shared_buffers · 8 kB pages'
   /** Which concrete page the last disk operation touched — shown in telemetry. */
   lastOp = 'idle'
+  /** Where the last page arrow landed — always a block's top face, never air. */
+  lastArrowEnd: THREE.Vector3 | null = null
   lastLatency = 0.12
 
   private deadTimer = 2.5
@@ -78,6 +80,7 @@ export class EngineSim {
   private clock = 0
   private scanning = false
   private chains: QueryChain[] = []
+  private walHeadSeen = -1
 
   constructor(
     private inst: PostgresInstance,
@@ -126,6 +129,38 @@ export class EngineSim {
       this.flows.indexToBuffer.setWeight(0.6)
       this.flows.heapToBuffer.setWeight(1.1)
     }
+  }
+
+  /**
+   * Executor → a page. The curve ends exactly on the centre of that block's
+   * top face, so an arrow never stops at some point in mid-air.
+   */
+  private execTo(target: THREE.Vector3) {
+    return pathCurve([
+      ANCHOR.exec.clone(),
+      new THREE.Vector3(1.2, 6.7, -1.6),
+      new THREE.Vector3(0.4, 6.4, -0.7),
+      target.clone().add(new THREE.Vector3(0, 1.2, 0)),
+      target,
+    ])
+  }
+
+  private readonly walArc = (head: THREE.Vector3) =>
+    pathCurve([
+      ANCHOR.exec.clone(),
+      new THREE.Vector3(3.8, 6.7, -1.4),
+      new THREE.Vector3(6.8, 6.1, 0.0),
+      new THREE.Vector3(9.4, 5.4, 0.9),
+      head.clone().add(new THREE.Vector3(0, 2.2, 0)),
+      head,
+    ])
+
+  /** Re-aim the ambient executor→WAL arrow whenever the write head advances. */
+  private syncWalArrow() {
+    const head = this.inst.walHeadIndex
+    if (head === this.walHeadSeen) return
+    this.walHeadSeen = head
+    this.flows.execToWal.repoint(this.walArc(this.inst.walHeadTop()).getPoints(28))
   }
 
   async runQuery() {
@@ -208,10 +243,12 @@ export class EngineSim {
       this.inst.pulseNode('exec', 1)
       fPlan.flash(0.8)
 
-      // WAL append happens regardless of read/write
+      // WAL append happens regardless of read/write; the arrow lands on the
+      // block the WAL writer is actually appending to right now
+      const walArc = this.walArc(this.inst.walHeadTop())
       const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
       walPack.position.copy(ANCHOR.exec)
-      void travel(this.ticker, walPack, this.paths.execToWal, 0.62).then(() => {
+      void travel(this.ticker, walPack, walArc, 0.62).then(() => {
         this.inst.walFill = Math.min(1, this.inst.walFill + 0.09)
         despawn(this.ticker, this.scene, walPack, 0.22)
       })
@@ -233,7 +270,7 @@ export class EngineSim {
           kind === 'insert' ? this.inst.insertRows(randInt(1, 3)) : this.inst.deleteRows(randInt(1, 3))
         const target = touched[0]
         if (target) {
-          const to = target.home.clone().add(new THREE.Vector3(0, 0.5, 0))
+          const to = this.inst.blockTop(target)
           const from = packet.position.clone()
           const down = pathCurve([from, from.clone().lerp(to, 0.5).add(new THREE.Vector3(0, 1.4, 0)), to])
           const fDown = chain.addCurve(
@@ -245,6 +282,7 @@ export class EngineSim {
           fDown.flash(0.85)
           this.inst.markBlock(target, kind === 'insert' ? 0xc7ff5a : PALETTE.magenta)
           this.lastOp = `${kind} ${target.table ?? 'free'}[${target.row},${target.col}]`
+          this.lastArrowEnd = to.clone()
         }
         despawn(this.ticker, this.scene, packet, 0.2)
 
@@ -258,20 +296,19 @@ export class EngineSim {
         this.walBytes += kind === 'insert' ? 384 : 320
         if (kind === 'delete') this.inst.markDeadTuples(1)
       } else if (hit) {
-        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+        // the arrow lands on the top face of the exact buffer page it will read
+        const page = this.inst.pages[pageIdx]
+        const toPage = this.inst.pageTop(page)
+        const execCurve = this.execTo(toPage)
+        const fExec = chain.addCurve(execCurve, PALETTE.teal, {
           arrows: 4,
           speed: 0.5,
           opacity: 0.44,
         })
-        await travel(this.ticker, packet, this.paths.exec, 0.5)
+        await travel(this.ticker, packet, execCurve, 0.5)
         fExec.flash(0.8)
-        const page = this.inst.pages[pageIdx]
-        const from = packet.position.clone()
-        const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
-        await this.ticker.add(0.18, (k) => {
-          packet.position.lerpVectors(from, to, easeOutCubic(k))
-        })
         this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
+        this.lastArrowEnd = toPage.clone()
         this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
         despawn(this.ticker, this.scene, packet, 0.22)
         this.hits++
@@ -280,25 +317,31 @@ export class EngineSim {
         this.note = 'buffer hit · page already in RAM ≈ 0.1 ms'
         this.walBytes += 128
       } else {
-        // read path: buffer miss → disk → buffer
-        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+        // read path: buffer miss → disk → buffer. The slot the clock sweep is
+        // about to hand out is chosen first, so every arrow can end on a real
+        // page top face instead of a point somewhere above the pool.
+        pageIdx = this.inst.pickBufferPage()
+        const page = this.inst.pages[pageIdx]
+        const slotTop = this.inst.pageTop(page)
+
+        const execCurve = this.execTo(slotTop)
+        const fExec = chain.addCurve(execCurve, PALETTE.teal, {
           arrows: 3,
           speed: 0.5,
           opacity: 0.4,
         })
-        await travel(this.ticker, packet, this.paths.exec, 0.35)
+        await travel(this.ticker, packet, execCurve, 0.4)
         fExec.flash(0.7)
 
         // the arrow goes to the exact block this read needs, not to "the disk"
         const target = this.inst.pickBlockForRead()
-        const toBlock = target
-          ? target.home.clone().add(new THREE.Vector3(0, 0.34, 0))
-          : this.paths.diskTop.clone()
+        const toBlock = target ? this.inst.blockTop(target) : this.paths.diskTop.clone()
 
+        // starts on the buffer slot's top face — never at a point in mid-air
         const down = pathCurve([
-          new THREE.Vector3(ANCHOR.bufferCenter.x - 1.6, 5.1, ANCHOR.bufferCenter.z - 0.6),
-          new THREE.Vector3(0.4, 3.9, 1.0),
-          toBlock.clone().add(new THREE.Vector3(0, 1.9, 0)),
+          slotTop,
+          slotTop.clone().lerp(toBlock, 0.4).add(new THREE.Vector3(0, 0.6, 0)),
+          toBlock.clone().add(new THREE.Vector3(0, 1.6, 0)),
           toBlock,
         ])
         const fDown = chain.addCurve(down, PALETTE.amber, {
@@ -308,6 +351,7 @@ export class EngineSim {
         })
         await travel(this.ticker, packet, down, 0.5, easeInOutCubic)
         fDown.flash(0.9)
+        this.lastArrowEnd = toBlock.clone()
         if (target) {
           this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
           this.inst.markBlock(target, PALETTE.amber)
@@ -318,7 +362,8 @@ export class EngineSim {
           toBlock,
           toBlock.clone().add(new THREE.Vector3(0, 1.9, 0)),
           new THREE.Vector3(2.2, 4.7, 1.2),
-          new THREE.Vector3(ANCHOR.bufferCenter.x - 0.8, 6.15, ANCHOR.bufferCenter.z - 0.4),
+          slotTop.clone().add(new THREE.Vector3(0, 2.4, 0)),
+          slotTop,
         ])
         const fUp = chain.addCurve(up, PALETTE.amber, {
           arrows: 3,
@@ -328,15 +373,8 @@ export class EngineSim {
         const packetCore = packet.children[0] as THREE.Mesh
           ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
         this.inst.liftFromDisk(pageIdx)
-        await travel(this.ticker, packet, up, 0.5)
+        await travel(this.ticker, packet, up, 0.62)
         fUp.flash(0.8)
-        pageIdx = this.inst.pickBufferPage()
-        const page = this.inst.pages[pageIdx]
-        const from = packet.position.clone()
-        const to = page.mesh.position.clone().add(new THREE.Vector3(0, 0.22, 0))
-        await this.ticker.add(0.2, (k) => {
-          packet.position.lerpVectors(from, to, easeOutCubic(k))
-        })
         this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
         // the copy that arrives carries the density of the page it came from
         void this.inst.swapBufferPage(pageIdx, target ? target.fill : 0.5)
@@ -419,13 +457,12 @@ export class EngineSim {
         const page = this.inst.pages[randInt(0, this.inst.pages.length - 1)]
         const target = this.inst.pickBlockForRead()
         const copy = makePacket(PALETTE.amber, 0.26, this.scene)
-        copy.position.copy(page.mesh.position)
-        const dest = target
-          ? target.home.clone().add(new THREE.Vector3(0, 0.34, 0))
-          : this.paths.diskTop.clone()
+        const start = this.inst.pageTop(page)
+        copy.position.copy(start)
+        const dest = target ? this.inst.blockTop(target) : this.paths.diskTop.clone()
         const curve = pathCurve([
-          page.mesh.position.clone(),
-          page.mesh.position.clone().lerp(dest, 0.45).add(new THREE.Vector3(0, 1.6, 0)),
+          start,
+          start.clone().lerp(dest, 0.45).add(new THREE.Vector3(0, 1.6, 0)),
           dest,
         ])
         void travel(this.ticker, copy, curve, 0.75).then(() => {
@@ -475,6 +512,8 @@ export class EngineSim {
   }
 
   update(dt: number) {
+    // the write head advances as the log fills — keep the arrow on it
+    this.syncWalArrow()
     for (const f of this.flows.all) f.update(dt)
 
     // per-query paths: animate, then drop the finished ones

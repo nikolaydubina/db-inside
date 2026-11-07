@@ -128,7 +128,7 @@ export class OutlineBox extends THREE.LineSegments {
 
   setColor(color: number) {
     this.baseColor = color
-    ;(this.material as THREE.LineBasicMaterial).color.setHex(color)
+      ; (this.material as THREE.LineBasicMaterial).color.setHex(color)
     return this
   }
 

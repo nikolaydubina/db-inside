@@ -145,6 +145,14 @@ __psqlDebug.history(40)     // the last N ticks
 __psqlDebug.table('users')  // page-fill histogram for one relation
 ```
 
+Arrows are checked against the geometry, not by eye — every statement arrow records
+where it landed, so you can confirm it hit a real block:
+
+```js
+__psql.sim.lastOp         // "read products[9,39]"
+__psql.sim.lastArrowEnd   // Vector3 — exactly inst.blockTop(that block)
+```
+
 A tick looks like:
 
 ```

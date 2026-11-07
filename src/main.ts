@@ -47,7 +47,7 @@ const telemetry = installTelemetry({
   renderer: world.renderer,
   speed: () => speed,
 })
-;(window as unknown as Record<string, unknown>).__psqlDebug = telemetry.api
+  ; (window as unknown as Record<string, unknown>).__psqlDebug = telemetry.api
 if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
 // deep link straight into a walkthrough view: ?view=wal
 const startView = new URLSearchParams(location.search).get('view')
@@ -117,7 +117,7 @@ const rig = createCameraRig({
     if (orbitCheckbox) orbitCheckbox.checked = false
   },
 })
-;(window as unknown as Record<string, unknown>).__psqlViews = rig
+  ; (window as unknown as Record<string, unknown>).__psqlViews = rig
 
 // build the view buttons from the single source of truth
 const viewsEl = document.getElementById('views')
