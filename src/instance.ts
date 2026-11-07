@@ -54,6 +54,13 @@ export interface Page8K {
   table: string | null
   /** 0 = nothing on this page, 1 = packed full. Drives colour and height. */
   fill: number
+  /** Per-page brightness jitter, so no two pages look identical. */
+  shade: number
+  /** Optional colour cast hinting at a different data set. */
+  hint: number
+  hintAmt: number
+  /** No page here at all: free space the files could grow into. */
+  free: boolean
   dead: boolean
   busy: boolean
   glow: THREE.Mesh | null
@@ -131,10 +138,10 @@ const TABLE_REGIONS: TableRegion[] = [
   {
     anchor: 'heap',
     label: 'users',
-    c0: 4,
-    c1: 17,
-    r0: 5,
-    r1: 12,
+    c0: 19,
+    c1: 28,
+    r0: 3,
+    r1: 10,
     color: PALETTE.teal,
     info: {
       title: 'TABLE: users — 28 contiguous pages',
@@ -145,10 +152,10 @@ const TABLE_REGIONS: TableRegion[] = [
   {
     anchor: 'events',
     label: 'products',
-    c0: 22,
-    c1: 35,
-    r0: 5,
-    r1: 12,
+    c0: 30,
+    c1: 39,
+    r0: 3,
+    r1: 10,
     color: PALETTE.amber,
     info: {
       title: 'TABLE: products — 32 contiguous pages',
@@ -159,10 +166,10 @@ const TABLE_REGIONS: TableRegion[] = [
   {
     anchor: 'metrics',
     label: 'metrics',
-    c0: 39,
-    c1: 47,
-    r0: 1,
-    r1: 5,
+    c0: 41,
+    c1: 46,
+    r0: 11,
+    r1: 16,
     color: 0x5a7bff,
     info: {
       title: 'TABLE: metrics — 21 contiguous pages',
@@ -397,8 +404,8 @@ export class PostgresInstance {
     this.group.add(diskFloorPick)
     this.register(diskFloorPick, {
       title: 'Disk — a field of 8 kB pages',
-      body: 'Every block on this plate is one 8 kB page, and that is the entire disk: heap pages, index pages and WAL payloads all look like this. A table is just a named, contiguous run of these blocks — see the outlines. RAM holds copies, so only copies ever float.',
-      meta: 'disk · one block = 8 kB page · survives a crash',
+      body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
+      meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
     })
 
     const floorLab = label('DISK · ALL PAGE FILES')
@@ -641,14 +648,38 @@ export class PostgresInstance {
     this.group.add(field)
     this.pageField = field
 
+    const inTable = (r: number, c: number) =>
+      TABLE_REGIONS.some((t) => r >= t.r0 && r <= t.r1 && c >= t.c0 && c <= t.c1)
+
+    // Fragmentation grows as you move away from the WAL: packed solid next to
+    // it, thinning out past 60%, and the outer 20% of the disk is untouched
+    // space with no pages in it at all.
+    const freeAt = (c: number) => {
+      const t = 1 - c / (cols - 1)
+      if (t > 0.8) return true
+      if (t > 0.6) return Math.random() < ((t - 0.6) / 0.2) * 0.9
+      return false
+    }
+
     const dummy = new THREE.Object3D()
+    const hints = [PALETTE.teal, PALETTE.violet, 0x5a7bff, PALETTE.amber]
     let i = 0
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         const home = new THREE.Vector3(pageX(c), PAGE_Y, pageZ(r))
+        const table = inTable(r, c)
+        const free = !table && freeAt(c)
+
         dummy.position.copy(home)
+        if (free) {
+          // no page here: collapse the block so the plate shows through
+          dummy.scale.setScalar(0.001)
+        } else {
+          dummy.scale.set(1, 1, 1)
+        }
         dummy.updateMatrix()
         field.setMatrixAt(i, dummy.matrix)
+
         this.pages8k.push({
           i,
           home,
@@ -656,7 +687,12 @@ export class PostgresInstance {
           col: c,
           color: BLOCK_FREE,
           table: null,
-          fill: 0,
+          // pages we do not label still hold data from other tables
+          fill: free || table ? 0 : rand(0.1, 1),
+          shade: rand(0.8, 1.14),
+          hint: hints[randInt(0, hints.length - 1)],
+          hintAmt: free ? 0 : Math.random() < 0.4 ? rand(0.05, 0.16) : 0,
+          free,
           dead: false,
           busy: false,
           glow: null,
@@ -664,7 +700,36 @@ export class PostgresInstance {
         i++
       }
     }
-    this.pages8k.forEach((p) => this.setFill(p, 0))
+    this.pages8k.forEach((p) => {
+      if (!p.free) this.setFill(p, p.fill)
+    })
+
+    // in the untouched tail, draw the slot lattice only — no pages, just room
+    const freeCols = Math.floor(cols * 0.2)
+    const fx0 = pageX(0) - PAGE_GRID.gx / 2
+    const fx1 = pageX(freeCols - 1) + PAGE_GRID.gx / 2
+    const fz0 = pageZ(0) - PAGE_GRID.gz / 2
+    const fz1 = pageZ(rows - 1) + PAGE_GRID.gz / 2
+    const slotPts: number[] = []
+    for (let x = fx0; x <= fx1 + 0.001; x += PAGE_GRID.gx) {
+      slotPts.push(x, PAGE_Y - 0.12, fz0, x, PAGE_Y - 0.12, fz1)
+    }
+    for (let z = fz0; z <= fz1 + 0.001; z += PAGE_GRID.gz) {
+      slotPts.push(fx0, PAGE_Y - 0.12, z, fx1, PAGE_Y - 0.12, z)
+    }
+    const slotGeo = new THREE.BufferGeometry()
+    slotGeo.setAttribute('position', new THREE.Float32BufferAttribute(slotPts, 3))
+    this.group.add(
+      new THREE.LineSegments(
+        slotGeo,
+        new THREE.LineBasicMaterial({
+          color: 0x1d4a5e,
+          transparent: true,
+          opacity: 0.5,
+          depthWrite: false,
+        }),
+      ),
+    )
 
     // one reusable mesh carries a page while it is being read into RAM
     this.liftMesh = new THREE.Mesh(
@@ -703,12 +768,14 @@ export class PostgresInstance {
   private fillHex(p: Page8K) {
     const ramp = this.tmpColorA.setHex(FILL_DARK).lerp(this.tmpColorB.setHex(FILL_BRIGHT), p.fill)
     if (p.table) ramp.lerp(this.tmpColorB.setHex(p.color), 0.28)
+    if (p.hintAmt > 0) ramp.lerp(this.tmpColorB.setHex(p.hint), p.hintAmt)
+    ramp.multiplyScalar(p.shade)
     return ramp.getHex()
   }
 
   /** Height of a block: an empty page is a flat slot, a full one is a cube. */
   private blockScale(fill: number) {
-    return 0.28 + 0.72 * fill
+    return 0.45 + 0.55 * fill
   }
 
   private applyTransform(p: Page8K, scale: number, sy?: number) {
@@ -813,7 +880,8 @@ export class PostgresInstance {
           p.color = region.color
           // pages start out partly used, with a believable spread of fill levels;
           // the rest of the reserved run is still unallocated (flat slots)
-          const initial = Math.random() < 0.62 ? rand(0.18, 1) : 0
+          const initial = Math.random() < 0.84 ? rand(0.18, 1) : 0
+          p.shade = rand(0.82, 1.12)
           this.setFill(p, initial)
           blocks.push(p)
         }
@@ -863,9 +931,9 @@ export class PostgresInstance {
       ANCHOR[region.anchor].set(cx, PAGE_Y, cz)
     }
 
-    // the free tail of the disk: pages that exist as capacity, not as data
-    const freeLab = label('UNALLOCATED CAPACITY')
-    freeLab.position.set(pageX(33), PAGE_Y + 0.7, pageZ(PAGE_GRID.rows - 1))
+    // point at a genuine hole in the field: space the files can grow into
+    const freeLab = label('FREE SPACE · ALLOCATABLE')
+    freeLab.position.set(pageX(4), PAGE_Y + 0.05, pageZ(PAGE_GRID.rows - 1))
     this.group.add(freeLab)
   }
 

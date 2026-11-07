@@ -28,7 +28,7 @@ the roof; results stream back up.
 | `TABLE: users` / `products` / `metrics` | selection marquees over contiguous runs of those pages. A table is only a name plus a run of pages — that is the whole trick |
 | block height & brightness | how full that page is. A flat dark slot is a page with nothing in it yet; a tall bright block is a packed page. Fill levels start random, as they do in a real heap |
 | green / magenta flash on a page | the statement just touched it: green for INSERT (page fills up, or a brand-new page gets allocated), magenta for DELETE (page drains, and at zero it becomes a flat free slot again) |
-| `UNALLOCATED CAPACITY` | the rest of the disk: pages the instance is not using. They exist as space the files can grow into, not as data |
+| `FREE SPACE · ALLOCATABLE` | holes in the field: no page there at all, just room the files can grow into |
 | `PAGE FILE` blocks lifting off | on a buffer miss a page lifts out of the field and floats up toward the deck: that page is now in RAM |
 | `WAL · DISK` column | write-ahead log segments, a file sequence on the plate. Records append as queries run; at checkpoint the segments are fsynced and recycled |
 | `WAL BUFFERS · RAM` cubes | the newest WAL bytes, held in `wal_buffers` in shared memory until the WAL writer fsyncs them |
@@ -56,6 +56,9 @@ the roof; results stream back up.
 - Each table keeps a fixed reserved area, which is a simplification: in reality Postgres grows a heap
   one page at a time wherever the filesystem puts it. Inside the reserved run, pages are allocated and
   freed as rows are inserted and deleted.
+- Fragmentation is a gradient across the disk: packed solid on the WAL side, starting to thin out around
+  60% of the way across, and the outer 20% has no pages in it at all — only the slot lattice. That tail is
+  the disk space files could still grow into.
 - Rough numbers: a buffer hit is ~0.1 µs–1 µs of CPU, a disk read 100 µs–10 ms, and an `fsync` on
   `COMMIT` is the thing that actually costs you latency.
 
