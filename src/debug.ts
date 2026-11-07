@@ -39,6 +39,7 @@ export interface Snapshot {
     busyBackends: number
     maintenance: string[]
     note: string
+    lastOp: string
     chains: number
     disk: {
         blocks: number
@@ -116,6 +117,7 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
             busyBackends: stats.busyBackends,
             maintenance,
             note: stats.note,
+            lastOp: sim.lastOp,
             chains: sim.activeChains,
             disk: {
                 blocks: inst.pages8k.length,
@@ -142,7 +144,7 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
             `  q=${s.queries} hit=${s.hitRate}% lat=${s.latency}ms dead=${s.deadRows} ` +
             `conn=${s.connections}(${s.busyBackends} busy) wal=${s.walBytes}B fill=${s.walFill} ` +
             `chains=${s.chains} disk=${s.disk.occupied}/${s.disk.blocks} free=${s.disk.free} ` +
-            `deadPages=${s.disk.deadPages} avgFill=${s.disk.avgFill} ` +
+            `deadPages=${s.disk.deadPages} avgFill=${s.disk.avgFill} op=${s.lastOp} ` +
             `buf=${s.buffers.dirty}d/${s.buffers.pages} draw=${s.draws} fps=${s.fps}` +
             (s.maintenance.length ? ` [${s.maintenance.join(',')}]` : ''),
         )

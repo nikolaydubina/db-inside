@@ -31,7 +31,8 @@ the roof; results stream back up.
 | green / magenta flash on a page | the statement just touched it: green for INSERT (page fills up, or a brand-new page gets allocated), magenta for DELETE (page drains, and at zero it becomes a flat free slot again) |
 | `FREE SPACE · ALLOCATABLE` | holes in the field: no page there at all, just room the files can grow into |
 | `PAGE FILE` blocks lifting off | on a buffer miss a page lifts out of the field and floats up toward the deck: that page is now in RAM |
-| `WAL · DISK` column | write-ahead log segments, a file sequence on the plate. Records append as queries run; at checkpoint the segments are fsynced and recycled |
+| arrows into the disk | there is no permanent arrow to "the disk". Each read builds its own curve to the exact block it fetches and drops a ring on it; a checkpoint fires a *burst* of arrows, one per dirty page, each to its own block. A buffer hit produces no disk arrow at all |
+| `WAL · DISK` run | the log is a contiguous run of page-slots at the front edge of the disk, next to the free space it grows into. A thin blade marks the write position; records append left to right, and at checkpoint the old segments are recycled **in place** — nothing is moved |
 | `WAL BUFFERS · RAM` cubes | the newest WAL bytes, held in `wal_buffers` in shared memory until the WAL writer fsyncs them |
 | `B-TREE` / `BRIN` / `GIN` / `HASH` | index structures floating in the air: they are shown as they exist **in memory** right now, i.e. their pages read up from the index files into shared buffers |
 | `HEAP` (users) | table pages and tuples; magenta blocks are dead tuples left by MVCC updates |

@@ -92,9 +92,6 @@ export interface PipelineNode {
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 
-/** y of the first WAL segment: the log sits on the disk floor, not in the air. */
-const WAL_BASE = 0.23
-
 /** How far "in-memory right now" structures float above the disk plate. */
 const RAM_LIFT = 1.15
 
@@ -107,6 +104,15 @@ export const DISK_PLATE = { w: 24.2, d: 9.0, cz: 3.2, top: 0.09 }
  * every fourth block edge lands on a grid line.
  */
 export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0.28, bd: 0.46 }
+
+/**
+ * The WAL is not a column floating in the air: it is a contiguous run of slots
+ * in the page lattice, at the front edge of the disk next to the free space it
+ * grows into. Segments are appended left to right and recycled in place.
+ */
+const WAL_ROW = 16
+const WAL_C0 = 28
+const WAL_LEN = 12
 const PAGE_Y = 0.25
 const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
 const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
@@ -186,7 +192,7 @@ export const ANCHOR = {
   exec: V(1.6, 6.85, -2.4),
   result: V(8.2, 6.6, -1.8),
   bufferCenter: V(-1.0, 5.5, -1.4),
-  wal: V(10.9, 4.6, 2.4),
+  wal: V(5.25, 0.55, 7.25),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
   disk: V(7.0, 0.5, 5.6),
@@ -223,9 +229,11 @@ export class PostgresInstance {
   readonly tableBlocks: Page8K[] = []
   readonly pickables: THREE.Object3D[] = []
   readonly nodes: Record<NodeName, PipelineNode>
-  readonly walMats: THREE.MeshStandardMaterial[] = []
   readonly walBufferMats: THREE.MeshStandardMaterial[] = []
-  readonly walSegments: THREE.Mesh[] = []
+  /** The page blocks that belong to the WAL run, in write order. */
+  readonly walBlocks: Page8K[] = []
+  /** Per-segment flash boost, decays in update(). */
+  private walBoost = new Map<number, number>()
   readonly btreeMats: THREE.MeshStandardMaterial[] = []
   readonly ginMats: THREE.MeshStandardMaterial[] = []
   readonly brinMats: THREE.MeshStandardMaterial[] = []
@@ -235,9 +243,10 @@ export class PostgresInstance {
   pageField!: THREE.InstancedMesh
   /** Reusable block mesh used while a page is being read up into RAM. */
   private liftMesh!: THREE.Mesh
+  private markGeo!: THREE.TorusGeometry
+  private markMat!: THREE.MeshBasicMaterial
   /** One port per client connection, sitting on the top boundary of the box. */
   readonly backends: BackendPod[] = []
-  readonly walHead: THREE.Mesh
   readonly scanner: THREE.Mesh
   readonly vacuumDrone: THREE.Group
   readonly bufferFrame: THREE.Mesh
@@ -261,7 +270,6 @@ export class PostgresInstance {
     this.buildLocks()
     this.buildBackends()
     this.nodes = this.buildPipeline()
-    this.walHead = this.makeWalHead()
     this.scanner = this.makeScanner()
     this.vacuumDrone = this.makeVacuumDrone()
     this.bufferFrame = this.group.children.find(
@@ -542,38 +550,34 @@ export class PostgresInstance {
     })
   }
 
+  /**
+   * The WAL is not separate geometry: it is a marked run of blocks inside the
+   * page field. buildPageField styles those blocks, so nothing can overlap.
+   */
   private buildWal() {
-    const x = ANCHOR.wal.x
-    const z = ANCHOR.wal.z
-    const segGeo = new RoundedBoxGeometry(0.85, 0.3, 0.85, 2, 0.04)
-    for (let i = 0; i < 7; i++) {
-      const mat = glowMat(0x241703, 0xa85a14, 0.62, {
-        roughness: 0.45,
-        metalness: 0.25,
-      })
-      const seg = new THREE.Mesh(segGeo, mat)
-      seg.position.set(x, WAL_BASE + i * 0.42, z)
-      seg.castShadow = true
-      seg.receiveShadow = true
-      this.group.add(seg)
-      this.walSegments.push(seg)
-      this.walMats.push(mat)
-
-      const seam = neonEdges(segGeo, 0xffb03a, 0.85)
-      seam.position.copy(seg.position)
-      this.group.add(seam)
-    }
+    // the run is a real extent on disk, so it gets a real extent outline
+    const x0 = pageX(WAL_C0) - PAGE_GRID.gx / 2
+    const x1 = pageX(WAL_C0 + WAL_LEN - 1) + PAGE_GRID.gx / 2
+    const z0 = pageZ(WAL_ROW) - PAGE_GRID.gz / 2
+    const z1 = pageZ(WAL_ROW) + PAGE_GRID.gz / 2
+    const runEdge = neonEdges(
+      new THREE.BoxGeometry(x1 - x0, 0.5, z1 - z0),
+      0xffb03a,
+      0.75,
+    )
+    runEdge.position.set((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
+    this.group.add(runEdge)
 
     const pick = new THREE.Mesh(
-      new THREE.BoxGeometry(1.5, 5.4, 1.5),
+      new THREE.BoxGeometry(x1 - x0, 1.4, z1 - z0),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    pick.position.set(x, 3.1, z)
+    pick.position.set((x0 + x1) / 2, PAGE_Y + 0.5, (z0 + z1) / 2)
     this.group.add(pick)
     this.register(pick, {
       title: 'Write-ahead log (on disk)',
-      body: 'A sequence of segment files in pg_wal, appended on every change before the heap page is touched. The newest bytes sit in wal_buffers — the floating cyan blocks above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. A checkpoint then flushes dirty pages and recycles old segments.',
-      meta: 'pg_wal · disk files · tail buffered in wal_buffers · fsync',
+      body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. At checkpoint the old segments are recycled: they are dimmed in place and written over, never moved.',
+      meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
     })
 
     // wal_buffers: the only part of the WAL that lives in RAM
@@ -586,7 +590,7 @@ export class PostgresInstance {
       wb.add(m)
       this.walBufferMats.push(mat)
     }
-    wb.position.set(x - 0.55, 4.35, z + 0.55)
+    wb.position.set(pageX(WAL_C0 + 3), 1.75, pageZ(WAL_ROW) + 0.3)
     this.group.add(wb)
 
     const wbPick = new THREE.Mesh(
@@ -597,35 +601,55 @@ export class PostgresInstance {
     this.group.add(wbPick)
     this.register(wbPick, {
       title: 'wal_buffers — the WAL tail in RAM',
-      body: 'WAL records are written to these shared-memory buffers first, then flushed to the segment files on disk in order. It is the same split as heap pages: the durable thing is on disk, RAM only holds a short recent stretch. Default is 1/32 of shared_buffers, about 16 MB.',
+      body: 'WAL records are written to these shared-memory buffers first, then flushed to the segment blocks below in order. Same split as heap pages: the durable thing is on disk, RAM only holds a short recent stretch. Default is 1/32 of shared_buffers, about 16 MB.',
       meta: 'wal_buffers · RAM · tail of the log · flushed by WAL writer',
     })
 
     const wbLab = label('WAL BUFFERS · RAM')
-    wbLab.position.set(x - 1.1, 5.6, z + 1.05)
+    wbLab.position.set(pageX(WAL_C0 + 3), 2.35, pageZ(WAL_ROW) + 0.3)
     this.group.add(wbLab)
 
     const lab = label('WAL · DISK')
-    lab.position.set(x - 1.5, 4.25, z + 0.4)
+    lab.position.set(x0, PAGE_Y + 0.75, z1 + 0.15)
     this.group.add(lab)
   }
 
-  private makeWalHead() {
-    const head = new THREE.Group()
-    const core = new THREE.Mesh(
-      new THREE.BoxGeometry(0.95, 0.08, 0.95),
-      new THREE.MeshBasicMaterial({
-        color: 0xffd089,
-        transparent: true,
-        opacity: 0.8,
-        blending: THREE.AdditiveBlending,
-      }),
-    )
-    head.add(core)
-    head.add(halo(PALETTE.amber, 1.9, 0.24))
-    head.position.set(ANCHOR.wal.x, 2.6, ANCHOR.wal.z)
-    this.group.add(head)
-    return core
+  /**
+   * WAL blocks are ordinary blocks in the field — we only restyle them, so they
+   * can never overlap or z-fight with the surrounding pages.
+   */
+  private styleWal(time: number, dt: number) {
+    const filled = this.walFilledSegments
+    const head = this.walHeadIndex
+    for (let i = 0; i < this.walBlocks.length; i++) {
+      const p = this.walBlocks[i]
+      if (p.busy) continue
+      const on = i < filled
+      const isHead = on && i === head
+      const boost = this.walBoost.get(i) ?? 0
+      if (boost > 0) {
+        const next = boost * (1 - Math.min(1, dt * 2.6))
+        if (next < 0.03) this.walBoost.delete(i)
+        else this.walBoost.set(i, next)
+      }
+
+      const base = isHead ? 0xffc76b : on ? 0xc9822a : 0x140f07
+      const k = (isHead ? 0.78 + 0.22 * breathe(time, 2.2, 0) : 1) + boost * 0.6
+      this.tmpColorC.setHex(base).multiplyScalar(k)
+      this.paintBlock(p, this.tmpColorC.getHex())
+      const scale = isHead ? 1.9 : on ? 1 : 0.35
+      this.applyTransform(p, 1, this.blockScale(on ? 1 : 0) * scale)
+    }
+  }
+
+  /** One-shot flare on a WAL block, used when a checkpoint recycles the run. */
+  flashWalSegment(i: number) {
+    this.walBoost.set(i, 1)
+  }
+
+  /** Centre of WAL segment `i` in the page lattice. */
+  walSlot(i: number) {
+    return new THREE.Vector3(pageX(WAL_C0 + i), PAGE_Y, pageZ(WAL_ROW))
   }
 
   /** The disk plate is tiled edge to edge with 8 kB pages — this *is* the disk. */
@@ -666,7 +690,8 @@ export class PostgresInstance {
       for (let c = 0; c < cols; c++) {
         const home = new THREE.Vector3(pageX(c), PAGE_Y, pageZ(r))
         const table = inTable(r, c)
-        const free = !table && freeAt(c)
+        const onWal = r === WAL_ROW && c >= WAL_C0 && c < WAL_C0 + WAL_LEN
+        const free = !table && !onWal && freeAt(c)
 
         dummy.position.copy(home)
         if (free) {
@@ -678,7 +703,7 @@ export class PostgresInstance {
         dummy.updateMatrix()
         field.setMatrixAt(i, dummy.matrix)
 
-        this.pages8k.push({
+        const block: Page8K = {
           i,
           home,
           row: r,
@@ -686,14 +711,16 @@ export class PostgresInstance {
           color: BLOCK_FREE,
           table: null,
           // pages we do not label still hold data from other tables
-          fill: free || table ? 0 : rand(0.1, 1),
+          fill: free || table || onWal ? 0 : rand(0.1, 1),
           shade: rand(0.8, 1.14),
           hint: hints[randInt(0, hints.length - 1)],
           hintAmt: free ? 0 : Math.random() < 0.4 ? rand(0.05, 0.16) : 0,
           free,
           dead: false,
           busy: false,
-        })
+        }
+        this.pages8k.push(block)
+        if (onWal) this.walBlocks.push(block)
         i++
       }
     }
@@ -727,6 +754,15 @@ export class PostgresInstance {
         }),
       ),
     )
+
+    this.markGeo = new THREE.TorusGeometry(0.34, 0.025, 4, 28)
+    this.markMat = new THREE.MeshBasicMaterial({
+      color: PALETTE.amber,
+      transparent: true,
+      opacity: 0.85,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+    })
 
     // one reusable mesh carries a page while it is being read into RAM
     this.liftMesh = new THREE.Mesh(
@@ -834,6 +870,26 @@ export class PostgresInstance {
     // an insert makes pages visibly fatter and brighter
     this.touchBlocks(touched, 0xd9ff7a, 0.6, 1.6)
     return touched
+  }
+
+  /** Expanding ring on top of one page: "the arrow landed exactly here". */
+  markBlock(p: Page8K, hex: number) {
+    const ring = new THREE.Mesh(this.markGeo, this.markMat.clone())
+    const mat = ring.material as THREE.MeshBasicMaterial
+    mat.color.setHex(hex)
+    ring.rotation.x = -Math.PI / 2
+    ring.position.copy(p.home).setY(p.home.y + 0.2)
+    ring.scale.setScalar(0.35)
+    this.group.add(ring)
+    void this.ticker
+      .add(0.6, (k) => {
+        ring.scale.setScalar(0.35 + k * 0.9)
+        mat.opacity = 0.85 * (1 - k)
+      })
+      .then(() => {
+        this.group.remove(ring)
+        mat.dispose()
+      })
   }
 
   /** A page in some table that a read is about to touch. */
@@ -944,7 +1000,7 @@ export class PostgresInstance {
 
     // point at a genuine hole in the field: space the files can grow into
     const freeLab = label('FREE SPACE · ALLOCATABLE')
-    freeLab.position.set(pageX(4), PAGE_Y + 0.05, pageZ(PAGE_GRID.rows - 1))
+    freeLab.position.set(pageX(5), PAGE_Y + 1.5, pageZ(7))
     this.group.add(freeLab)
   }
 
@@ -1539,10 +1595,7 @@ export class PostgresInstance {
   async flushWal(): Promise<void> {
     const lit = this.walFilledSegments
     for (let i = 0; i < lit; i++) {
-      const m = this.walMats[i]
-      void this.ticker.add(0.55, (k) => {
-        m.emissiveIntensity = 0.6 + 2.2 * Math.sin(k * Math.PI)
-      })
+      this.flashWalSegment(i)
       await this.ticker.wait(0.05)
     }
     await this.ticker.wait(0.35)
@@ -1632,7 +1685,8 @@ export class PostgresInstance {
    * The floating is the whole point — it is the block that is now in memory.
    */
   liftFromDisk(pageIdx: number) {
-    const free = this.pages8k.filter((b) => !b.busy)
+    // never lift a WAL block: its styling is owned by styleWal()
+    const free = this.pages8k.filter((b) => !b.busy && !this.walBlocks.includes(b))
     if (free.length === 0) return
     const block = free[randInt(0, free.length - 1)]
     const page = this.pages[pageIdx]
@@ -1670,11 +1724,16 @@ export class PostgresInstance {
   }
 
   walBlockPosition(i: number) {
-    return new THREE.Vector3(ANCHOR.wal.x, WAL_BASE + i * 0.42, ANCHOR.wal.z)
+    return this.walSlot(i)
+  }
+
+  /** Index of the block currently being written — the WAL head. */
+  get walHeadIndex() {
+    return Math.min(WAL_LEN - 1, Math.max(0, this.walFilledSegments - 1))
   }
 
   get walFilledSegments() {
-    return Math.max(1, Math.round(this.walFill * this.walSegments.length))
+    return Math.max(1, Math.round(this.walFill * this.walBlocks.length))
   }
 
   update(dt: number, time: number) {
@@ -1687,16 +1746,7 @@ export class PostgresInstance {
       p.mat.emissiveIntensity = 0.22 + idle + p.heat * 1.15 + dirty * 0.5
     }
 
-    // WAL head rides the fill level
-    const walTop = WAL_BASE + this.walFill * 6 * 0.42
-    this.walHead.position.y += (walTop - this.walHead.position.y) * Math.min(1, dt * 3)
-    this.walHead.rotation.y += dt * 2.2
-
-    for (let i = 0; i < this.walMats.length; i++) {
-      const on = i / this.walMats.length < this.walFill
-      this.walMats[i].emissiveIntensity =
-        (on ? 0.7 : 0.1) + (on ? breathe(time, 1.4, i * 0.6) * 0.12 : 0)
-    }
+    this.styleWal(time, dt)
 
     // pipeline nodes drift like slow satellites and breathe when they work
     for (const key of Object.keys(this.nodes) as NodeName[]) {

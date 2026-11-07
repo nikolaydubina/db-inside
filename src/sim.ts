@@ -63,6 +63,8 @@ export class EngineSim {
   live = 0
   indexScan = false
   note = 'shared_buffers · 8 kB pages'
+  /** Which concrete page the last disk operation touched — shown in telemetry. */
+  lastOp = 'idle'
   lastLatency = 0.12
 
   private deadTimer = 2.5
@@ -83,12 +85,7 @@ export class EngineSim {
     private scene: THREE.Scene,
     private paths: Paths,
     private flows: FlowSet,
-  ) {
-    // the ambient disk lines are just background traffic; the meaningful disk
-    // arrows are the per-query ones, routed to the page that statement touches
-    this.flows.bufferToDisk.setWeight(0.35)
-    this.flows.diskToBuffer.setWeight(0.35)
-  }
+  ) { }
 
   get activeChains() {
     return this.chains.length
@@ -246,6 +243,8 @@ export class EngineSim {
           )
           await travel(this.ticker, packet, down, 0.55)
           fDown.flash(0.85)
+          this.inst.markBlock(target, kind === 'insert' ? 0xc7ff5a : PALETTE.magenta)
+          this.lastOp = `${kind} ${target.table ?? 'free'}[${target.row},${target.col}]`
         }
         despawn(this.ticker, this.scene, packet, 0.2)
 
@@ -308,7 +307,11 @@ export class EngineSim {
         })
         await travel(this.ticker, packet, down, 0.5, easeInOutCubic)
         fDown.flash(0.9)
-        if (target) this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
+        if (target) {
+          this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
+          this.inst.markBlock(target, PALETTE.amber)
+          this.lastOp = `read ${target.table ?? 'free'}[${target.row},${target.col}]`
+        }
 
         const up = pathCurve([
           toBlock,
@@ -396,22 +399,16 @@ export class EngineSim {
     this.note = 'checkpoint · flushing dirty pages + fsync wal'
     try {
       await this.inst.dirtyPages(12)
-      this.flows.walToDisk.flash(1.2)
-      this.flows.bufferToDisk.flash(0.9)
       await this.inst.flushWal()
 
-      // checkpoint: fsynced WAL blocks are written out, then segments recycle
+      // the WAL is already on disk: at checkpoint its old segments are simply
+      // recycled in place — nothing is moved to another place
       const segs = this.inst.walFilledSegments
       for (let i = 0; i < segs; i++) {
-        const block = makePacket(PALETTE.amber, 0.32, this.scene)
-        block.position.copy(this.inst.walBlockPosition(i))
-        void travel(this.ticker, block, this.paths.walToDisk, 0.85, easeInOutCubic).then(() => {
-          this.inst.flashDisk()
-          despawn(this.ticker, this.scene, block, 0.2)
-        })
-        await this.ticker.wait(0.06)
+        this.inst.flashWalSegment(i)
+        await this.ticker.wait(0.05)
       }
-      await this.ticker.wait(0.5)
+      await this.ticker.wait(0.4)
 
       // a checkpoint is batched: many dirty pages leave at once, each one to its
       // own block in the heap — that is why it is one fsync storm, not many I/Os
@@ -429,7 +426,10 @@ export class EngineSim {
           dest,
         ])
         void travel(this.ticker, copy, curve, 0.75).then(() => {
-          if (target) this.inst.paintBlock(target, PALETTE.amber)
+          if (target) {
+            this.inst.markBlock(target, PALETTE.amber)
+            this.lastOp = `checkpoint write ${target.table ?? 'free'}[${target.row},${target.col}]`
+          }
           this.inst.flashDisk()
           despawn(this.ticker, this.scene, copy, 0.2)
         })

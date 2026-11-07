@@ -214,9 +214,6 @@ export class FlowLine {
 
 export interface FlowSet {
   execToWal: FlowLine
-  walToDisk: FlowLine
-  bufferToDisk: FlowLine
-  diskToBuffer: FlowLine
   heapToBuffer: FlowLine
   indexToBuffer: FlowLine
   ginToBuffer: FlowLine
@@ -235,21 +232,6 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
     speed: 0.4,
     opacity: 0.26,
   })
-  const walToDisk = add(paths.walToDisk.getPoints(28), PALETTE.amber, {
-    arrows: 2,
-    speed: 0.16,
-    opacity: 0.14,
-  })
-  const bufferToDisk = add(paths.bufferToDisk.getPoints(24), PALETTE.amber, {
-    arrows: 2,
-    speed: 0.2,
-    opacity: 0.14,
-  })
-  const diskToBuffer = add(paths.diskToBuffer.getPoints(24), PALETTE.amber, {
-    arrows: 2,
-    speed: 0.2,
-    opacity: 0.14,
-  })
   const heapToBuffer = add(paths.heapToBuffer.getPoints(24), PALETTE.teal, {
     arrows: 2,
     speed: 0.3,
@@ -266,21 +248,10 @@ export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
     opacity: 0.12,
   })
 
-  const all = [
-    execToWal,
-    walToDisk,
-    bufferToDisk,
-    diskToBuffer,
-    heapToBuffer,
-    indexToBuffer,
-    ginToBuffer,
-  ]
+  const all = [execToWal, heapToBuffer, indexToBuffer, ginToBuffer]
 
   return {
     execToWal,
-    walToDisk,
-    bufferToDisk,
-    diskToBuffer,
     heapToBuffer,
     indexToBuffer,
     ginToBuffer,
