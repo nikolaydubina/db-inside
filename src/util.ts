@@ -66,6 +66,67 @@ export function neonEdges(geo: THREE.BufferGeometry, color: number, opacity = 0.
   return new THREE.LineSegments(eg, mat)
 }
 
+/**
+ * 12 edges of a unit cube centred on the origin: two vertices per edge, 24 in
+ * total. No faces, no triangles — just the skeleton of a box.
+ */
+const UNIT_BOX_EDGES = (() => {
+  const v: number[] = []
+  const c = [-0.5, 0.5]
+  for (const y of c) for (const z of c) v.push(-0.5, y, z, 0.5, y, z) // along x
+  for (const x of c) for (const z of c) v.push(x, -0.5, z, x, 0.5, z) // along y
+  for (const x of c) for (const y of c) v.push(x, y, -0.5, x, y, 0.5) // along z
+  const g = new THREE.BufferGeometry()
+  g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3))
+  return g
+})()
+
+/**
+ * A box drawn as nothing but its 12 edges — no faces, no thickness, no width.
+ * One primitive for every volume we want to point at: the process cage, the
+ * disk plates, the table selection marquees. Colour + bounds is the whole API,
+ * so anything that outlines something outlines it the same way.
+ */
+export class OutlineBox extends THREE.LineSegments {
+  constructor(
+    readonly w: number,
+    readonly h: number,
+    readonly d: number,
+    color: number,
+    opacity = 0.7,
+  ) {
+    super(
+      UNIT_BOX_EDGES,
+      new THREE.LineBasicMaterial({
+        color,
+        transparent: true,
+        opacity,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        toneMapped: false,
+      }),
+    )
+    this.scale.set(w, h, d)
+  }
+
+  /** Place by centre point. */
+  centre(x: number, y: number, z: number) {
+    this.position.set(x, y, z)
+    return this
+  }
+
+  /** Place by floor corner plus size — reads like a box statement. */
+  fromFloor(x: number, y: number, z: number) {
+    this.position.set(x, y + this.h / 2, z)
+    return this
+  }
+
+  setColor(color: number) {
+    ; (this.material as THREE.LineBasicMaterial).color.setHex(color)
+    return this
+  }
+}
+
 /** Small camera-facing text tag. */
 export function label(text: string, className = 'tag'): CSS2DObject {
   const el = document.createElement('div')
@@ -93,7 +154,7 @@ export class Ticker {
 
   /** Wait `dur` seconds. */
   wait(dur: number): Promise<void> {
-    return this.add(dur, () => {})
+    return this.add(dur, () => { })
   }
 
   update(dt: number) {

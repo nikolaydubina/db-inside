@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import {
   Ticker,
+  OutlineBox,
   breathe,
   easeInOutCubic,
   halo,
@@ -323,52 +324,21 @@ export class PostgresInstance {
     const shellH = 9.8
     const shellW = 25.2
     const shellD = 16.0
-    const shellGeo = new THREE.BoxGeometry(shellW, shellH, shellD)
 
-    // wireframe cage only — faces would hide the internals
-    const edges = neonEdges(shellGeo, 0x3fa8cc, 0.3)
-    edges.position.y = shellH / 2
-    this.group.add(edges)
+    // The process boundary is one outline box — the same primitive the table
+    // selection marquees use. No posts, no rim, nothing with thickness.
+    const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34)
+    cage.fromFloor(0, 0, 0)
+    this.group.add(cage)
 
-    const edges2 = neonEdges(shellGeo, 0x1d5f78, 0.5)
-    edges2.position.y = shellH / 2
-    edges2.scale.set(0.999, 0.998, 0.999)
-    this.group.add(edges2)
-
-    // corner posts
-    const postGeo = new RoundedBoxGeometry(0.14, shellH, 0.14, 2, 0.03)
-    const postMat = glowMat(0x0a1a26, 0x2fa6c8, 0.55)
-    for (const x of [-12.5, 12.5]) {
-      for (const z of [-7.9, 7.9]) {
-        const p = new THREE.Mesh(postGeo, postMat)
-        p.position.set(x, shellH / 2, z)
-        p.castShadow = true
-        this.group.add(p)
-      }
-    }
-
-    // roof rim
+    // pickable ceiling: a thin invisible slab on the top face of the cage, so
+    // hovering the boundary picks the process but nothing inside is blocked
     const roof = new THREE.Mesh(
-      new RoundedBoxGeometry(shellW, 0.1, shellD, 2, 0.04),
-      new THREE.MeshStandardMaterial({
-        color: 0x061019,
-        metalness: 0.6,
-        roughness: 0.4,
-        transparent: true,
-        opacity: 0.55,
-      }),
+      new THREE.BoxGeometry(shellW, 0.4, shellD),
+      new THREE.MeshBasicMaterial({ visible: false }),
     )
-    roof.position.y = shellH + 0.02
-    roof.scale.set(1.001, 1, 1.001)
-    roof.visible = false
+    roof.position.y = shellH
     this.group.add(roof)
-    const roofEdge = neonEdges(
-      new THREE.BoxGeometry(shellW, 0.08, shellD),
-      0x35e0ff,
-      0.3,
-    )
-    roofEdge.position.y = shellH + 0.02
-    this.group.add(roofEdge)
 
     // city-block pad: the blue grid floor everything floats over
     const pad = new THREE.Mesh(
@@ -402,8 +372,7 @@ export class PostgresInstance {
     padGeo.setAttribute('position', new THREE.Float32BufferAttribute(padPts, 3))
     this.group.add(new THREE.LineSegments(padGeo, padLineMat))
 
-    const padEdge = neonEdges(new THREE.BoxGeometry(27.6, 0.06, 18.4), 0x35e0ff, 0.45)
-    padEdge.position.y = 0.05
+    const padEdge = new OutlineBox(27.6, 0.06, 18.4, 0x35e0ff, 0.45).fromFloor(0, 0.05, 0)
     this.group.add(padEdge)
 
     /* -------------------------------------------------------------------- disk */
@@ -423,12 +392,13 @@ export class PostgresInstance {
     plate.receiveShadow = true
     this.group.add(plate)
 
-    const plateEdge = neonEdges(
-      new THREE.BoxGeometry(PAGE_W + 0.4, 0.04, PAGE_D + 0.4),
+    const plateEdge = new OutlineBox(
+      PAGE_W + 0.4,
+      0.04,
+      PAGE_D + 0.4,
       0x2f9fbf,
       0.55,
-    )
-    plateEdge.position.copy(plate.position)
+    ).centre(0, 0.06, DISK_PLATE.cz)
     this.group.add(plateEdge)
 
     const diskFloorPick = new THREE.Mesh(
@@ -602,12 +572,13 @@ export class PostgresInstance {
     const x1 = pageX(WAL_C0 + WAL_LEN - 1) + PAGE_GRID.gx / 2
     const z0 = pageZ(WAL_ROW) - PAGE_GRID.gz / 2
     const z1 = pageZ(WAL_ROW) + PAGE_GRID.gz / 2
-    const runEdge = neonEdges(
-      new THREE.BoxGeometry(x1 - x0, 0.5, z1 - z0),
+    const runEdge = new OutlineBox(
+      x1 - x0,
+      0.5,
+      z1 - z0,
       0xffb03a,
       0.75,
-    )
-    runEdge.position.set((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
+    ).centre((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
     this.group.add(runEdge)
 
     const pick = new THREE.Mesh(
@@ -895,7 +866,7 @@ export class PostgresInstance {
     for (const p of blocks) {
       const liftBy = this.blockScale(p.fill) * lift
       this.applyTransform(p, 1, liftBy)
-      void this.ticker.add(dur, () => {}).then(() => {
+      void this.ticker.add(dur, () => { }).then(() => {
         if (p.busy) return
         this.paintBlock(p, this.fillHex(p))
         this.showBlock(p)
@@ -1038,8 +1009,11 @@ export class PostgresInstance {
       const cz = (z0 + z1) / 2
       const h = 0.46
 
-      const edges = neonEdges(new THREE.BoxGeometry(w, h, d), region.color, 0.85)
-      edges.position.set(cx, PAGE_Y - 0.12 + h / 2, cz)
+      const edges = new OutlineBox(w, h, d, region.color, 0.85).centre(
+        cx,
+        PAGE_Y - 0.12 + h / 2,
+        cz,
+      )
       this.group.add(edges)
 
       const pick = new THREE.Mesh(
