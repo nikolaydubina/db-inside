@@ -40,7 +40,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   const scene = new THREE.Scene()
   scene.fog = new THREE.FogExp2(0x061420, 0.0108)
 
-  const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 400)
+  const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 2600)
   camera.position.set(29.2, 19, 34.5)
 
   const controls = new OrbitControls(camera, canvas)
@@ -70,7 +70,11 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     uniforms: {
       top: { value: new THREE.Color(0x02050c) },
       mid: { value: new THREE.Color(0x04101a) },
-      horizon: { value: new THREE.Color(0x082031) },
+      // exactly the fog colour: past a hundred units the sea is nothing but fog,
+      // so if the sky right above the water is not that same colour the edge of
+      // the sea shows up as a line across the view. Matching them, plus a round
+      // sea below, is what makes the horizon read as haze rather than geometry.
+      horizon: { value: new THREE.Color(0x061420) },
     },
     vertexShader: /* glsl */ `
       varying vec3 vPos;
@@ -92,35 +96,71 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
       }
     `,
   })
-  const sky = new THREE.Mesh(new THREE.SphereGeometry(190, 32, 24), skyMat)
+  const sky = new THREE.Mesh(new THREE.SphereGeometry(1200, 32, 24), skyMat)
   scene.add(sky)
 
   // faint star dust
-  const starCount = 900
+  const starCount = 1500
   const starPos = new Float32Array(starCount * 3)
   for (let i = 0; i < starCount; i++) {
-    const r = rand(80, 170)
+    // On the dome, not floating inside it: a real sky is infinitely far away,
+    // so the stars belong at the sky sphere's radius. The sea is 900 units wide,
+    // which puts its corners 636 out: the dome has to be beyond that or the far
+    // water ends up *behind* the stars and starlight is painted on top of it.
+    const r = rand(1020, 1040)
     const theta = rand(0, Math.PI * 2)
-    const phi = Math.acos(rand(-0.15, 1))
+    const phi = Math.acos(rand(-1, 1))
     starPos[i * 3] = r * Math.sin(phi) * Math.cos(theta)
-    starPos[i * 3 + 1] = r * Math.cos(phi) * 0.6
+    starPos[i * 3 + 1] = r * Math.cos(phi)
     starPos[i * 3 + 2] = r * Math.sin(phi) * Math.sin(theta)
   }
   const starGeo = new THREE.BufferGeometry()
   starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3))
-  const stars = new THREE.Points(
-    starGeo,
-    new THREE.PointsMaterial({
-      color: 0x8fc9e6,
-      size: 0.55,
-      sizeAttenuation: true,
-      transparent: true,
-      opacity: 0.42,
-      depthWrite: false,
-      fog: false,
-      blending: THREE.AdditiveBlending,
-    }),
-  )
+  // A custom shader for two reasons: `Points` renders square sprites by default,
+  // and we want a hard horizon clip so no star is ever drawn below the sea —
+  // culling by latitude instead leaves a tilted empty band as the field turns.
+  const starMat = new THREE.ShaderMaterial({
+    uniforms: {
+      uColor: { value: new THREE.Color(0x8fc9e6) },
+      uOpacity: { value: 0.5 },
+      // the deck sits at y = 0 — clip there, not at the sea far below, so no
+      // star can ever be drawn over the floor
+      uHorizon: { value: 0 },
+      // tracks the dome radius: points shrink as 1/distance, so moving the
+      // field from 185 out to 1030 needs the sprite scaled up to match
+      uSize: { value: 3.1 },
+      uScale: { value: 500 },
+    },
+    vertexShader: /* glsl */ `
+      uniform float uSize;
+      uniform float uScale;
+      varying float vWorldY;
+      void main() {
+        vWorldY = (modelMatrix * vec4(position, 1.0)).y;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = uSize * (uScale / -mv.z);
+        gl_Position = projectionMatrix * mv;
+      }
+    `,
+    fragmentShader: /* glsl */ `
+      uniform vec3 uColor;
+      uniform float uOpacity;
+      uniform float uHorizon;
+      varying float vWorldY;
+      void main() {
+        if (vWorldY < uHorizon) discard;
+        float r = length(gl_PointCoord - 0.5);
+        if (r > 0.5) discard;
+        gl_FragColor = vec4(uColor, uOpacity * (1.0 - smoothstep(0.25, 0.5, r)));
+      }
+    `,
+    transparent: true,
+    depthWrite: false,
+    fog: false,
+    blending: THREE.AdditiveBlending,
+  })
+  const stars = new THREE.Points(starGeo, starMat)
+
   // The stars turn about a tilted pole, the way the real sky does: the parent
   // holds the tilt, the points themselves spin about their own Y, which is now
   // 23.4 degrees off vertical. They are centred on the origin so that spin has
@@ -227,12 +267,15 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   /* --------------------------------- sea + grid ------------------------------ */
 
   const sea = new THREE.Mesh(
-    new THREE.PlaneGeometry(900, 900),
+    // A disc, not a quad: a 900-unit square puts its corners on screen as little
+    // angles in the horizon. Everything past ~120 units is pure fog anyway, so
+    // all that matters is that the edge has no corners to catch the eye.
+    new THREE.CircleGeometry(700, 128),
     new THREE.MeshStandardMaterial({
-      color: 0x02060c,
+      color: 0x0b1a28,
       roughness: 0.5,
       metalness: 0.4,
-      emissive: 0x01060b,
+      emissive: 0x04101c,
       emissiveIntensity: 1,
     }),
   )
@@ -240,19 +283,19 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   sea.position.y = -5.9
   scene.add(sea)
 
-  const grid = new THREE.GridHelper(600, 300, 0x0f3b4c, 0x081c26)
+  const grid = new THREE.GridHelper(600, 300, 0x2a7f9e, 0x123a4a)
   grid.position.y = -5.84
   const gm = grid.material as THREE.Material
   gm.transparent = true
-  gm.opacity = 0.34
+  gm.opacity = 0.42
   gm.depthWrite = false
   scene.add(grid)
 
-  const grid2 = new THREE.GridHelper(600, 60, 0x17617c, 0x0b2836)
+  const grid2 = new THREE.GridHelper(600, 60, 0x3aa2c4, 0x19546a)
   grid2.position.y = -5.83
   const gm2 = grid2.material as THREE.Material
   gm2.transparent = true
-  gm2.opacity = 0.34
+  gm2.opacity = 0.40
   gm2.depthWrite = false
   scene.add(grid2)
 
@@ -340,14 +383,19 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     composer.setSize(w, h)
     bloom.setSize(w, h)
     labelRenderer.setSize(w, h)
+    // matches three's own point-size attenuation: half the drawing buffer
+    starMat.uniforms.uScale.value = (h * dpr) / 2
   }
 
   function render(dt: number, animDt = dt) {
     renderer.info.reset()
-    // The sky turns on the simulation clock. Slow on purpose: 0.002 rad/s is a
-    // 52-minute revolution, so at 1x it reads as a still sky and only the fast
-    // speeds (4x → ~13 min) show it actually turning.
-    stars.rotation.y += animDt * 0.002
+    // The sky turns on the simulation clock, but not linearly: at 1x it should
+    // read as a still sky (0.002 rad/s is a 52-minute revolution), while at 4x
+    // the extra exponent takes it to ~5.7 minutes, which is finally fast enough
+    // to look like the sky is moving. `dt` is wall-clock, `animDt` is the
+    // simulation clock, so their ratio is the speed slider.
+    const speed = dt > 1e-4 ? animDt / dt : 1
+    stars.rotation.y += animDt * 0.002 * Math.pow(speed, 0.6)
     const k = performance.now() * 0.001
       ; (rimRing.material as THREE.MeshBasicMaterial).opacity = 0.72 + 0.22 * Math.sin(k * 0.9)
     controls.update(dt)
