@@ -304,6 +304,30 @@ export interface StoryDef {
     steps: StoryStep[]
 }
 
+/**
+ * What a cluster accumulates when it runs for a long time without anybody
+ * looking. Not playable yet — listed so the gaps are visible instead of
+ * implicit, and each one names the state it would have to show.
+ */
+export const PLANNED_STORIES: { label: string; hint: string }[] = [
+    {
+        label: 'a slot that pins the WAL',
+        hint: 'an inactive replication slot stops the ring recycling: pg_wal grows until the disk fills',
+    },
+    {
+        label: 'catalog bloat',
+        hint: 'repeated create/alter/drop leaves dead tuples in pg_class and pg_attribute; VACUUM reuses the space but the files never shrink',
+    },
+    {
+        label: 'a transaction that never ends',
+        hint: 'an old xmin stops VACUUM everywhere: dead tuples pile up in every table and pg_xact cannot be truncated',
+    },
+    {
+        label: 'multixact accumulation',
+        hint: 'heavy SELECT … FOR SHARE concurrency grows pg_multixact/members, with its own wraparound hazard',
+    },
+]
+
 export const STORIES: StoryDef[] = [
     {
         id: 'queue',

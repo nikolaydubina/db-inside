@@ -9,6 +9,7 @@ import type { Regime } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, ALL_VIEWS } from './views'
 import { createStory } from './story'
+import { PLANNED_STORIES } from './story'
 import type { StoryScene } from './story'
 import { initCredits } from './credits'
 import { initHud } from './ui'
@@ -241,6 +242,17 @@ if (storiesEl) {
       for (const el of storiesEl.querySelectorAll('.sitem')) el.classList.remove('on')
       b.classList.add('on')
     })
+    storiesEl.appendChild(b)
+  }
+  // not built yet: listed with a tag rather than hidden, so the gaps in the
+  // scene are visible and named
+  for (const p of PLANNED_STORIES) {
+    const b = document.createElement('button')
+    b.className = 'sitem soon'
+    b.disabled = true
+    b.title = p.hint
+    b.innerHTML = '<span class="soon-label"></span><i class="soon-tag">soon</i>'
+    b.querySelector('.soon-label')!.textContent = p.label
     storiesEl.appendChild(b)
   }
 }

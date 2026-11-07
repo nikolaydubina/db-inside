@@ -1228,6 +1228,40 @@ h2::after {
   color: var(--cyan);
 }
 
+/* planned stories: visible but clearly not playable, so the gaps are named */
+.sitem.soon {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: default;
+  color: #54707f;
+}
+
+.sitem.soon::before {
+  color: #2f4756;
+}
+
+.sitem.soon:hover,
+.sitem.soon:hover::before {
+  color: #54707f;
+}
+
+.sitem.soon .soon-label {
+  flex: 1;
+}
+
+.sitem .soon-tag {
+  flex: none;
+  font-style: normal;
+  font-size: 7.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #4a6577;
+  border: 1px solid rgba(110, 170, 210, 0.14);
+  border-radius: 2px;
+  padding: 1px 4px;
+}
+
 .sitem:focus-visible {
   outline: 1px solid rgba(53, 224, 255, 0.5);
   outline-offset: 2px;
