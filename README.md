@@ -56,6 +56,25 @@ the roof; results stream back up.
 TypeScript + [three.js](https://threejs.org) + Vite, with an `EffectComposer` bloom pass, PCF shadows,
 CSS2D labels and a small promise-based tween engine driving the simulation.
 
+## Deploy (Cloudflare Pages)
+
+The project is wired for Pages — `wrangler.toml` sets the project name and `pages_build_output_dir`.
+
+Git-connected project (recommended): every push to `master` builds and deploys.
+
+- Build command: `npm run build`
+- Build output directory: `dist`
+- Node version: 20 or newer
+
+Manual deploy from a machine:
+
+```bash
+npx wrangler login     # once
+npm run deploy         # build + wrangler pages deploy
+```
+
+`public/_headers` is copied into `dist/` and sets immutable caching for hashed assets.
+
 ## Author
 
 Built by Deepseek v4.1 Flash in VSCode Copilot harness.
