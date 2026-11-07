@@ -125,9 +125,6 @@ const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 /** How far "in-memory right now" structures float above the disk plate. */
 const RAM_LIFT = 1.15
 
-/** The amber plate: width, depth and centre-z of the disk area on the floor. */
-export const DISK_PLATE = { w: 24.2, d: 9.0, cz: 3.2, top: 0.09 }
-
 /**
  * The disk is tiled edge to edge with page blocks. Spacing is 0.5 and the floor
  * grid is drawn every 2 units, so four blocks fit exactly in one grid cell and
@@ -158,6 +155,17 @@ export const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
 export const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
 const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
 const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
+/** Outer edge of the block field — the blocks are the only thing in the plate. */
+const PAGE_Z0 = pageZ(0) - PAGE_GRID.gz / 2
+
+/**
+ * The plate under the page blocks: same footprint as the field, zero padding.
+ * The plates used to be a hand-picked size slightly larger than the blocks, so
+ * its edge sat a random distance off the outermost row and nothing that lined
+ * up against "the disk" was actually lining up with the blocks. Derived from
+ * the lattice now, so the only gap at the edge is the block spacing.
+ */
+export const DISK_PLATE = { w: PAGE_W, d: PAGE_D, cz: PAGE_Z0 + PAGE_D / 2, top: 0.09 }
 
 /**
  * World Y of the top face of a resting block, on disk and in RAM. Every arrow
@@ -165,6 +173,13 @@ const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
  */
 export const PAGE_TOP_Y = PAGE_Y + PAGE_GRID.bh / 2
 export const BUFFER_TOP_Y = BUFFER_Y + PAGE_GRID.bh / 2
+
+/**
+ * Floor text sits *on* the ground: the floor grid is drawn at 0.09 and the
+ * plate's top face at 0.08, so this is a hair above both — enough to avoid
+ * z-fighting, not enough to read as a floating sign.
+ */
+const FLOOR_LABEL_Y = 0.1
 
 /** Albedo of a free (unassigned) page block. */
 const BLOCK_FREE = 0x6b4a1c
@@ -414,7 +429,7 @@ export class PostgresInstance {
     // The disk is only the field of page blocks. This plate is deliberately
     // colourless — it just gives the blocks a bed and marks their footprint.
     const plate = new THREE.Mesh(
-      new RoundedBoxGeometry(PAGE_W + 0.4, 0.04, PAGE_D + 0.4, 2, 0.02),
+      new RoundedBoxGeometry(DISK_PLATE.w, 0.04, DISK_PLATE.d, 2, 0.02),
       new THREE.MeshStandardMaterial({
         color: 0x060a0f,
         emissive: 0x081820,
@@ -428,9 +443,9 @@ export class PostgresInstance {
     this.group.add(plate)
 
     const plateEdge = new OutlineBox(
-      PAGE_W + 0.4,
+      DISK_PLATE.w,
       0.04,
-      PAGE_D + 0.4,
+      DISK_PLATE.d,
       0x2f9fbf,
       0.55,
     ).centre(0, 0.06, DISK_PLATE.cz)
@@ -460,15 +475,15 @@ export class PostgresInstance {
     const floorLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
     floorLab.rotation.z = Math.PI / 2
     const ink = floorLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
-    // Line the first glyph up with the corner of the block field itself, not
-    // the plate: the plate carries a margin, and that margin read as a gap
-    // between the D and the last block.
-    const fieldX = PAGE_W / 2
-    const fieldZ = pageZ(0) - PAGE_GRID.gz / 2 + PAGE_D
+    // Line the first glyph up with the corner of the block field itself.
     // rotation.z of +90° maps plane +x onto world -z and plane +y onto world
     // -x, so the ink's left edge sets the start along the field edge and its
     // top edge sits on that edge
-    floorLab.position.set(fieldX + ink.y1, 0.235, fieldZ + ink.x0)
+    floorLab.position.set(
+      DISK_PLATE.w / 2 + ink.y1,
+      FLOOR_LABEL_Y,
+      DISK_PLATE.cz + DISK_PLATE.d / 2 + ink.x0,
+    )
     this.group.add(floorLab)
 
     const processLabel = label('POSTGRESQL')
@@ -1126,7 +1141,7 @@ export class PostgresInstance {
       weight: 400,
     })
     freeLab.rotation.z = Math.PI / 2
-    freeLab.position.set(pageX(5), 0.235, pageZ(7))
+    freeLab.position.set(pageX(5), FLOOR_LABEL_Y, pageZ(7))
     this.group.add(freeLab)
 
     // tappable: the hole needs somewhere to send its explanation, now that the
