@@ -312,22 +312,27 @@ function infoForRoot(o: THREE.Object3D | null) {
 
 function pick(ndc: THREE.Vector2): PickInfo | null {
   raycaster.setFromCamera(ndc, camera)
-  for (const hit of raycaster.intersectObjects(instance.pickables, true)) {
-    // a page block is one instance of one mesh, so the hit answers for itself;
-    // if it declines (too far away, or empty) the ray carries on to what is
-    // behind it instead of the click landing on nothing
+  const hits = raycaster.intersectObjects(instance.pickables, true)
+  // Two passes on purpose. A block answers for one instance of one mesh and
+  // declines when the camera is far away; the table-region boxes hover *above*
+  // the blocks, so they are usually the nearer hit and would otherwise eat
+  // every block click. Close up, the block wins; from afar, the region does.
+  let fallback: PickInfo | null = null
+  for (const hit of hits) {
     const provider = infoForRoot(hit.object)
     if (provider) {
       const res = provider(hit)
       if (res) return { root: hit.object, key: res.key, info: res.info, box: res.box }
       continue
     }
-    const root = infoRoot(hit.object)
-    if (root?.userData.info) {
-      return { root, key: root.userData.info.title, info: root.userData.info }
+    if (!fallback) {
+      const root = infoRoot(hit.object)
+      if (root?.userData.info) {
+        fallback = { root, key: root.userData.info.title, info: root.userData.info }
+      }
     }
   }
-  return null
+  return fallback
 }
 
 // debug helper: what is under a screen point?
@@ -551,6 +556,10 @@ function frame() {
   if (target && outline) {
     outline.highlight(true, target === pinned ? 0xffffff : 0x8fe6ff)
     glowing = outline
+    hoverBox.visible = false
+  } else if (target && target.root.userData.noOutline) {
+    // some picks are volumes of empty space; outlining them would draw a box
+    // around nothing
     hoverBox.visible = false
   } else if (target) {
     const box = target.box ? target.box.clone() : new THREE.Box3().setFromObject(target.root)

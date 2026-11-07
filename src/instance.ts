@@ -1230,6 +1230,9 @@ export class PostgresInstance {
     )
     freePick.position.set(pageX(5), PAGE_Y, pageZ(7))
     this.group.add(freePick)
+    // nothing to outline: the pick volume is a box of empty air, so hovering it
+    // would draw a cage around nothing. The floor label is the marker.
+    freePick.userData.noOutline = true
     this.register(freePick, {
       title: 'Free space — room the files can grow into',
       body: 'These slots hold no page at all. A table or index is a contiguous run of 8 kB pages, so when a relation runs out of pages it simply takes the next slots in its own file — this is where that growth comes from. Free space is not a fixed size and nothing owns it in advance: the files claim it as they fill. A table that was rewritten by VACUUM FULL gives slots back here.',
