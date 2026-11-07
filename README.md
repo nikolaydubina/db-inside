@@ -76,6 +76,23 @@ npm run deploy         # wrangler builds and deploys
 
 `public/_headers` is copied into `dist/` and sets immutable caching for hashed assets.
 
+### Deploying on tags
+
+Cloudflare's own git integration only reacts to branch pushes, so tags are handled by
+`.github/workflows/deploy.yml`. It deploys on every push to `master` **and** on any `v*` tag.
+
+Required repository secrets (Settings → Secrets and variables → Actions):
+
+- `CLOUDFLARE_API_TOKEN` — token with the *Edit Cloudflare Workers* template
+- `CLOUDFLARE_ACCOUNT_ID` — from the Cloudflare dashboard URL
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0   # triggers a deploy
+```
+
+If the Cloudflare project is still connected to `master`, remove the `branches:` trigger from the
+workflow — otherwise each commit deploys twice (once from GitHub Actions, once from Cloudflare).
+
 ## Author
 
 Built by Deepseek v4.1 Flash in VSCode Copilot harness.
