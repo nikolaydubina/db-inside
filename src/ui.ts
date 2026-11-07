@@ -33,14 +33,16 @@ export function initHud(handlers: HudHandlers) {
   const stBar = $<HTMLElement>('#st-bar')
   const stNote = $<HTMLElement>('#st-note')
 
-  const prBe = $<HTMLElement>('#pr-be')
-  const prBeDot = $<HTMLElement>('#pr-be-dot')
+  const connsEl = $<HTMLElement>('#conns')
   const prCk = $<HTMLElement>('#pr-ck')
-  const prCkDot = $<HTMLElement>('#pr-ck-dot')
   const prWl = $<HTMLElement>('#pr-wl')
-  const prWlDot = $<HTMLElement>('#pr-wl-dot')
   const prAv = $<HTMLElement>('#pr-av')
-  const prAvDot = $<HTMLElement>('#pr-av-dot')
+  const connBoxes = Array.from({ length: 6 }, () => {
+    const el = document.createElement('div')
+    el.className = 'conn-box'
+    connsEl.appendChild(el)
+    return el
+  })
 
   const inspector = $<HTMLElement>('#inspector')
   const insTitle = $<HTMLElement>('#ins-title')
@@ -89,14 +91,13 @@ export function initHud(handlers: HudHandlers) {
       stBar.style.width = `${Math.min(100, s.hitRate)}%`
       addNote(stNote, s.note)
 
-      setText(prBe, `${s.busyBackends} / ${s.connections}`)
-      prBeDot.classList.toggle('on', s.busyBackends > 0)
-      setText(prCk, s.checkpointing ? 'flushing' : 'idle')
-      prCkDot.classList.toggle('on', s.checkpointing)
-      setText(prWl, s.walBytes > 0 ? 'streaming' : 'idle')
-      prWlDot.classList.toggle('on', s.walBytes > 0)
-      setText(prAv, s.vacuuming ? 'reclaiming' : 'idle')
-      prAvDot.classList.toggle('on', s.vacuuming)
+      connBoxes.forEach((el, i) => {
+        el.classList.toggle('open', i < s.connections)
+        el.classList.toggle('busy', i < s.busyBackends)
+      })
+      prCk.classList.toggle('on', s.checkpointing)
+      prWl.classList.toggle('on', s.walBytes > 0)
+      prAv.classList.toggle('on', s.vacuuming)
     },
     inspect(info: Info) {
       inspector.hidden = false
@@ -187,9 +188,6 @@ function setupCards() {
         card.querySelector('h2')?.setAttribute('aria-expanded', 'false')
       }
     })
-}
-function setText(el: HTMLElement, v: string) {
-  if (el.textContent !== v) el.textContent = v
 }
 
 function addNote(el: HTMLElement, note: string) {
