@@ -61,9 +61,9 @@ export interface Page8K {
   hintAmt: number
   /** No page here at all: free space the files could grow into. */
   free: boolean
+  /** Holds dead row versions: VACUUM will reclaim the space inside it. */
   dead: boolean
   busy: boolean
-  glow: THREE.Mesh | null
 }
 
 export type NodeName = 'parse' | 'plan' | 'exec' | 'result'
@@ -144,8 +144,8 @@ const TABLE_REGIONS: TableRegion[] = [
     r1: 10,
     color: PALETTE.teal,
     info: {
-      title: 'TABLE: users — 28 contiguous pages',
-      body: 'A table is not a separate kind of object: it is a named, contiguous run of 8 kB pages, and this outline is all that \'table\' means at the storage layer. Rows live inside those pages. An UPDATE writes a new row version into a page and leaves the old one dead; VACUUM later marks that space reusable. That is MVCC, and it happens right here on the disk.',
+      title: 'TABLE: users — contiguous 8 kB pages',
+      body: 'A table is not a separate kind of object: it is a named, contiguous run of 8 kB pages, and this outline is all that \'table\' means at the storage layer. Rows live inside those pages. Page height is how full the page is: INSERTs fill a page up and allocate a new one from the run when it is full, DELETEs drain it. Dead row versions collect inside the page until VACUUM reclaims that space — the page itself stays in the file either way.',
       meta: 'demo table · 28 pages · heap file on disk',
     },
   },
@@ -235,8 +235,6 @@ export class PostgresInstance {
   pageField!: THREE.InstancedMesh
   /** Reusable block mesh used while a page is being read up into RAM. */
   private liftMesh!: THREE.Mesh
-  private deadGeo!: THREE.BoxGeometry
-  private deadMat!: THREE.MeshBasicMaterial
   /** One port per client connection, sitting on the top boundary of the box. */
   readonly backends: BackendPod[] = []
   readonly walHead: THREE.Mesh
@@ -695,7 +693,6 @@ export class PostgresInstance {
           free,
           dead: false,
           busy: false,
-          glow: null,
         })
         i++
       }
@@ -745,15 +742,6 @@ export class PostgresInstance {
     this.liftMesh.visible = false
     this.group.add(this.liftMesh)
 
-    // additive shell that makes a dead page glow magenta
-    this.deadGeo = new THREE.BoxGeometry(bw * 1.12, 0.02, bd * 1.12)
-    this.deadMat = new THREE.MeshBasicMaterial({
-      color: 0xff3ea5,
-      transparent: true,
-      opacity: 0.4,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
   }
 
   /** Albedo of one page block in the instanced field. */
@@ -807,11 +795,11 @@ export class PostgresInstance {
    * Flash the pages a statement touched, then settle back to their fill colour.
    * This is how you see which blocks the query actually rewrote.
    */
-  touchBlocks(blocks: Page8K[], hex: number, dur = 0.55) {
+  touchBlocks(blocks: Page8K[], hex: number, dur = 0.55, lift = 1.35) {
     for (const p of blocks) this.paintBlock(p, hex)
     for (const p of blocks) {
-      const lift = this.blockScale(p.fill) * 1.35
-      this.applyTransform(p, 1, lift)
+      const liftBy = this.blockScale(p.fill) * lift
+      this.applyTransform(p, 1, liftBy)
       void this.ticker.add(dur, () => {}).then(() => {
         if (p.busy) return
         this.paintBlock(p, this.fillHex(p))
@@ -843,7 +831,8 @@ export class PostgresInstance {
       }
       if (p) touched.push(p)
     }
-    this.touchBlocks(touched, 0xc7ff5a)
+    // an insert makes pages visibly fatter and brighter
+    this.touchBlocks(touched, 0xd9ff7a, 0.6, 1.6)
     return touched
   }
 
@@ -857,7 +846,8 @@ export class PostgresInstance {
       this.setFill(p, p.fill - rand(0.25, 0.6))
       touched.push(p)
     }
-    this.touchBlocks(touched, 0xff3ea5)
+    // a delete makes them sag and dim
+    this.touchBlocks(touched, 0xff3ea5, 0.55, 0.7)
     return touched
   }
 
@@ -1465,7 +1455,14 @@ export class PostgresInstance {
     const lab = label('AUTOVACUUM')
     lab.position.set(0.55, 0.35, 0)
     drone.add(lab)
+
     this.group.add(drone)
+    drone.userData.info = {
+      title: 'AUTOVACUUM — reclaims space inside pages',
+      body: 'It walks the heap, finds pages holding dead row versions, and marks that space reusable for future rows. That is all: it never deletes a page, never moves rows between pages and never shrinks the file. A page that ends up completely empty stays in the file as a flat, unusable-for-tuples block. Compaction and defragmentation are a different job — VACUUM FULL, CLUSTER or pg_repack rewrite the table into a fresh file, which is why they take an exclusive lock.',
+      meta: 'vacuum · space inside pages · not defragmentation',
+    }
+    this.pickables.push(drone)
     return drone
   }
 
@@ -1544,19 +1541,15 @@ export class PostgresInstance {
         drone.position.lerpVectors(from, over, easeInOutCubic(k))
       })
       p.dead = false
-      this.paintBlock(p, p.color)
-      if (p.glow) {
-        const glow = p.glow
-        p.glow = null
-        void this.ticker.add(0.45, (k) => {
-          const mat = glow.material as THREE.MeshBasicMaterial
-          mat.opacity = 0.5 * (1 - k)
-          mat.color.setHex(0xc7ff5a)
-          glow.scale.setScalar(1 + 0.5 * k)
-        }).then(() => {
-          this.group.remove(glow)
-        })
-      }
+      // the page itself flares green as the space inside it becomes reusable
+      void this.ticker.add(0.5, (k) => {
+        const base = this.fillHex(p)
+        this.tmpColorC
+          .setHex(0xc7ff5a)
+          .lerp(this.tmpColorA.setHex(base), k)
+        if (k >= 0.999) this.tmpColorC.setHex(base)
+        this.paintBlock(p, this.tmpColorC.getHex())
+      })
       await this.ticker.wait(0.1)
     }
     this.deadCount = 0
@@ -1573,10 +1566,6 @@ export class PostgresInstance {
       const p = live[randInt(0, live.length - 1)]
       p.dead = true
       this.paintBlock(p, 0xff3ea5)
-      const glow = new THREE.Mesh(this.deadGeo, this.deadMat)
-      glow.position.copy(p.home).setY(p.home.y + 0.17)
-      this.group.add(glow)
-      p.glow = glow
       made++
     }
     this.deadCount += made
@@ -1758,11 +1747,13 @@ export class PostgresInstance {
     attr.needsUpdate = true
     this.haloRing.rotation.z += dt * 0.12
 
-    // dead pages pulse magenta until VACUUM rewrites them
-    for (const p of this.pages8k) {
-      if (p.dead && p.glow) {
-        const mat = p.glow.material as THREE.MeshBasicMaterial
-        mat.opacity = 0.22 + 0.3 * breathe(time, 3, p.col * 0.4 + p.row)
+    // dead pages breathe magenta until VACUUM reclaims the space inside them
+    if (this.deadCount > 0) {
+      for (const p of this.pages8k) {
+        if (!p.dead) continue
+        const k = 0.35 + 0.45 * breathe(time, 2.6, p.col * 0.3 + p.row * 0.7)
+        this.tmpColorC.setHex(this.fillHex(p)).lerp(this.tmpColor.setHex(0xff3ea5), k)
+        this.paintBlock(p, this.tmpColorC.getHex())
       }
     }
 
@@ -1790,5 +1781,6 @@ export class PostgresInstance {
   private tmpColor = new THREE.Color()
   private tmpColorA = new THREE.Color()
   private tmpColorB = new THREE.Color()
+  private tmpColorC = new THREE.Color()
   private dummy = new THREE.Object3D()
 }

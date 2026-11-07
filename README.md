@@ -26,6 +26,7 @@ the roof; results stream back up.
 | the page field | orange blocks covering most of the floor, one block = one 8 kB page. They sit on a 0.5-unit lattice, so four blocks fit exactly inside one floor-grid cell |
 | the blue grid floor | not storage, just the ground the whole instance sits on |
 | `TABLE: users` / `products` / `metrics` | selection marquees over contiguous runs of those pages. A table is only a name plus a run of pages — that is the whole trick |
+| magenta pulsing page | the page holds dead row versions. It is the page itself pulsing — no extra marker geometry |
 | block height & brightness | how full that page is. A flat dark slot is a page with nothing in it yet; a tall bright block is a packed page. Fill levels start random, as they do in a real heap |
 | green / magenta flash on a page | the statement just touched it: green for INSERT (page fills up, or a brand-new page gets allocated), magenta for DELETE (page drains, and at zero it becomes a flat free slot again) |
 | `FREE SPACE · ALLOCATABLE` | holes in the field: no page there at all, just room the files can grow into |
@@ -61,6 +62,20 @@ the roof; results stream back up.
   the disk space files could still grow into.
 - Rough numbers: a buffer hit is ~0.1 µs–1 µs of CPU, a disk read 100 µs–10 ms, and an `fsync` on
   `COMMIT` is the thing that actually costs you latency.
+
+### What VACUUM does, and what it does not
+
+- **It reclaims space inside pages.** Dead row versions left by UPDATE/DELETE become reusable for
+  future rows on that same page. The page stays exactly where it is, in the same file.
+- **It never deletes pages**, never moves rows between pages, and never shrinks the files. It may
+  truncate a run of pages that are empty *at the very end* of a relation, which is the only file
+  shrinkage plain VACUUM can do.
+- **Defragmentation is someone else's job**: `VACUUM FULL`, `CLUSTER` and `pg_repack` rewrite the
+  whole table into a fresh, densely packed file. That returns disk space, and it is why they take an
+  `ACCESS EXCLUSIVE` lock (except pg_repack, which works around it with triggers).
+- **New pages are not created by VACUUM.** Pages are allocated when a statement needs room for a new
+  row (INSERT, or an UPDATE that cannot fit the new version on the existing page), and when a relation
+  is created or an index is built.
 
 ### "Heap" means table file, not heap memory
 
