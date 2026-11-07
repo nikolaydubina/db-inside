@@ -58,25 +58,20 @@ CSS2D labels and a small promise-based tween engine driving the simulation.
 
 ## Deploy (Cloudflare)
 
-The project deploys as **static assets** on Cloudflare. `wrangler.toml` points `wrangler deploy` at
-`dist/`, so the build has to run before the deploy command.
+The project deploys as **static assets**. `wrangler.toml` handles everything:
 
-Cloudflare build settings:
+- `[build] command = "npm ci && npm run build"` — wrangler builds before uploading, so the deploy
+  works even if the Cloudflare build command is left empty.
+- `[assets] directory = "./dist"` — the Vite output becomes the served site.
 
-| setting | value |
-| --- | --- |
-| Build command | `npm ci && npm run build` |
-| Deploy command | `npx wrangler deploy` |
-| Root directory | `/` (default) |
-| Node version | 20 or newer |
-
+Cloudflare deploy command: `npx wrangler deploy` (root directory `/`, Node 20+).
 Every push to `master` rebuilds and deploys.
 
 Manual deploy from a machine:
 
 ```bash
 npx wrangler login     # once
-npm run deploy         # builds, then `wrangler deploy`
+npm run deploy         # wrangler builds and deploys
 ```
 
 `public/_headers` is copied into `dist/` and sets immutable caching for hashed assets.
