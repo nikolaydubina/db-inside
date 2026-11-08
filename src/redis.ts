@@ -11,6 +11,8 @@ import {
     PULSE_TIME,
     Ticker,
     breathe,
+    driftDust,
+    dustField,
     floorLabel,
     halo,
     label,
@@ -482,6 +484,8 @@ export class RedisInstance {
     private pulseColor = new THREE.Color()
     private tmpObj = new THREE.Object3D()
     private tmpBox = new THREE.Box3()
+    /** the ambient dust in this cage — same field, same drift, as postgres */
+    private motes!: THREE.Points
 
     /** counters the HUD reads */
     evictions = 0
@@ -585,6 +589,12 @@ export class RedisInstance {
         )
             ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
         this.group.add(sticker)
+
+        // The air in the room. Both cages are the same volume and stand in the
+        // same hall, so both get the same dust from the same definition in
+        // util.ts — a cage with clean air reads as a diagram, not a place.
+        this.motes = dustField(SHELL.w, SHELL.h, SHELL.d)
+        this.group.add(this.motes)
     }
 
     private buildDisk() {
@@ -3112,6 +3122,9 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity +=
             (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) * Math.min(1, dt * 6)
         this.loopRing.rotation.z += dt * 0.5
+
+        // and the air moves, exactly as it does in the other cage
+        driftDust(this.motes, dt, time)
 
         // a big value that was touched burns for a beat and settles back
         for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {

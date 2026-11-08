@@ -104,6 +104,78 @@ export function halo(color: number, scale: number, opacity = 0.55): THREE.Sprite
   return s
 }
 
+/**
+ * Ambient dust inside a cage: what makes a room read as a volume of moving air
+ * rather than a diorama behind glass.
+ *
+ * There is ONE dust, not one per cage. Same count, same sprite, same tint, same
+ * size, same drift — two cages standing in the same room have the same air in
+ * them, and a second cage that invents its own numbers makes the pair read as
+ * two separate renders. The only per-cage input is the shell it fills; the
+ * motes are inset from the walls so that none of them sits on the glass, and
+ * the band they rise through is stored on the object because drifting them back
+ * to the bottom needs the same walls.
+ *
+ * Not pickable, not registered with anything: dust is atmosphere, and a ray
+ * that hits it would be a ray that found nothing.
+ */
+export const DUST = {
+  count: 220,
+  size: 0.13,
+  opacity: 0.32,
+  color: 0x8fe6ff,
+  /** how far in from each wall a mote may be, per axis */
+  inset: { x: 1.2, y: 0.3, z: 0.8 },
+}
+
+export function dustField(w: number, h: number, d: number): THREE.Points {
+  const { count, inset } = DUST
+  const pos = new Float32Array(count * 3)
+  for (let i = 0; i < count; i++) {
+    pos[i * 3] = rand(-w / 2 + inset.x, w / 2 - inset.x)
+    pos[i * 3 + 1] = rand(inset.y, h - inset.y)
+    pos[i * 3 + 2] = rand(-d / 2 + inset.z, d / 2 - inset.z)
+  }
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
+  const points = new THREE.Points(
+    geo,
+    new THREE.PointsMaterial({
+      color: DUST.color,
+      // a point with no map renders as a hard white square, which reads as a
+      // node sitting in the scene — the soft radial sprite reads as dust
+      map: radialTexture(),
+      alphaTest: 0.01,
+      size: DUST.size,
+      transparent: true,
+      opacity: DUST.opacity,
+      depthWrite: false,
+      blending: THREE.AdditiveBlending,
+      sizeAttenuation: true,
+    }),
+  )
+  points.userData.dust = { bottom: inset.y, top: h - inset.y }
+  return points
+}
+
+/**
+ * Rise, wrap, wander. Every mote climbs at the same speed, so the field keeps
+ * the even spread it was seeded with and only the wrap point cycles — sampling
+ * noise per frame would thicken and thin the dust instead of moving it.
+ */
+export function driftDust(points: THREE.Points, dt: number, time: number) {
+  const { bottom, top } = points.userData.dust as { bottom: number; top: number }
+  const attr = points.geometry.getAttribute('position') as THREE.BufferAttribute
+  for (let i = 0; i < attr.count; i++) {
+    let y = attr.getY(i) + dt * 1.15
+    if (y > top) y = bottom
+    attr.setY(i, y)
+    attr.setX(i, attr.getX(i) + Math.sin(time * 1.7 + i * 0.9) * dt * 0.22)
+    attr.setZ(i, attr.getZ(i) + Math.cos(time * 1.3 + i * 1.3) * dt * 0.18)
+  }
+  attr.needsUpdate = true
+}
+
 /** Thin additive outline of a geometry. */
 export function neonEdges(geo: THREE.BufferGeometry, color: number, opacity = 0.6) {
   const eg = new THREE.EdgesGeometry(geo, 24)

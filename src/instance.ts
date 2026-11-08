@@ -8,6 +8,8 @@ import {
   PULSE_GAIN,
   PULSE_TIME,
   breathe,
+  driftDust,
+  dustField,
   easeInOutCubic,
   floorLabel,
   halo,
@@ -577,34 +579,10 @@ export class PostgresInstance {
       ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
     this.group.add(sticker)
 
-    // drifting data motes inside the instance
-    const count = 220
-    const pos = new Float32Array(count * 3)
-    for (let i = 0; i < count; i++) {
-      pos[i * 3] = rand(-11.8, 11.8)
-      pos[i * 3 + 1] = rand(0.3, 9.5)
-      pos[i * 3 + 2] = rand(-7.2, 7.2)
-    }
-    const moteGeo = new THREE.BufferGeometry()
-    moteGeo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
-    const motes = new THREE.Points(
-      moteGeo,
-      new THREE.PointsMaterial({
-        color: 0x8fe6ff,
-        // a point with no map renders as a hard white square, which reads as a
-        // node sitting in the scene — the soft radial sprite reads as dust
-        map: radialTexture(),
-        alphaTest: 0.01,
-        size: 0.13,
-        transparent: true,
-        opacity: 0.32,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        sizeAttenuation: true,
-      }),
-    )
-    this.group.add(motes)
-    this.motes = motes
+    // drifting data motes inside the instance — the same dust the redis cage
+    // fills itself with, from the same definition: see DUST in util.ts
+    this.motes = dustField(shellW, shellH, shellD)
+    this.group.add(this.motes)
   }
 
   /**
@@ -2574,15 +2552,7 @@ export class PostgresInstance {
     })
 
     // motes drift upward and wrap, with a little lateral wander
-    const attr = this.motes.geometry.getAttribute('position') as THREE.BufferAttribute
-    for (let i = 0; i < attr.count; i++) {
-      let y = attr.getY(i) + dt * 1.15
-      if (y > 9.6) y = 0.25
-      attr.setY(i, y)
-      attr.setX(i, attr.getX(i) + Math.sin(time * 1.7 + i * 0.9) * dt * 0.22)
-      attr.setZ(i, attr.getZ(i) + Math.cos(time * 1.3 + i * 1.3) * dt * 0.18)
-    }
-    attr.needsUpdate = true
+    driftDust(this.motes, dt, time)
 
     // dead pages breathe magenta until VACUUM reclaims the space inside them
     if (this.deadCount > 0) {
