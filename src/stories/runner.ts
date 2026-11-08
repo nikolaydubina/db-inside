@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import type { CameraPose, CameraRig } from '../views'
 import type { EngineSim } from '../postgresql/sim'
+import type { BigKind } from '../redis/redis'
 import type { RidePhase, StoryDef, StoryFacts, StoryScene, StoryStep } from './types'
 
 /**
@@ -33,6 +34,10 @@ export interface StoryOptions {
         runCommand(): void
         /** one PUBLISH, now — the pub/sub story's cue */
         publish(): void
+        /** a read aimed at one big value — the traversal story's cue */
+        readBig(kind: BigKind, op?: 'point' | 'walk'): boolean
+        /** a read of a compact value, drawn through the object section */
+        readInline(): boolean
         /** the next ordinary socket sends SUBSCRIBE */
         subscribeNext(): boolean
         /** nobody is listening, and no episode will interrupt */
@@ -96,6 +101,8 @@ export function createStory({
     let trackCentre: THREE.Vector3 | null = null
     /** what the current step is actually pointed at, and where the camera went */
     let subjectId: string | null = null
+    /** the object the camera is riding, so a hand-over to a new one is noticed */
+    let subjectObject: THREE.Object3D | null = null
     let subjectBox: THREE.Box3 | null = null
     let expected: CameraPose | null = null
     /** bumped on every step change so stale timers cannot fire into a new step */
@@ -131,8 +138,12 @@ export function createStory({
 
     /** One tap, aimed at the cage this step is about. */
     const tap = (step: StoryStep) => {
-        if ((step.tap ?? 'postgres') === 'redis') redis?.runCommand()
-        else void sim.runQuery()
+        if ((step.tap ?? 'postgres') === 'redis') {
+            // a step about a traversal names the value; everything else is ambient
+            if (step.op === 'object') redis?.readInline()
+            else if (step.big) redis?.readBig(step.big, step.op ?? 'walk')
+            else redis?.runCommand()
+        } else void sim.runQuery()
     }
 
     /**
@@ -223,6 +234,7 @@ export function createStory({
         arrived = false
         expected = null
         subjectId = null
+        subjectObject = null
         subjectBox = null
         demonstrated = false
         frozen = false
@@ -248,6 +260,19 @@ export function createStory({
         // leg this step is about, and a step that only starts watching once its
         // caption lands could miss the instant it wants to stop on
         if (step.freezeAt) watchPhase(step, mine)
+        // The cues belong to the STEP, not to the camera code. They used to live
+        // in lockOn(), which only runs for steps that follow a live subject — so
+        // every `send`/`sustain` on a step with a fixed `view` was silently dead,
+        // and a story about motion showed none unless ambient traffic obliged.
+        if ((step.send ?? 0) > 0 || step.sustain || step.act) {
+            window.setTimeout(() => {
+                if (mine !== token || !running) return
+                const n = step.send ?? 0
+                for (let i = 0; i < n; i++) tap(step)
+                step.act?.(sim)
+                hold(mine, step)
+            }, step.delay ?? 800)
+        }
     }
 
     /**
@@ -325,40 +350,55 @@ export function createStory({
             subjectId = null
             subjectBox = null
             arrived = false
-        }
-        if (!subjectId) {
-            const subj = step.subject?.(scene) ?? null
-            if (subj) {
-                subjectId = subj.id
-                subjectBox = subj.box
-                if (subj.object && step.dist) {
-                    // a subject that moves: no frame tween, just a ride. The camera
-                    // eases onto `subject + dir × dist` and holds it, so there is
-                    // nothing to re-frame every tick and nothing to jitter.
-                    rig.hold(subj.object, {
-                        dir: step.dir ?? [0, 0.3, 1],
-                        dist: step.dist,
-                        fov: step.fov,
-                    })
-                    expected = null
-                } else {
-                    expected = rig.frame(subj.box, step.dir ?? [0, 0.3, 1], {
-                        fov: step.fov,
-                        padding: step.padding,
-                        lookShift: step.lookShift,
-                    })
-                }
+            // the subject stopped being valid (the ride ended at the socket, or
+            // the packet was despawned): release the camera HERE, or it goes on
+            // riding an object that is already on its way out of the frame
+            if (subjectObject) {
+                rig.hold(null)
+                subjectObject = null
             }
         }
-        window.setTimeout(() => lockOn(step, mine), 400)
-        const n = step.send ?? 0
-        if (n <= 0 && !step.sustain && !step.act) return
-        window.setTimeout(() => {
-            if (mine !== token || !running) return
-            for (let i = 0; i < n; i++) tap(step)
-            step.act?.(sim)
-            hold(mine, step)
-        }, step.delay ?? 800)
+        const subj = step.subject?.(scene) ?? null
+        const obj = subj?.object ?? null
+        if (!subj) {
+            // Nothing to follow — a packet has left the cage, or has not arrived
+            // yet. Let go of whatever the camera was riding, or it keeps following
+            // that object out of the frame and into the sky.
+            if (subjectObject) {
+                rig.hold(null)
+                subjectObject = null
+                subjectId = null
+            }
+        } else if (!subjectId || obj !== subjectObject) {
+            // A ride can HAND OVER from one object to another mid-route — the
+            // request packet to the reply packet — and keep the same identity. The
+            // camera has to be given the new object, or it goes on following the
+            // one that was just despawned and never moves again.
+            subjectId = subj.id
+            subjectBox = subj.box
+            subjectObject = obj
+            if (obj && step.dist) {
+                // a subject that moves: no frame tween, just a ride. The camera
+                // eases onto `subject + dir × dist` and holds it, so there is
+                // nothing to re-frame every tick and nothing to jitter.
+                rig.hold(obj, {
+                    dir: step.dir ?? [0, 0.3, 1],
+                    dist: step.dist,
+                    fov: step.fov,
+                })
+                expected = null
+            } else {
+                expected = rig.frame(subj.box, step.dir ?? [0, 0.3, 1], {
+                    fov: step.fov,
+                    padding: step.padding,
+                    lookShift: step.lookShift,
+                })
+            }
+        }
+        // 200 ms, not 400: a ride hands over and ends inside a second, and the
+        // poll is how fast the camera notices. At 400 ms it kept following a
+        // packet that had already reached the socket and overshot the pose.
+        window.setTimeout(() => lockOn(step, mine), 200)
     }
 
     /** Keep the client pressing until the step's own claim becomes true. */
@@ -367,7 +407,7 @@ export function createStory({
         if (rate <= 0) return
         const beat = () => {
             if (mine !== token || !running) return
-            if (step.expect(facts())) return
+            if (!step.sustainWhileOpen && step.expect(facts())) return
             tap(step)
             window.setTimeout(beat, 1000 / rate)
         }

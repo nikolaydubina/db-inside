@@ -38,7 +38,7 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
     {
         title: 'a broadcast message arrives',
         body: 'PUBLISH comes in on a socket like any other command, and then it sits in that socket\u2019s input buffer until the one thread comes round to it. Nothing about it is looked up in the keyspace: no key is hashed, no bucket is probed, no page is read. The name in the command is the channel, and the channel is a list of sockets — so the work ahead is a walk down that list, not a lookup.',
-        subject: (s) => s.redisPacket?.() ?? null,
+        subject: (s) => s.redisRide?.() ?? null,
         dir: [0.62, 0.4, 1],
         fov: 32,
         dist: 12,
@@ -52,7 +52,7 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
     {
         title: 'the thread makes one copy per listener',
         body: 'The message reaches the channel and the list is walked: for every socket on it the thread writes the same bytes into that connection\u2019s output buffer, one after another, on the single thread. They are copies, not a shared object — each listener gets its own. That is also the cost model: a thousand subscribers is a thousand writes by the one thread, so a fan-out is not free just because nothing is stored.',
-        subject: (s) => s.redisPacket?.() ?? null,
+        subject: (s) => s.redisRide?.() ?? null,
         dir: [0.62, 0.4, 1],
         fov: 36,
         dist: 18,
@@ -64,7 +64,7 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
     {
         title: 'the copy leaves for its client',
         body: 'The bytes do not stop at the socket. They sit in that connection\u2019s output buffer until the kernel takes them, and the thread moves on without waiting for the client to read. So a listener that reads slower than the publish rate makes its own buffer grow, and the limit on that growth is client-output-buffer-limit: past it Redis closes the connection rather than hold an unbounded copy for one slow client.',
-        subject: (s) => s.redisPacket?.() ?? null,
+        subject: (s) => s.redisRide?.() ?? null,
         dir: [0.62, 0.4, 1],
         fov: 38,
         dist: 22,

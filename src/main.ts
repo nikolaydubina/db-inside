@@ -791,7 +791,7 @@ const storyScene: StoryScene = {
     // leaves the cage. Its id carries the ride number, so "still valid" is exactly
     // "that same packet is still in the air" — and when it is not, the step waits
     // for the next one instead of holding a frame on empty space.
-    if (id.startsWith('publish packet ')) return redisSim.packetSubject()?.id === id
+    if (id.startsWith('ride ')) return redisSim.packetSubject()?.id === id
     // only backends can stop existing mid-step; a WAL run or a buffer strip is
     // a fixed structure, and treating it as invalid made the story re-frame
     // every 400 ms, which reads as the camera twitching instead of moving
@@ -803,8 +803,8 @@ const storyScene: StoryScene = {
   walRun: () => instance.walRunBox(),
   walBuffers: () => instance.walBuffersBox(),
   walHead: () => ({ id: `wal head`, box: instance.walHeadBox() }),
-  // the redis cage's only live subject: the copy of a publish that is in flight
-  redisPacket: () => {
+  // the redis cage's live subject: whichever packet is being ridden
+  redisRide: () => {
     const p = redisSim.packetSubject()
     if (!p) return null
     // A box the size of the packet's own position, not of its glow: setFromObject
@@ -830,6 +830,9 @@ const story = createStory({
     regimeBeforeStory = sim.regime
     world.controls.autoRotate = false
     sim.ambient = false
+    // same for the redis cage: a caption about ONE read is unreadable with
+    // ambient traffic drawing five other routes across the same frame
+    redisSim.ambient = false
     // a story's captions assume the default mix: a write-heavy workload would
     // starve the read steps and a read-heavy one would never grow the WAL
     hud.setRegime('default')
@@ -850,6 +853,7 @@ const story = createStory({
   },
   onExit: () => {
     sim.ambient = true
+    redisSim.ambient = true
     redisSim.resumePubSub()
     storyActive = false
     applySpeed(speedBeforeStory)

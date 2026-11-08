@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import type { EngineSim, SimStats } from '../postgresql/sim'
+import type { BigKind } from '../redis/redis'
 
 /**
  * The shapes a story is written in.
@@ -49,7 +50,15 @@ export type StoryFacts = Pick<
  * The legs of a published message: down into a socket, at the channel where the
  * subscriber list is walked, and delivered into one listener's output buffer.
  */
-export type RidePhase = 'socket' | 'channel' | 'delivered' | null
+export type RidePhase =
+    | 'socket'
+    | 'channel'
+    | 'delivered'
+    | 'bucket'
+    | 'page'
+    | 'value'
+    | 'reply'
+    | null
 
 /**
  * What the camera can be pointed at. The story asks for a *subject* — the whole
@@ -89,14 +98,14 @@ export interface StoryScene {
     /** the segment being appended to right now */
     walHead(): StorySubject | null
     /**
-     * The copy of a publish that is in flight, if one is.
+     * The packet a story may ride, if one is in the air.
      *
-     * The redis cage has no live subjects of its own, so a step that wants to ride
-     * a packet asks for this: it appears when a PUBLISH starts, moves through the
-     * cage, and is null again the instant the bytes leave — which is how the step
-     * knows to wait for the next one.
+     * Both kinds of ride surface here: a published message (socket → channel → a
+     * listener) and a cued command (socket → queue → loop → bucket → page →
+     * value → reply). The camera holds on to the object, so one caption can follow
+     * a single request from the socket to the way out.
      */
-    redisPacket?: () => StorySubject | null
+    redisRide?: () => StorySubject | null
 }
 
 export interface StoryStep {
@@ -139,6 +148,29 @@ export interface StoryStep {
      * listener. Once per step: a socket cannot subscribe twice.
      */
     subscribe?: boolean
+    /**
+     * Aim this step's taps at one of the big values instead of the ambient mix.
+     *
+     * A caption about walking a quicklist cannot wait for the 8 % of reads that
+     * happen to land on a big key, so the step names the value and the sim runs a
+     * range read against it — the ordinary path, with the key forced.
+     */
+    big?: BigKind
+    /**
+     * Which read of that value: a point lookup (ZSCORE, HGET) or a walk (a range
+     * scan, an HGETALL). Two different routes, and the story is about the
+     * difference — so the step says which one it means.
+     */
+    op?: 'point' | 'walk' | 'object'
+    /**
+     * Keep tapping for as long as the step is open, instead of stopping once the
+     * claim has been seen true.
+     *
+     * `sustain` exists to make a claim come true; a caption about something
+     * CONTINUOUS — a walk that happens on every read — needs the motion to go on
+     * after the first one, or the reader arrives at a still frame.
+     */
+    sustainWhileOpen?: boolean
     /** wait before firing, so the caption lands before the motion */
     delay?: number
     /** something to trigger, e.g. a checkpoint */

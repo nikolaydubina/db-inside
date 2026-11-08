@@ -217,6 +217,58 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(REDIS_ANCHOR.loop, [-4.93, 5.96, 5.11], 34),
     },
     {
+        id: 'redis-paths',
+        label: 'pointer chases',
+        slug: 'paths',
+        db: 'redis',
+        entity: 'the address chain',
+        hint: 'bucket → entry → value → the heap pages a walk lands on, all in one frame',
+        // Wide on purpose: a traversal is a route BETWEEN three layers — the dict
+        // at 5.85, the value structures at ~3.4, the heap at 1.95 — and a shot of
+        // any one of them shows a structure, not the movement between them. Stood
+        // to the left of the cage, so the loop (which is near and bright) does not
+        // sit on top of the sorted set at the centre of the frame.
+        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 3.2, -3.0)), [-9, 4.5, 16], 42),
+    },
+    {
+        id: 'redis-hash-walk',
+        label: 'hash lookups',
+        slug: 'hash-paths',
+        db: 'redis',
+        entity: 'the big hash and its pages',
+        hint: 'HGET is one bucket; HGETALL walks every bucket and every chain into the heap',
+        // Aimed between the big hash (which sits on the left) and the arena under
+        // it, because the difference between the two reads is a route, not a shape:
+        // one hop for a field, a sweep of the whole bucket array for HGETALL.
+        pose: () => shot(REDIS_ORIGIN.clone().add(V(-4.3, 3.0, -3.5)), [-4.5, 4.2, 15.5], 44),
+    },
+    {
+        id: 'redis-journey',
+        label: 'one lookup',
+        slug: 'journey',
+        db: 'redis',
+        entity: 'one request, end to end',
+        hint: 'socket → queue → loop → bucket → page → object → back out',
+        // The whole path, so the shot has to hold the port strip, the queue, the
+        // loop, the dict, the heap and the object section at once — the only way
+        // to follow a request is to see where it starts and where it goes.
+        pose: () =>
+            shot(REDIS_ORIGIN.clone().add(V(-4, 6.2, 1.2)), [5, 4.5, 18], 44),
+    },
+    {
+        id: 'redis-inline',
+        label: 'inline value',
+        slug: 'inline',
+        db: 'redis',
+        entity: 'one value object',
+        hint: 'sixteen bytes: a header, and a payload that is sometimes inside it',
+        // The cage now sits at heap level, so the shot is low: the page the read
+        // lands on, the object section above it, and the dict at the top edge —
+        // bucket → page → object, with both ends in frame.
+        pose: () =>
+            shot(REDIS_ORIGIN.clone().add(V(-8.0, 3.6, -1.6)), [3.8, 3.0, 9.4], 40),
+    },
+    {
         id: 'redis-pubsub',
         label: 'redis pub/sub',
         db: 'redis',

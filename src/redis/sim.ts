@@ -1,9 +1,26 @@
 import * as THREE from 'three'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
-import type { KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
+import type { BigKind, KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { BIG_REAL } from './redis'
 import { QueryChain, pathCurve } from '../core/flow'
 import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from '../core/util'
+
+/**
+ * The legs a ridden packet can be on.
+ *
+ * A published message uses the first three; a cued command adds its address
+ * chain — bucket, page, value — and the reply, so a story can stop the clock on
+ * any leg its caption is about. One mechanism, two kinds of ride.
+ */
+export type RidePhase =
+    | 'socket'
+    | 'channel'
+    | 'delivered'
+    | 'bucket'
+    | 'page'
+    | 'value'
+    | 'reply'
+    | null
 
 export interface RedisStats {
     ops: number
@@ -54,6 +71,25 @@ interface Command {
      * the command path assumes there is a key at the end of it.
      */
     fanout?: boolean
+    /**
+     * Walk the value one link at a time: the packet stops where each pointer
+     * lands, waits, and goes on. A quicklist walk IS a sequence of unrelated
+     * addresses, so one smooth curve would say the opposite of the truth.
+     */
+    walk?: boolean
+    /**
+     * Which kind of read this is, for a value that has more than one: a POINT
+     * lookup (ZSCORE, HGET — one bucket, one entry) or a WALK (a range scan, an
+     * HGETALL — every bucket and chain). The route and the caption both hinge on
+     * the difference, so it travels with the command instead of being guessed
+     * from the key alone.
+     */
+    probe?: 'point' | 'walk' | 'object'
+    /**
+     * This command was asked for by a story, so its packet is a subject: a camera
+     * may follow it from the socket to the reply. Ambient traffic is never a cue.
+     */
+    cue?: boolean
 }
 
 /**
@@ -263,13 +299,19 @@ export class RedisSim {
      * route runs to the end in a few seconds and every step after the first is a
      * description of something that has already gone.
      */
-    private ridePhase: 'socket' | 'channel' | 'delivered' | null = null
+    private ridePhase: RidePhase = null
     /** when the focused packet went missing, in real ms — the safety valve */
     private focusLostAt = 0
     /** has the ridden packet come down into camera range yet */
     private focusNear = false
     /** A note that owns the status line while a blocking job runs. */
     private lockedNote: string | null = null
+    /**
+     * A slow walk is in progress. One at a time, on purpose: six concurrent
+     * traversals draw six overlapping trails and the picture stops describing a
+     * route. The queue is exactly the right model for the other five — they wait.
+     */
+    private walking = false
 
     /* --------------------------------- traffic ------------------------------- */
 
@@ -282,8 +324,73 @@ export class RedisSim {
         return any.length > 0 ? any[randInt(0, any.length - 1)] : null
     }
 
+    /**
+     * The address chain one command walks, in cage-local points.
+     *
+     * bucket → entry → its page → [structure → its page …]
+     *
+     * Every read reaches the heap: a bucket holds an address, the entry it lands
+     * on is an allocation, and for a compact value the payload is inside that
+     * same allocation — so two dereferences and one page. A converted value adds
+     * its own structure (the block stacked on the entry, or the dashed cage at
+     * the back), which is a second allocation on a second page. Walking a big
+     * list, hash or sorted set then alternates between the structure and the pages
+     * its nodes were allocated on, because that is what following a chain of
+     * pointers through RAM is: the next node is never next to this one. A
+     * converted hash or zset also consults its OWN bucket array, which is a second
+     * hash table and not the keyspace dict.
+     */
+    private keyRoute(key: RedisKey, probe: 'point' | 'walk' | 'object' = 'walk'): THREE.Vector3[] {
+        const r = this.redis
+        const walk: THREE.Vector3[] = [r.bucketTop(key)]
+        if (key.big) {
+            // the entry is a heap allocation like any other: the first hop lands
+            // on its page, and only then does the value's structure come into it
+            walk.push(r.keyPageTop(key))
+            walk.push(r.valuePoint(key))
+            const inner = r.innerDictPoint(key)
+            if (inner) walk.push(inner)
+            if (probe === 'point') {
+                // one field or member: the value's OWN dict lands on a single
+                // bucket, and the entry behind that bucket is one allocation
+                walk.push(r.nodePoint(key, 1))
+                walk.push(r.hopPoint(key, 0))
+            } else {
+                const hops = key.kind === 'string' ? 1 : key.kind === 'hash' ? 2 : 3
+                for (let n = 0; n < hops; n++) {
+                    walk.push(r.nodePoint(key, n))
+                    walk.push(r.hopPoint(key, n))
+                }
+                walk.push(r.nodePoint(key, hops))
+            }
+        } else if (probe === 'object') {
+            // The order is the point: the bucket points at a PAGE, the type is
+            // only known by reading the header that lives there, and that same
+            // allocation holds the payload for an inline encoding. So the object
+            // section comes after the page, not before it.
+            walk.push(r.keyPageTop(key))
+            walk.push(r.inlinePoint())
+        } else if (key.aux) {
+            // page first: the entry is an allocation, so the bucket points AT the
+            // page, and only from there do the entry and its value pointer read
+            walk.push(r.keyPageTop(key))
+            walk.push(r.keyTop(key))
+            // the converted structure is a SECOND allocation, so a second page
+            walk.push(r.valuePoint(key))
+            walk.push(r.hopPoint(key, 0))
+            if (key.kind === 'zset' || key.kind === 'hash') walk.push(r.hopPoint(key, 1))
+        } else {
+            // every read lands on a page before anything is known: the type and
+            // the encoding live in the object header that sits there. The cube is
+            // what that allocation holds, so it comes after the page.
+            walk.push(r.keyPageTop(key))
+            walk.push(r.keyTop(key))
+        }
+        return walk
+    }
+
     /** One command: request down, execution, reply back up the same socket. */
-    private async runOp(force?: Command) {
+    private async runOp(force?: Command, forceKey?: RedisKey) {
         // nothing is served while the files are being read back
         if (this.loading) return
         const pod = this.pickPort()
@@ -302,9 +409,11 @@ export class RedisSim {
         const loop = this.redis.loopPoint()
 
         // which key: a read hits a live one, a write updates or creates one
-        let key: RedisKey | null = null
+        let key: RedisKey | null = forceKey ?? null
         let hit = true
-        if (cmd.fanout) {
+        if (key) {
+            // a forced key (a story's cue): nothing to choose, just run there
+        } else if (cmd.fanout) {
             // nothing to look up: the message is addressed to a channel, and the
             // channel's members are sockets, not values
         } else if (cmd.write) {
@@ -357,10 +466,11 @@ export class RedisSim {
         const packet = makePacket(PALETTE.magenta, 0.42, cage)
         const sky = portTop.clone().setY(portTop.y + SKY_ABOVE_PORT)
         packet.position.copy(sky)
-        // A publish is the one command a camera may be asked to ride, and the ride
-        // starts here — in the sky, before the bytes have reached the socket — not
-        // at the fan, which is where the message is already half-way through.
-        const ride = cmd.fanout ? this.beginRide(packet) : 0
+        // A ride starts in the sky, before the bytes have reached the socket — not
+        // at the fan, which is where a published message is already half-way
+        // through. A cued command rides the same mechanism: one live packet, one
+        // identity, and the camera holds on to whichever leg it is on.
+        const ride = cmd.fanout || cmd.cue ? this.beginRide(packet) : 0
         const inbound = pathCurve([
             sky.clone(),
             sky.clone().setY(portTop.y + SKY_ABOVE_PORT * 0.5).add(new THREE.Vector3(0, 0, 0.8)),
@@ -371,6 +481,9 @@ export class RedisSim {
         const fIn = wire.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
         await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
         fIn.flash(0.9)
+        // the bytes are in that socket's input buffer now, and stay there until the
+        // one thread comes round to them — the first leg a ride can be ridden on
+        if (ride) this.ridePhase = 'socket'
         // the wire stays a beat after the packet lands, then goes: a hammered
         // socket must not silt the scene up with permanent lines
         void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
@@ -383,15 +496,21 @@ export class RedisSim {
             return
         }
 
-        // What the command loop does with a command, in order: it names a KEY
-        // (the dashed entry in the keyspace plane), hashes that key to a BUCKET,
-        // follows the bucket's pointer to the entry's page in the HEAP, reads the
-        // value there, and the reply goes straight back to the loop. The key cube
-        // is representational; the page is where the bytes are.
+        // What the command loop does with a command: it hashes the key to a
+        // BUCKET, follows that pointer to the entry, and takes the entry's value
+        // pointer — to the value's own structure when it has one, or nowhere at
+        // all when the payload is inline in the object header. A walk of a big
+        // value then alternates between its structure and the heap pages its
+        // nodes were allocated on, once per node: that bounce IS the pointer
+        // chase, and it is the difference between a 2-hop read and a traversal.
+        // The reply climbs back from wherever the walk stopped.
         const chain = new QueryChain(cage)
-        const keyPoint = key ? this.redis.keyTop(key) : this.redis.channelPoint()
-        const target = key ? this.redis.keyPageTop(key) : this.redis.channelPoint()
-        const bucket = key ? this.redis.bucketTop(key) : this.redis.channelPoint()
+        const chainPts: THREE.Vector3[] = [
+            portTop.clone(),
+            queue.clone(),
+            loop.clone(),
+            ...(key ? this.keyRoute(key, cmd.probe) : [this.redis.channelPoint()]),
+        ]
 
         // The bytes are in that socket's input buffer now, and they stay there
         // until the one thread comes round to them. That is a real pause in a
@@ -427,12 +546,39 @@ export class RedisSim {
             // a burst of arcs setting off the other way is a corner at the node,
             // and reads as two unrelated lines that happen to meet there.
             await this.fanout(ride, packet, route.getTangent(1).normalize())
+        } else if (cmd.walk && key) {
+            // One leg at a time. The packet stops at every node the walk lands on
+            // and at the page that node was allocated on, so the cost of the walk
+            // is visible as a count instead of disappearing into one 0.8s swoop.
+            this.walking = true
+            let from = loop.clone()
+            try {
+                const legs = chainPts.slice(3)
+                for (const [i, to] of legs.entries()) {
+                    // the first three legs are the same in every route — the bucket,
+                    // the page, the value — so a story can stop the clock on any of
+                    // them; after that the packet is walking pages
+                    if (ride) {
+                        this.ridePhase =
+                            i === 0 ? 'bucket' : i === 1 ? 'page' : i === 2 ? 'value' : 'page'
+                    }
+                    const leg = pathCurve([from.clone(), to.clone()])
+                    chain.addCurve(leg, PALETTE.violet, { speed: 0.9, opacity: 0.55 })
+                    await travel(this.ticker, packet, leg, 0.4)
+                    await this.ticker.wait(0.22)
+                    from = to
+                }
+            } finally {
+                this.walking = false
+            }
+            despawn(this.ticker, packet)
+            await this.ticker.wait(0.2)
+            while (this.blocked) await this.ticker.wait(0.1)
+            this.redis.pulseLoop()
+            // the thread takes the head of the queue now — everything behind it moves up
+            this.redis.queuePop()
         } else {
-            chain.add(
-                [portTop, queue, loop, keyPoint, bucket, target].map((p) => p.clone()),
-                PALETTE.violet,
-                { speed: 0.9, opacity: 0.5 },
-            )
+            chain.add(chainPts, PALETTE.violet, { speed: 0.9, opacity: 0.5 })
             despawn(this.ticker, packet)
 
             await this.ticker.wait(0.22)
@@ -524,30 +670,52 @@ export class RedisSim {
 
         // The reply climbs back up the same socket and leaves the frame the way
         // the request came in — a strand to the side of it, not a stub that stops
-        // in mid-air above the port. It starts at the HEAP PAGE, not at the key
-        // entry: a bucket holds a pointer, the entry holds pointers, and the
-        // value's bytes are on a 4 kB page in the heap. For a publish there is no
-        // key, so the count starts at the channel.
-        const replyFrom = key
-            ? this.redis.keyPageTop(key)
-            : cmd.fanout
-                ? this.redis.channelPoint()
-                : loop.clone()
-        const reply = pathCurve([
-            ...(cmd.fanout ? [] : [replyFrom]),
-            ...(cmd.fanout ? [this.redis.channelPoint()] : [loop.clone()]),
+        // in mid-air above the port. It starts where the request stopped: the
+        // entry for a compact value, the value's structure for a converted one,
+        // the far end of a walk for a big one. A publish has no key, so its count
+        // starts at the channel.
+        const replyFrom = cmd.fanout
+            ? this.redis.channelPoint()
+            : (chainPts[chainPts.length - 1] ?? loop)
+        const replyIn = pathCurve([
+            replyFrom.clone(),
             loop.clone(),
             queue.clone(),
+            portTop.clone(),
+        ])
+        // the packet leaves the frame from here on its own: a ride that followed it
+        // would be a shot of empty sky, so the two legs are drawn and flown apart
+        const replyOut = pathCurve([
             portTop.clone(),
             portTop.clone().add(new THREE.Vector3(0.3, 3, 0.3)),
             portTop.clone().add(new THREE.Vector3(0.5, SKY_ABOVE_PORT * 0.5, 0.8)),
             portTop.clone().add(new THREE.Vector3(0.5, SKY_ABOVE_PORT, 0.6)),
         ])
         const replyChain = new QueryChain(cage)
-        replyChain.addCurve(reply, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
+        replyChain.addCurve(replyIn, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
+        replyChain.addCurve(replyOut, PALETTE.teal, { speed: 0.7, opacity: 0.25 })
         const out = makePacket(PALETTE.teal, 0.26, cage)
         out.position.copy(replyFrom)
-        await travel(this.ticker, out, reply, 0.8, easeOutCubic)
+        // The camera rides a PROXY, not the packet. The proxy travels the same leg
+        // to the socket and then STOPS, while the visible packet carries on out of
+        // the frame — so the ride ends exactly at the socket and the camera holds
+        // there, instead of trailing the packet upward for a poll interval and
+        // jittering when it finally lets go.
+        const proxy = ride ? new THREE.Object3D() : null
+        if (proxy) {
+            proxy.position.copy(replyFrom)
+            cage.add(proxy)
+            this.focusPacket = proxy
+            this.ridePhase = 'reply'
+        }
+        await Promise.all([
+            travel(this.ticker, out, replyIn, 0.55, easeOutCubic),
+            proxy ? travel(this.ticker, proxy, replyIn, 0.55, easeOutCubic) : Promise.resolve(),
+        ])
+        // the socket is where the ride ends: the bytes are the client's problem now
+        this.endRide(ride)
+        if (proxy) cage.remove(proxy)
+        await travel(this.ticker, out, replyOut, 0.45, easeOutCubic)
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)
         chain.fadeOut(this.ticker, 0.7)
@@ -599,7 +767,7 @@ export class RedisSim {
     }
 
     /** Which leg of the route the ridden message is on, if any. */
-    phase(): 'socket' | 'channel' | 'delivered' | null {
+    phase(): RidePhase {
         return this.ridePhase
     }
 
@@ -618,6 +786,10 @@ export class RedisSim {
     packetSubject(): { id: string; object: THREE.Object3D } | null {
         const p = this.focusPacket
         if (!p || !p.parent) return null
+        // a reply climbs out of the cage the same way it came in: 32 units up.
+        // The ride ends at the SOCKET — just above the port — and from there the
+        // packet flies out on its own; following it further is a shot of empty sky.
+        if (this.ridePhase === 'reply' && p.position.y > BACKEND_ORIGIN.y + 1) return null
         if (!this.focusNear) {
             // cage-local y: the packet is a child of the cage, and the sockets sit
             // at BACKEND_ORIGIN.y. Two units out, not four: the shot is about the
@@ -626,7 +798,7 @@ export class RedisSim {
             if (p.position.y > BACKEND_ORIGIN.y + 2) return null
             this.focusNear = true
         }
-        return { id: `publish packet ${this.focusRide}`, object: p }
+        return { id: `ride ${this.focusRide}`, object: p }
     }
 
     private evict(key: RedisKey) {
@@ -1007,6 +1179,45 @@ export class RedisSim {
     publish() {
         if (this.loading || this.inFlight >= 6) return
         void this.runOp(PUBLISH)
+    }
+
+    /**
+     * A read aimed at one of the big values — the traversal story's cue.
+     *
+     * Ambient traffic reaches a big value 8 % of the time; a caption about
+     * walking a quicklist cannot wait for that slice to come round. The key is
+     * forced, the command is a range read, and everything else — socket, queue,
+     * the one thread, the route — is the ordinary path, so the step shows the
+     * real chain rather than a picture of one.
+     */
+    readBig(kind: BigKind, op: 'point' | 'walk' = 'walk'): boolean {
+        if (this.loading || this.inFlight >= 6) return false
+        // a cued read is the thing being watched: it is drawn leg by leg, and a
+        // second one on top of it would bury the trail — so the next cue waits,
+        // exactly like the commands behind a slow one in the queue
+        if (this.walking) return false
+        const key = this.redis.bigKey(kind)
+        if (!key) return false
+        const name =
+            kind === 'zset'
+                ? op === 'point' ? 'ZSCORE' : 'ZRANGEBYSCORE'
+                : kind === 'hash'
+                    ? op === 'point' ? 'HGET' : 'HGETALL'
+                    : 'LRANGE'
+        void this.runOp({ name, write: false, weight: 1, walk: true, probe: op, cue: true }, key)
+        return true
+    }
+
+    /**
+     * A read of a compact value, drawn through the object section — the inline
+     * story's cue. Same as any GET: one bucket, one object, one page.
+     */
+    readInline(): boolean {
+        if (this.loading || this.inFlight >= 6 || this.walking) return false
+        const key = this.redis.compactKeyLeft()
+        if (!key) return false
+        void this.runOp({ name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true }, key)
+        return true
     }
 
     rewriteAof() {

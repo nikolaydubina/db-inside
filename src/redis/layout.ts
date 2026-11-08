@@ -119,8 +119,13 @@ export function setInvariantChecks(on: boolean) {
  * The dict's two tables, side by side. Each half is 16 × 8 tiles and holds up
  * to 128 buckets, so the table shapes are real rectangles: 32 buckets = 16×2,
  * 64 = 16×4, 128 = 16×8. A tile is one BUCKET (one pointer), not a disk block.
+ *
+ * It sits ABOVE the big values (their dashed cages top out around y 5.3) because
+ * the lookup starts here and goes down: bucket → entry → the value's own
+ * structure. Drawn level with those cages it read as one more thing on the same
+ * shelf, and the direction of the address chain was lost.
  */
-export const DICT = { cols: 32, rows: 8, tableCols: 16, y: 3.9, cz: -2.2 }
+export const DICT = { cols: 32, rows: 8, tableCols: 16, y: 5.85, cz: -2.2 }
 /**
  * Bucket counts the floor can draw. Each table half holds 128 tiles, so the
  * demonstration stops at 128 and says so in the card rather than silently
@@ -129,6 +134,24 @@ export const DICT = { cols: 32, rows: 8, tableCols: 16, y: 3.9, cz: -2.2 }
 export const HASH_SIZES = [32, 64, 128] as const
 export const HASH_MAX = HASH_SIZES[HASH_SIZES.length - 1]
 export const KEYS = { cols: 26, rows: 7, y: 7.0, cz: -2.2 }
+
+/**
+ * One value object, magnified — a section, not a structure.
+ *
+ * Every value in this cage is a 16-byte `robj` header plus a payload, and for the
+ * common cases the payload is INSIDE that allocation: an integer occupies the
+ * header's pointer field, and a string up to 44 bytes shares the allocation with
+ * it. Those values never make a second hop — the entry's page is all there is.
+ * A `raw` string or a converted collection is the other row: the header points
+ * at another allocation on another page, which is the hop the big-value stories
+ * draw. Placed at HEAP level — just above the arena and beside the big cages —
+ * because that is what it is: an allocation, magnified, not a layer of its own.
+ * A read only learns the type and the encoding by getting to the page and reading
+ * this header, so the object cannot be drawn above the thing that holds it.
+ * Dashed, because the volume is ours: the object is really on a heap page, and
+ * this is where we put a section of it so the contents can be read.
+ */
+export const INLINE = { x: -9.9, y: 3.25, z: -0.3, w: 2.9, h: 1.15, d: 1.25 }
 
 /**
  * The heap: one contiguous arena of 4 kB page cubes, below the hash table.

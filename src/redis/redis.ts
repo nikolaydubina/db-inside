@@ -29,7 +29,7 @@ import {
     setLabelEnabled,
     slotLattice,
 } from '../core/util'
-import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, keyX, keyZ, xAt, zAt, } from './layout'
+import { CELL, CHANNEL, FIELD, INLINE, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, keyX, keyZ, xAt, zAt, } from './layout'
 export * from './layout'
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
@@ -358,6 +358,7 @@ export class RedisInstance {
         this.buildPorts()
         this.buildPubSub()
         this.buildPipeline()
+        this.buildInlineObject()
         this.buildReadiness()
         this.buildBigKeys()
         this.buildAgents()
@@ -1406,8 +1407,91 @@ export class RedisInstance {
         this.group.add(lab)
     }
 
-    /* ------------------------------ big values ------------------------------- */
+    /**
+     * The other half of the address chain: the case where it does not continue.
+     *
+     * A value object is a 16-byte header — type, encoding, lru clock, refcount —
+     * and for integers and short strings the payload is inside that allocation.
+     * An `int`-encoded value stores the number in the header's pointer field; an
+     * `embstr` string shares the allocation with the bytes. Shared integers 0–9999
+     * go further and point every key at one global object. Those reads end at the
+     * object: no second allocation, no second page. This volume shows that row
+     * against the one that does continue — `raw` sds, or a converted collection —
+     * where the header holds an address and the bytes are on another page.
+     */
+    private buildInlineObject() {
+        const centre = new THREE.Vector3(INLINE.x, INLINE.y, INLINE.z)
+        const { pick } = this.frame(
+            centre,
+            new THREE.Vector3(INLINE.w, INLINE.h, INLINE.d),
+            PALETTE.ice,
+            { dashed: true, opacity: 0.2 },
+        )
+        this.register(pick, {
+            title: 'Value object — 16 bytes, and sometimes the payload is inside',
+            body: 'Every value in this cage is one of these: a fixed header holding the type, the encoding, an lru clock and a refcount — 16 bytes on a 64-bit build — plus a payload. What the encoding decides is where the payload lives. Integer and short-string values keep it in the same allocation: an `int`-encoded value stores the number itself in the header’s pointer field, an `embstr` (up to 44 bytes) is header and bytes in one malloc, and the shared integers 0–9999 are a single global object that every such key points at. Those reads stop here — the entry’s page is the whole story, which is why an ordinary GET of a small value touches no second allocation at all. The lower row is the other case: `raw` strings and converted collections hold an address, and the bytes are a separate allocation on another page. That is the hop the big-value stories draw.',
+            meta: 'robj · type + encoding + lru + refcount · int/embstr inline · raw/converted pointer',
+        })
 
+        const headerMat = new THREE.MeshStandardMaterial({
+            color: 0x0b1a24,
+            emissive: PALETTE.ice,
+            emissiveIntensity: 0.22,
+            roughness: 0.4,
+            metalness: 0.35,
+        })
+        const payloadMat = new THREE.MeshStandardMaterial({
+            color: 0x0b2a26,
+            emissive: PALETTE.teal,
+            emissiveIntensity: 0.45,
+            roughness: 0.35,
+            metalness: 0.3,
+        })
+        const headerGeo = new THREE.BoxGeometry(0.36, 0.24, 0.32)
+        const payloadGeo = new THREE.BoxGeometry(0.3, 0.2, 0.26)
+
+        // Two rows, stacked in HEIGHT rather than depth: seen from the front they
+        // are two lines of a diagram, and a header in one row cannot hide a header
+        // in the other. The top row is one allocation (header and payload touching),
+        // the bottom row is two, and the gap between its blocks is the hop.
+        for (const [dy, inline] of [[0.24, true], [-0.26, false]] as const) {
+            const y = centre.y + dy
+            const header = new THREE.Mesh(headerGeo, headerMat)
+            header.position.set(centre.x - 0.66, y, centre.z)
+            this.group.add(header)
+            const px = inline ? centre.x - 0.33 : centre.x + 0.42
+            const payload = new THREE.Mesh(payloadGeo, payloadMat)
+            payload.position.set(px, y, centre.z)
+            this.group.add(payload)
+            if (!inline) {
+                // the gap is the second hop: the header holds an address, not bytes
+                const from = centre.x - 0.66 + headerGeo.parameters.width / 2
+                const to = px - payloadGeo.parameters.width / 2
+                const link = new THREE.Mesh(
+                    new THREE.BoxGeometry(to - from, 0.015, 0.015),
+                    new THREE.MeshBasicMaterial({
+                        color: PALETTE.ice,
+                        transparent: true,
+                        opacity: 0.45,
+                    }),
+                )
+                link.position.set((from + to) / 2, y, centre.z)
+                this.group.add(link)
+            }
+            const tag = label(inline ? 'INLINE · 1 ALLOC' : 'POINTER · 2 ALLOC')
+            tag.position.set(centre.x + 1.05, y + 0.02, centre.z)
+            this.group.add(tag)
+        }
+        const title = label('VALUE · 16 B')
+        title.position.set(
+            centre.x - INLINE.w / 2,
+            centre.y + INLINE.h / 2 + 0.32,
+            centre.z,
+        )
+        this.group.add(title)
+    }
+
+    /* ------------------------------ big values ------------------------------- */
     /**
      * The three large values.
      *
@@ -1931,7 +2015,7 @@ export class RedisInstance {
         const body: Record<BigKind, string> = {
             hash: 'A hashtable: one bucket array, and one chain per bucket. This is ONE key — five million fields, hundreds of megabytes — and every one of them is behind that single entry in the dict. That is why HGETALL on it is not a slow query but a stall: the command runs on the one thread, walks all of it, and every other client waits. DEL of this key is the same problem. What is drawn here is the shape and not the count: nine buckets, a few chains; the real array is a few million pointers long and doubles with a rehash.',
             zset: 'A sorted set is TWO structures at once, and this is why: a skiplist for the range queries, and a dict beside it answering "what is the score of this member" in O(1). The tower is the whole trick — each level skips over more of the list, so ZRANGEBYSCORE finds its starting point in a few hops instead of a walk. One and a half million members, one key. The drawing shows five levels and seven nodes; the real tower has the same shape with a few million nodes under it.',
-            list: 'A long list is not one array: it is a quicklist, a doubly linked chain of nodes, and each node holds a small listpack. Two million elements, one key. That shape is the reason LPUSH and RPUSH are O(1) while LINDEX in the middle is O(n): the middle is a walk along the chain, through nodes that are not next to each other in memory. The long gap in this chain is where the drawing stops — the real one runs on for tens of thousands of nodes.',
+            list: 'A long list is not one array: it is a quicklist, a doubly linked chain of nodes, and each node holds a small listpack. Two million elements, one key. That shape is the reason LPUSH and RPUSH are O(1) while LINDEX in the middle is O(n): the middle is a walk along the chain, through nodes that are not next to each other in memory. The long gap in this chain is where the drawing stops — the real one runs on for tens of thousands of nodes. And the dashed cage itself is a PROJECTION, not an address: the chain is drawn at the back of the cage so its shape can be read, but its nodes are allocated in the heap below, one page each. Following the chain is following those pages; only the elements inside one node sit next to each other.',
         }
         const shape: Record<BigKind, { label: string; value: string }[]> = {
             hash: [
@@ -2180,6 +2264,121 @@ export class RedisInstance {
     keyPageTop(key: RedisKey): THREE.Vector3 {
         const row = Math.floor(key.page / HEAP.cols)
         const col = key.page % HEAP.cols
+        return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
+    }
+
+    /**
+     * The value-object section beside the keyspace.
+     *
+     * A read of a compact value ends here: the bucket named an object, the object
+     * holds its payload, and the only page involved is the one the object was
+     * allocated on. The section is a projection — the object really sits on that
+     * page — but it is the only place in the drawing where the payload can be
+     * seen, so the route visits it before the page.
+     */
+    inlinePoint(): THREE.Vector3 {
+        return new THREE.Vector3(INLINE.x, INLINE.y, INLINE.z)
+    }
+
+    /**
+     * A compact string key whose entry page sits on the left of the arena.
+     *
+     * The inline story draws the hop from the object section down to a page, and
+     * the section is on the left of the cage, so the page is chosen to land in the
+     * same frame. Which key is used is our choice, not redis's: every compact key
+     * reads the same way.
+     */
+    compactKeyLeft(): RedisKey | null {
+        const live = this.keys.filter((k) => k.live && !k.aux && !k.big && k.kind === 'string')
+        if (live.length === 0) return null
+        return live.reduce((a, b) => ((b.page % HEAP.cols) > (a.page % HEAP.cols) ? a : b))
+    }
+
+    /**
+     * The value's own structure — the far side of the entry's value pointer.
+     *
+     * A big value is a structure of its own (dashed cage at the back), a
+     * converted small value is the extra block stacked on its entry, and a
+     * compact value has no separate structure at all: the whole payload is in
+     * the entry's allocation, so this returns the entry itself. That difference
+     * is the 2-hop / 3-hop story in one function.
+     */
+    valuePoint(key: RedisKey): THREE.Vector3 {
+        if (key.big) {
+            const at = BIG_SPOT[key.big]
+            return new THREE.Vector3(at.x, at.y + 0.22, at.z)
+        }
+        if (key.aux) {
+            // same placement rule as paintAuxKey(): first block above the entry
+            return key.home.clone().add(new THREE.Vector3(0, KEY.h + 0.02, 0))
+        }
+        return this.keyTop(key)
+    }
+
+    /**
+     * One node inside a value's structure — where a walk of the value lands.
+     *
+     * A skiplist hop skips a run of members, a quicklist walk steps node to node,
+     * a hashtable walk goes down a chain. These are points INSIDE the drawn
+     * structure, so a route can bounce between it and the heap pages its nodes
+     * were allocated on.
+     */
+    nodePoint(key: RedisKey, n: number): THREE.Vector3 {
+        if (!key.big) {
+            // one block above the entry: the walk is inside that single allocation
+            return this.valuePoint(key).add(new THREE.Vector3(0, 0.05 * (n + 1), 0))
+        }
+        const at = BIG_SPOT[key.big]
+        if (key.big === 'zset') {
+            // along the tower, a level per hop: the drawn heights are 5,1,2,1,4…
+            const x = ((n % 5) - 2) * 0.9
+            const y = Math.min(4, n + 1) * 0.32
+            return new THREE.Vector3(at.x + x, at.y + y, at.z)
+        }
+        if (key.big === 'list') {
+            // along the quicklist chain, stepping over the drawn gap
+            const x = n >= 2 ? n * 1.1 - 1.0 : n * 1.1 - 2.0
+            return new THREE.Vector3(at.x + x, at.y, at.z)
+        }
+        // a hashtable: along the bucket array, then up a chain
+        return new THREE.Vector3(
+            at.x + ((n % 5) - 2) * 0.72,
+            at.y + (n % 2) * 0.26,
+            at.z + 0.26,
+        )
+    }
+
+    /**
+     * The SECOND hash table — the one inside a converted hash or sorted set.
+     *
+     * A `hashtable`-encoded hash is a dict, and a converted zset carries a dict
+     * beside its skiplist (member → score). Those are real lookups, and they are
+     * not the keyspace dict: they are the value's own bucket arrays, drawn as the
+     * block above the entry, or as the plate beside the tower.
+     */
+    innerDictPoint(key: RedisKey): THREE.Vector3 | null {
+        if (key.kind !== 'hash' && key.kind !== 'zset') return null
+        if (!key.aux && !key.big) return null
+        if (!key.big) return this.valuePoint(key)
+        const at = BIG_SPOT[key.big]
+        return key.big === 'zset'
+            ? new THREE.Vector3(at.x, at.y - 0.45, at.z + 0.95)
+            : new THREE.Vector3(at.x, at.y + 0.05, at.z + 0.3)
+    }
+
+    /**
+     * The next page a walk of this value reads — a hop through RAM.
+     *
+     * A skiplist node or a quicklist node is its own allocation on its own page;
+     * the chain between them is a set of pointers, so following one is a jump to
+     * an unrelated address. Deterministic per key and step, so the same read
+     * draws the same path twice.
+     */
+    hopPoint(key: RedisKey, n: number): THREE.Vector3 {
+        const pageCount = HEAP.cols * HEAP.rows
+        const page = (((key.page + 97 * (n + 1)) % pageCount) + pageCount) % pageCount
+        const row = Math.floor(page / HEAP.cols)
+        const col = page % HEAP.cols
         return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
     }
 
