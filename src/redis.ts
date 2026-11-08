@@ -372,6 +372,8 @@ export class RedisInstance {
     private bigPulse: Record<BigKind, number> = { hash: 0, zset: 0, list: 0 }
     /** the keys drawn as their own areas, by kind */
     private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
+    /** the volume of each big area, as built — the cage, the pick and the shot all use it */
+    private bigAreas: Partial<Record<BigKind, THREE.Box3>> = {}
     /** base albedo per instance, so a flash can be undone */
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
@@ -507,6 +509,8 @@ export class RedisInstance {
         this.openPort()
         this.openPort()
         this.openPort()
+
+        if (checkInvariants) this.assertFrames()
     }
 
     /* -------------------------------- building ------------------------------- */
@@ -516,6 +520,46 @@ export class RedisInstance {
         if (outline) obj.userData.outline = outline
         this.pickables.push(obj)
         return obj
+    }
+
+    /**
+     * A pick built by `frame()` must be picked over exactly the cage it draws.
+     *
+     * The hover highlight IS that cage, so a pick volume from different numbers
+     * does not throw or warn anywhere — it just puts the highlight inside its own
+     * outline, which reads as a rendering glitch. `?debug` runs this once the
+     * cage is built and refuses to start if a framed pick and its cage disagree.
+     *
+     * Only framed picks are checked. A file outline (the AOF, the RDB) is a
+     * different relationship on purpose: the outline is the file's exact extent,
+     * while the pick is deliberately generous so the file is easy to hit — two
+     * volumes, describing two different things.
+     */
+    private assertFrames() {
+        const a = new THREE.Box3()
+        const b = new THREE.Box3()
+        for (const obj of this.pickables) {
+            if (!obj.userData.framed) continue
+            const cage = obj.userData.outline as THREE.Object3D | undefined
+            if (!cage) continue
+            a.setFromObject(obj)
+            b.setFromObject(cage)
+            const d = Math.max(
+                Math.abs(a.min.x - b.min.x),
+                Math.abs(a.min.y - b.min.y),
+                Math.abs(a.min.z - b.min.z),
+                Math.abs(a.max.x - b.max.x),
+                Math.abs(a.max.y - b.max.y),
+                Math.abs(a.max.z - b.max.z),
+            )
+            if (d > 0.02) {
+                const name = (obj.userData.info as Info | undefined)?.title ?? 'unnamed pick'
+                throw new Error(
+                    `[redis] pick and its cage disagree by ${d.toFixed(3)} — ${name}. ` +
+                    'Build both with frame(): one centre, one size.',
+                )
+            }
+        }
     }
 
     private buildShell() {
@@ -978,19 +1022,19 @@ export class RedisInstance {
         // Same mechanism as the disk: one pick volume for the whole container.
         // The key blocks answer per-instance only from up close (see keyPick),
         // so from a distance you select the keyspace, not a lucky block.
-        const keysPick = new THREE.Mesh(
-            new THREE.BoxGeometry(kW, 0.8, kD),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        keysPick.position.set(0, KEYS.y, KEYS.cz)
-        this.group.add(keysPick)
+        //
         // DASHED, because the volume is ours: the entries are separate
         // allocations scattered across the heap, and this plane is only where we
         // put them so they can be pointed at. A solid cage is reserved for
         // volumes that really exist — the process, the two files.
-        const keysCage = new OutlineBox(kW, 0.9, kD, PALETTE.cyan, 0.26, { dashed: true })
-            .centre(0, KEYS.y, KEYS.cz)
-        this.group.add(keysCage)
+        const keysFrame = this.frame(
+            new THREE.Vector3(0, KEYS.y, KEYS.cz),
+            new THREE.Vector3(kW, 0.9, kD),
+            PALETTE.cyan,
+            { dashed: true },
+        )
+        const keysPick = keysFrame.pick
+        const keysCage = keysFrame.cage
         this.register(
             keysPick,
             {
@@ -1305,21 +1349,54 @@ export class RedisInstance {
         return mat
     }
 
+    /**
+     * One volume, and everything that has to agree about it.
+     *
+     * A framed thing in this scene has three descriptions of the same volume: the
+     * dashed cage you see, the invisible box you pick, and the box the camera
+     * frames. Typed out twice they drift — a pick 0.8 tall inside a cage 0.9 tall
+     * makes the hover highlight sit inside its own outline instead of on it.
+     *
+     * So they are not typed out twice. The cage and the pick are built from the
+     * same `size`, both are placed at the same `centre`, and the pick is handed
+     * that box AND the cage itself: hovering or focusing draws the cage, never a
+     * second box derived from a different number.
+     */
+    private frame(
+        centre: THREE.Vector3,
+        size: THREE.Vector3,
+        colour: number,
+        opts: { dashed?: boolean; opacity?: number } = {},
+    ): { cage: OutlineBox; pick: THREE.Mesh; box: THREE.Box3 } {
+        const cage = new OutlineBox(size.x, size.y, size.z, colour, opts.opacity ?? 0.26, {
+            dashed: opts.dashed,
+        }).centre(centre.x, centre.y, centre.z)
+        this.group.add(cage)
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(size.x, size.y, size.z),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.copy(centre)
+        this.group.add(pick)
+        // the highlight IS the cage
+        pick.userData.outline = cage
+        // and this is one of the volumes where the pick and the cage are the same
+        // box by construction, which is what assertFrames() holds us to
+        pick.userData.framed = true
+        return { cage, pick, box: new THREE.Box3().setFromCenterAndSize(centre, size) }
+    }
+
     /** The dashed cage, the pick box and the label for one big value. */
     private bigFrame(kind: BigKind, w: number, h: number, d: number, cy: number) {
         const at = BIG_SPOT[kind]
-        const cage = new OutlineBox(w, h, d, KIND_COLOR[kind], 0.2, { dashed: true }).centre(
-            at.x,
-            at.y + cy,
-            at.z,
-        )
-        this.group.add(cage)
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(w, h, d),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.set(at.x, at.y + cy, at.z)
-        this.group.add(pick)
+        const centre = new THREE.Vector3(at.x, at.y + cy, at.z)
+        const size = new THREE.Vector3(w, h, d)
+        const { pick, box } = this.frame(centre, size, KIND_COLOR[kind], {
+            dashed: true,
+            opacity: 0.2,
+        })
+        // the camera frames exactly this volume, and the card reports it
+        this.bigAreas[kind] = box
         const key = this.bigKeys[kind]
         if (key) {
             pick.userData.infoFor = () => this.keyInfo(key.i)
@@ -1826,17 +1903,7 @@ export class RedisInstance {
 
     /** The volume one big value occupies, cage-local — its dashed cage, in a box. */
     private bigBox(kind: BigKind): THREE.Box3 {
-        const at = BIG_SPOT[kind]
-        const size: Record<BigKind, [number, number, number, number]> = {
-            hash: [3.74, 1.6, 2.28, 0.34],
-            zset: [5.0, 2.7, 2.5, 0.5],
-            list: [7.4, 1.4, 1.9, 0.1],
-        }
-        const [w, h, d, cy] = size[kind]
-        return new THREE.Box3().setFromCenterAndSize(
-            new THREE.Vector3(at.x, at.y + cy, at.z),
-            new THREE.Vector3(w, h, d),
-        )
+        return (this.bigAreas[kind] ?? new THREE.Box3()).clone()
     }
 
     /**
