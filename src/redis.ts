@@ -189,6 +189,10 @@ export class RedisInstance {
     private loopRing!: THREE.Mesh
     private bgsaveDrone!: THREE.Group
     private rewriteDrone!: THREE.Group
+    /** Where the rewrite agent rests when it is not working: over the base file. */
+    private readonly rewriteHome = new THREE.Vector3(RDB_CENTRE.x, 2.1, RDB_CENTRE.z)
+    /** True while bgrewriteaof is running — the agent drives itself then. */
+    rewriting = false
 
     private markGeo = new THREE.TorusGeometry(0.34, 0.025, 4, 28)
     /** Smaller ring for a disk block, so the pulse never spills onto its neighbour. */
@@ -761,10 +765,9 @@ export class RedisInstance {
             },
         )
         this.rewriteDrone = this.makeAgent(
-            // over the base file, not over the end of the log: the rewrite writes
-            // a fresh base, and the aof_buf strip drifts along the log right where
-            // the drone used to sit
-            new THREE.Vector3(RDB_CENTRE.x, 2.1, RDB_CENTRE.z),
+            // it rests over the base file: a rewrite produces exactly that, a new
+            // base written from the current state
+            this.rewriteHome.clone(),
             PALETTE.amber,
             'AOF REWRITE',
             {
@@ -1143,13 +1146,71 @@ export class RedisInstance {
         return RDB_CENTRE.clone()
     }
 
-    /** Rewrite: a new, much shorter file — the end of it moves back. */
-    rewriteAof() {
+    /**
+     * bgrewriteaof, in the three steps it actually performs:
+     *
+     *   1. fork — the child gets a copy-on-write view and WALKS the keyspace
+     *      column by column; nothing is locked, the parent keeps serving
+     *   2. it writes a NEW file holding the minimum command set that reproduces
+     *      that state, which is shorter than the log it replaces — so the end of
+     *      the log walks backwards and the records past it are simply not there
+     *   3. swap — the old file is unlinked and the new one takes over
+     *
+     * Writes that land while this runs are not lost: they go to the rewrite
+     * buffer and are replayed into the new file before the swap, so the head can
+     * come out further along than the target. That is why the head is adjusted by
+     * the number of blocks dropped, not set to a constant.
+     */
+    async runRewrite(): Promise<void> {
+        if (this.rewriting) return
+        this.rewriting = true
+        this.pulseAgent(this.rewriteDrone)
+
+        const oldHead = this.aofHead
+        const target = Math.max(2, Math.round(oldHead * 0.25))
+
+        // 1. the child walks the keyspace: the wave is the scan, not decoration
+        await this.ticker.add(1.15, (k) => {
+            const col = Math.min(KEYS.cols - 1, Math.floor(k * KEYS.cols))
+            for (const key of this.keys) {
+                if (key.live && Math.abs(key.col - col) <= 1) key.heat = Math.max(key.heat, 0.9)
+            }
+            this.rewriteDrone.position.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
+        })
+
+        // 2. the new file is written: the agent walks the log back, and every
+        //    record it passes is one the new file does not need
+        await this.ticker.add(0.95, (k) => {
+            const idx = Math.round(oldHead - (oldHead - target) * k)
+            this.rewriteDrone.position.set(xAt(AOF_C0 + idx), 1.4, zAt(AOF_ROW))
+            for (let j = idx + 1; j <= oldHead; j++) this.hideAofBlock(j)
+        })
+
+        // 3. swap: the shorter file takes over, minus nothing for writes that
+        //    arrived during the rewrite — those survive in the buffer merge
         this.rewrites++
-        this.aofHead = Math.max(2, Math.round(this.aofHead * 0.25))
+        this.aofHead = Math.max(target, this.aofHead - (oldHead - target))
         this.aofBytes = Math.round(this.aofBytes * 0.25)
         this.layoutAof()
+        this.disk.getMatrixAt(this.aofOrder[this.aofHead], this.tmpObj.matrix)
+        this.markBlockTop(this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix))
         this.pulseAgent(this.rewriteDrone)
+        this.rewriting = false
+    }
+
+    /** One block the rewrite dropped: it is not in the new file at all. */
+    private hideAofBlock(k: number) {
+        const i = this.aofOrder[k]
+        if (i === undefined) return
+        this.disk.getMatrixAt(i, this.tmpObj.matrix)
+        this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix)
+        this.tmpObj.scale.setScalar(0.001)
+        this.tmpObj.updateMatrix()
+        this.disk.setMatrixAt(i, this.tmpObj.matrix)
+        this.diskBase[i] = 0x000000
+        this.disk.setColorAt(i, this.tmpColor.setHex(0x000000))
+        this.disk.instanceMatrix.needsUpdate = true
+        if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
     }
 
     /* --------------------------------- agents -------------------------------- */
@@ -1266,9 +1327,16 @@ export class RedisInstance {
             REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)
         }
 
-        // agents drift in place, the way the autovacuum drone does
+        // agents drift in place, the way the autovacuum drone does. The rewrite
+        // agent is exempt while it is working: it is flying its own path then.
         this.bgsaveDrone.position.y = 8.3 + Math.sin(time * 0.9) * 0.12
-        this.rewriteDrone.position.y = 2.1 + Math.sin(time * 0.7 + 1.2) * 0.1
+        if (!this.rewriting) {
+            this.rewriteDrone.position.set(
+                this.rewriteHome.x,
+                this.rewriteHome.y + Math.sin(time * 0.7 + 1.2) * 0.1,
+                this.rewriteHome.z,
+            )
+        }
     }
 
     /** Tight bounds for the camera: the cage plus everything floating in it. */

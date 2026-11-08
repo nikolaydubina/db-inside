@@ -2,7 +2,7 @@ import * as THREE from 'three'
 import { PALETTE } from './instance'
 import type { RedisInstance, RedisKey, RedisPort } from './redis'
 import { QueryChain, pathCurve } from './flow'
-import { Ticker, halo, rand, randInt, travel } from './util'
+import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from './util'
 
 export interface RedisStats {
     ops: number
@@ -53,8 +53,12 @@ const pickCommand = (): Command => {
     return COMMANDS[0]
 }
 
-/** Where client traffic enters, in cage-local units. */
-const SKY_LOCAL = new THREE.Vector3(6, 26, 2)
+/**
+ * How far above the socket client traffic starts, in cage-local units. Same idea
+ * as the postgres side: the client is never drawn, the packet enters the frame
+ * already on its way down, ~32 units above the port.
+ */
+const SKY_ABOVE_PORT = 32
 
 function makePacket(color: number, size: number, parent: THREE.Object3D) {
     const g = new THREE.Group()
@@ -178,19 +182,26 @@ export class RedisSim {
         this.redis.pulsePort(pod)
         this.redis.pulseQueue(cell)
 
-        const sky = SKY_LOCAL.clone().add(
-            new THREE.Vector3(rand(-3, 3), rand(0, 3), rand(-2, 2)),
-        )
-
-        // the request: a packet falls from the client into the socket
-        const packet = makePacket(PALETTE.magenta, 0.16, cage)
-        const fall = pathCurve([
-            sky,
-            sky.clone().add(new THREE.Vector3(-0.4, -4.5, 0.4)),
-            portTop.clone().add(new THREE.Vector3(0, 2.4, 0.5)),
-            portTop,
+        // The request enters from ABOVE the frame and falls a long way into the
+        // socket, exactly as a query does on the postgres side: same packet, same
+        // long lean down, same wire drawn behind it. The client is not drawn
+        // here either — the packet simply arrives already in flight.
+        const packet = makePacket(PALETTE.magenta, 0.42, cage)
+        const sky = portTop.clone().setY(portTop.y + SKY_ABOVE_PORT)
+        packet.position.copy(sky)
+        const inbound = pathCurve([
+            sky.clone(),
+            sky.clone().setY(portTop.y + SKY_ABOVE_PORT * 0.5).add(new THREE.Vector3(0, 0, 0.8)),
+            sky.clone().setY(portTop.y + 3).add(new THREE.Vector3(0, 0, 0.3)),
+            portTop.clone(),
         ])
-        await travel(this.ticker, packet, fall, 0.5)
+        const wire = new QueryChain(cage)
+        const fIn = wire.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
+        await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
+        fIn.flash(0.9)
+        // the wire stays a beat after the packet lands, then goes: a hammered
+        // socket must not silt the scene up with permanent lines
+        void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
         this.redis.pulseQueue(cell)
 
         // the whole way down is one thread: queue → loop → the key itself
@@ -258,17 +269,25 @@ export class RedisSim {
 
         await this.ticker.wait(0.18)
 
-        // the reply climbs straight back up the same socket
+        // The reply climbs back up the same socket and leaves the frame the way
+        // the request came in — a strand to the side of it, not a stub that stops
+        // in mid-air above the port.
         const reply = pathCurve([
             target,
             loop.clone(),
             queue.clone(),
             portTop.clone(),
-            portTop.clone().add(new THREE.Vector3(0, 5.5, 0)),
+            portTop.clone().add(new THREE.Vector3(0.3, 3, 0.3)),
+            portTop.clone().add(new THREE.Vector3(0.5, SKY_ABOVE_PORT * 0.5, 0.8)),
+            portTop.clone().add(new THREE.Vector3(0.5, SKY_ABOVE_PORT, 0.6)),
         ])
         const replyChain = new QueryChain(cage)
-        replyChain.addCurve(reply, PALETTE.teal, { speed: 1.1, opacity: 0.45 })
-        replyChain.fadeOut(this.ticker, 0.7)
+        replyChain.addCurve(reply, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
+        const out = makePacket(PALETTE.teal, 0.26, cage)
+        out.position.copy(target)
+        await travel(this.ticker, out, reply, 0.8, easeOutCubic)
+        despawn(this.ticker, out, 0.3)
+        replyChain.fadeOut(this.ticker, 1.0)
         chain.fadeOut(this.ticker, 0.7)
 
         const dt = performance.now() - t0
@@ -314,11 +333,14 @@ export class RedisSim {
     }
 
     rewriteAof() {
+        if (this.rewriting) return
         this.rewriting = true
-        this.redis.rewriteAof()
-        this.note = 'bgrewriteaof · log rewritten to the current state'
-        void this.ticker.wait(1.4).then(() => {
+        this.note = 'bgrewriteaof · child scanning the keyspace'
+        // the instance runs the whole sequence (scan, write, swap); the sim just
+        // reports it, and holds the flag until the swap has actually happened
+        void this.redis.runRewrite().then(() => {
             this.rewriting = false
+            this.note = `bgrewriteaof · swapped in, log is ${this.redis.aofUsed} blocks`
         })
     }
 
