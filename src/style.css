@@ -754,6 +754,97 @@ h2::after {
   color: #4b6679;
 }
 
+/* ---------- no javascript ---------- */
+
+/*
+ * With JavaScript off the scene never draws, so the <noscript> fallback in
+ * index.html is the whole page. It gets the same dark ground and a readable
+ * column, and it overrides the card-heading typography, which is 9px uppercase
+ * because it was written for a HUD, not for prose.
+ */
+html:not(.js) #app {
+  position: static;
+  height: auto;
+}
+
+/* no scene to warm up, and an overlay that would sit on top of the text */
+html:not(.js) #boot,
+html:not(.js) #c,
+html:not(.js) #labels,
+html:not(.js) .vignette,
+html:not(.js) .grain {
+  display: none !important;
+}
+
+/* a canvas fills the window; a document has to scroll */
+html:not(.js),
+html:not(.js) body {
+  overflow: auto;
+  height: auto;
+}
+
+/* controls for a scene that is not there: the switches and the bottom shelf */
+html:not(.js) .dbswitch,
+html:not(.js) #shelf {
+  display: none;
+}
+
+.noscript {
+  max-width: 64ch;
+  margin: 0 auto;
+  padding: 56px 24px 96px;
+  font-size: 15px;
+  line-height: 1.65;
+  color: #c9dcec;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.noscript h1 {
+  display: block;
+  margin: 0 0 6px;
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  text-transform: none;
+  color: #eaf6ff;
+}
+
+.noscript h2 {
+  display: block;
+  margin: 30px 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.22em;
+  color: #6f93aa;
+  cursor: default;
+}
+
+.noscript h2::after {
+  display: none;
+}
+
+.noscript p {
+  margin: 0 0 12px;
+  color: #9fb8ca;
+}
+
+.noscript ul {
+  margin: 0 0 12px;
+  padding-left: 20px;
+}
+
+.noscript li {
+  margin: 0 0 5px;
+  color: #9fb8ca;
+}
+
+.noscript a {
+  color: var(--cyan);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(53, 224, 255, 0.28);
+}
+
 /* ---------- inspector ---------- */
 
 /*

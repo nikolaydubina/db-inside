@@ -1,0 +1,46 @@
+# Databases — inside the engine
+
+> An interactive 3D cross-section of two database servers on one floor, each in its
+> own wireframe cage. You orbit them, double-tap any part to fly to it, and open its
+> card to read what that part actually does. Nothing is a screenshot: every block,
+> packet, page and key is simulated, and the labels are the real structures.
+
+The point of the project is the notation. A solid outline is a real volume of
+something; a dashed one is a drawing of a structure that has no such footprint.
+A pulse means a unit of work touched that block. Small maps of memory (shared
+buffers, wal_buffers, aof_buf) float above the disk blocks they become.
+
+## Paths
+
+- `/` — the landing page (both cages).
+- `/postgresql`, `/redis` — one cage each, from the same house shot.
+- `/postgresql/<subject>` and `/redis/<subject>` — a named shot of one thing.
+  `?db-panel=postgresql|redis` opens that engine's card; the path does not.
+
+PostgreSQL subjects: `disk`, `tables`, `wal`, `wal-buffers`, `buffers`,
+`pipeline`, `indexes`, `free-space`, `clients`, `pages`, `autovacuum`,
+`table-users`, `table-products`, `table-metrics`, `backend-1` … `backend-6`.
+
+Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`.
+
+## What is in it
+
+PostgreSQL: parser and rewriter → planner → executor; shared buffers as 8 kB pages
+with dirty state and the clock sweep; a B-tree, a BRIN, a GIN and a hash index
+drawn where they sit in RAM; table runs and their pages, dead tuples, free space;
+autovacuum as a drone walking the heap (it reclaims space inside pages and never
+shrinks the file); the WAL run on disk with wal_buffers above it waiting for fsync;
+backend ports, one process per connection, each with its input buffer.
+
+Redis: one command thread with a command queue and the epoll fd set under it; the
+keyspace over the bucket array, including an incremental rehash; three deliberately
+large values (a 1.4 M-member sorted set, a 5.3 M-field hash, a 2.1 M-element list)
+and the handful of hot keys taking the traffic; encodings and when they convert;
+the AOF being appended, the RDB base file, and the forked BGSAVE and AOF-rewrite
+children.
+
+## Source
+
+- Code and notes: https://github.com/nikolaydubina/postgresql-inside
+- Built by DeepSeek V4.1 in the VS Code harness; technical review and design
+  direction by Nikolay Dubina.
