@@ -84,6 +84,8 @@ const QUEUE = { cells: 10, y: 8.95, z: BACKEND_ORIGIN.z }
 const AOF_BUF_CELLS = 5
 /** Height the aof_buf strip floats at: above the run, below the keyspace. */
 const AOF_BUF_Y = 1.7
+/** Top speed of a working agent, in units/s — fast, but a flight you can follow. */
+const AGENT_SPEED = 16
 
 const RDB_CENTRE = new THREE.Vector3(
     (xAt(RDB.c0) + xAt(RDB.c1)) / 2,
@@ -191,8 +193,20 @@ export class RedisInstance {
     private loopRing!: THREE.Mesh
     private bgsaveDrone!: THREE.Group
     private rewriteDrone!: THREE.Group
-    /** Where the rewrite agent rests when it is not working: over the base file. */
-    private readonly rewriteHome = new THREE.Vector3(RDB_CENTRE.x, 2.1, RDB_CENTRE.z)
+    /**
+     * Where the rewrite agent patrols while idle: the middle of the log it is
+     * responsible for, not some abstract home point. Its idle orbit and its work
+     * both happen over the same file.
+     */
+    private readonly rewriteHome = new THREE.Vector3(
+        xAt(AOF_C0 + AOF_LEN / 2),
+        AOF_BUF_Y + 0.9,
+        zAt(AOF_ROW),
+    )
+    /** Where the agent is heading right now — the only thing its work sets. */
+    private readonly rewriteAim = new THREE.Vector3().copy(this.rewriteHome)
+    private readonly rewriteIdle = new THREE.Vector3()
+    private readonly rewriteStep = new THREE.Vector3()
     /** True while bgrewriteaof is running — the agent drives itself then. */
     rewriting = false
 
@@ -549,7 +563,7 @@ export class RedisInstance {
             body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it.',
             meta: `${KEYS.cols * KEYS.rows} slots · values live in the process heap`,
         })
-        const keysLab = label('KEYS · RAM')
+        const keysLab = label('KEYS')
         keysLab.position.set(-kW / 2 - 0.4, KEYS.y + 0.95, KEYS.cz - kD / 2)
         this.group.add(keysLab)
 
@@ -1198,20 +1212,28 @@ export class RedisInstance {
         const oldHead = this.aofHead
         const target = Math.max(2, Math.round(oldHead * 0.25))
 
-        // 1. the child walks the keyspace: the wave is the scan, not decoration
+        // 1. it flies to the keyspace, then sweeps it: the wave is the scan, not
+        //    decoration. The aim point moves, the lerp in update() does the flight,
+        //    so there is no cut between "idle" and "scanning".
+        this.rewriteAim.set(keyX(0), KEYS.y + 0.8, KEYS.cz)
+        await this.ticker.wait(0.35)
         await this.ticker.add(1.15, (k) => {
             const col = Math.min(KEYS.cols - 1, Math.floor(k * KEYS.cols))
             for (const key of this.keys) {
                 if (key.live && Math.abs(key.col - col) <= 1) key.heat = Math.max(key.heat, 0.9)
             }
-            this.rewriteDrone.position.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
+            this.rewriteAim.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
         })
 
-        // 2. the new file is written: the agent walks the log back, and every
+        // 2. it drops onto the log it is rewriting before it starts walking it back
+        this.rewriteAim.set(xAt(AOF_C0 + oldHead), 1.4, zAt(AOF_ROW))
+        await this.ticker.wait(0.5)
+
+        // 3. the new file is written: the agent walks the log back, and every
         //    record it passes is one the new file does not need
         await this.ticker.add(0.95, (k) => {
             const idx = Math.round(oldHead - (oldHead - target) * k)
-            this.rewriteDrone.position.set(xAt(AOF_C0 + idx), 1.4, zAt(AOF_ROW))
+            this.rewriteAim.set(xAt(AOF_C0 + idx), 1.4, zAt(AOF_ROW))
             for (let j = idx + 1; j <= oldHead; j++) this.hideAofBlock(j)
         })
 
@@ -1354,15 +1376,35 @@ export class RedisInstance {
             REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)
         }
 
-        // agents drift in place, the way the autovacuum drone does. The rewrite
-        // agent is exempt while it is working: it is flying its own path then.
+        // bgsave keeps its own small bob: it is a fork of the whole process, and
+        // it holds one position while the child walks the keyspace
         this.bgsaveDrone.position.y = 8.3 + Math.sin(time * 0.9) * 0.12
-        if (!this.rewriting) {
-            this.rewriteDrone.position.set(
-                this.rewriteHome.x,
-                this.rewriteHome.y + Math.sin(time * 0.7 + 1.2) * 0.1,
-                this.rewriteHome.z,
+
+        // the agent patrols the log when it has nothing to do, exactly the way the
+        // autovacuum drone patrols the disk: a slow ellipse, fed through a lerp so
+        // it can never jump. While it works, its position is instead pulled toward
+        // whatever runRewrite is aiming at — same lerp, same smoothness, so the
+        // hand-off between phases is one continuous flight.
+        if (this.rewriting) {
+            // Fly toward the aim at a bounded speed rather than lerping at a fixed
+            // rate: a fixed rate moves fastest when the gap is widest, which reads
+            // as a cut exactly when the flight should be most legible.
+            this.rewriteStep.copy(this.rewriteAim).sub(this.rewriteDrone.position)
+            const dist = this.rewriteStep.length()
+            if (dist > 1e-4) {
+                const step = Math.min(dist, AGENT_SPEED * dt)
+                this.rewriteDrone.position.addScaledVector(this.rewriteStep.multiplyScalar(1 / dist), step)
+            }
+            this.rewriteDrone.rotation.y += dt * 2.2
+        } else {
+            const a = time * 0.28
+            this.rewriteIdle.set(
+                this.rewriteHome.x + Math.cos(a) * 6.4,
+                this.rewriteHome.y + Math.sin(time * 0.8) * 0.32,
+                this.rewriteHome.z + Math.sin(a) * 1.9,
             )
+            this.rewriteDrone.position.lerp(this.rewriteIdle, Math.min(1, dt * 1.2))
+            this.rewriteDrone.rotation.y += dt * 0.7
         }
     }
 
