@@ -23,6 +23,8 @@ export interface HudHandlers {
   setRegime(r: Regime): void
   /** grab-the-cage mode: drag a cage to slide it on the floor */
   setMove(on: boolean): void
+  /** the link for the camera as it stands — resolved by whoever owns the camera */
+  share(): string
   unpin(): void
 }
 
@@ -42,6 +44,7 @@ export function initHud(handlers: HudHandlers) {
   const speedIn = $<HTMLInputElement>('#speed')
   const speedVal = $<HTMLElement>('#speed-val')
   const moveBtn = $<HTMLButtonElement>('#btn-move')
+  const linkBtn = $<HTMLButtonElement>('#btn-link')
 
   /**
    * The clock reads as a glyph and a slider. At 1× there is nothing to say, so the
@@ -217,6 +220,27 @@ export function initHud(handlers: HudHandlers) {
   // lit state, so this only asks for the change
   moveBtn.addEventListener('click', () => {
     handlers.setMove(moveBtn.getAttribute('aria-pressed') !== 'true')
+  })
+
+  // The share link is copied, not navigated to: the word says so for a moment
+  // and then goes back. It is the address of what is on screen right now.
+  const linkWord = linkBtn.textContent ?? 'link'
+  linkBtn.addEventListener('click', () => {
+    const url = handlers.share()
+    const done = () => {
+      linkBtn.textContent = 'copied'
+      linkBtn.classList.add('on')
+      window.setTimeout(() => {
+        linkBtn.textContent = linkWord
+        linkBtn.classList.remove('on')
+      }, 1200)
+    }
+    void navigator.clipboard.writeText(url).then(done, () => {
+      // no clipboard permission: fall back to the address bar, which is the same
+      // link and one keystroke from being copied
+      history.replaceState(null, '', url)
+      done()
+    })
   })
 
   // workload chips: exclusive, and they only change what arrives

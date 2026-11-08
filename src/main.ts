@@ -16,6 +16,8 @@ import { createCameraRig, viewsFor } from './views'
 import { createStory } from './story'
 import { PLANNED_STORIES, STORIES } from './story'
 import type { StoryScene } from './story'
+import { dbFromPath, decodePose, shareUrl } from './share'
+import type { ShareDb } from './share'
 import { initCredits } from './credits'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox } from './util'
@@ -369,7 +371,11 @@ if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
 // back to the link's pose would look like the camera being dragged out from
 // under them. The deep link only decides where you START.
 const startView = new URLSearchParams(location.search).get('view')
-if (startView)
+// `/postgresql` and `/redis` are share links: the path names the cage and the
+// camera comes from `?cam=` (or from that cage's own default shot). Handled
+// below, once the rig exists.
+const shareDbAtBoot = dbFromPath(location.pathname)
+if (startView && !shareDbAtBoot)
   window.setTimeout(() => {
     if (userTookCamera) return
     rig.snap(startView)
@@ -406,6 +412,7 @@ const hud = initHud({
   },
   setRegime: (r) => sim.setRegime(r),
   setMove: (on) => setMove(on),
+  share: () => shareNow(),
   unpin: () => {
     pinned = null
     hud.unpin()
@@ -481,6 +488,57 @@ const rig = createCameraRig({
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlViews = rig
+
+/* ------------------------------- share links ------------------------------ */
+
+/** Which cage a link should describe: the open panel's, else the one in frame. */
+function shareDb(): ShareDb {
+  if (hud.db) return hud.db
+  const aim = world.controls.target
+  const centreOf = (g: THREE.Object3D) => new THREE.Box3().setFromObject(g).getCenter(new THREE.Vector3())
+  return aim.distanceTo(centreOf(instance.group)) <= aim.distanceTo(centreOf(redis.group))
+    ? 'postgres'
+    : 'redis'
+}
+
+/**
+ * The anchor a shared pose is measured from: the cage's min corner, which is the
+ * cage's own origin — both shells are built from the floor up at (0, 0, 0).
+ * Relative coordinates are why a link still frames the same machine after a cage
+ * has been dragged somewhere else on the floor.
+ */
+function cageMin(db: ShareDb): THREE.Vector3 {
+  return (db === 'postgres' ? instance.group : redis.group).position.clone()
+}
+
+/** The link for the camera as it stands right now. */
+function shareNow(): string {
+  const db = shareDb()
+  return shareUrl(db, cageMin(db), camera.position, world.controls.target, camera.fov)
+}
+
+if (shareDbAtBoot) {
+  hud.setDb(shareDbAtBoot)
+  const pose = decodePose(new URLSearchParams(location.search).get('cam'))
+  // after the first frames: the boot tween and any layout move have settled, so
+  // the corner the pose is relative to is the corner it was captured against
+  window.setTimeout(() => {
+    if (userTookCamera) return
+    if (!pose) {
+      rig.snap(shareDbAtBoot === 'postgres' ? 'postgres' : 'redis')
+      return
+    }
+    const min = cageMin(shareDbAtBoot)
+    rig.release()
+    camera.position.copy(min.clone().add(pose.pos))
+    camera.fov = pose.fov
+    camera.updateProjectionMatrix()
+    world.controls.target.copy(min.clone().add(pose.target))
+    world.controls.update()
+    userTookCamera = true
+    lastInteraction = performance.now()
+  }, 1500)
+}
 
 /* -------------------------------- story mode ------------------------------- */
 
