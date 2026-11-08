@@ -185,7 +185,7 @@ export const VIEWS: ViewDef[] = [
         db: 'redis',
         entity: 'persistence',
         hint: 'only two files are here: the incremental AOF and the base RDB',
-        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-4.5, 8.5, 12.5], 36),
+        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-5.6, 10.6, 15.6], 38),
     },
     {
         id: 'redis-aof',
@@ -196,8 +196,10 @@ export const VIEWS: ViewDef[] = [
         // Aimed between the two things that matter here: the floating buffer and
         // the block under it. The target sits below the strip on purpose, so the
         // cubes and the disk blocks they are destined for are both in frame —
-        // framing the buffer alone would cut off what it points at.
-        pose: () => shot(REDIS_ANCHOR.aofBuf, [-3.4, 3.4, 4.8], 34, [0, -0.78, 0]),
+        // framing the buffer alone would cut off what it points at. Stood back from
+        // it too: five 4 kB cubes are small, and filling the frame with them hides
+        // the log they are about to become.
+        pose: () => shot(REDIS_ANCHOR.aofBuf, [-5.4, 5.4, 7.7], 36, [0, -1.2, 0]),
     },
     {
         id: 'disk',
@@ -253,6 +255,19 @@ export const VIEWS: ViewDef[] = [
         entity: 'index structures',
         hint: 'b-tree, BRIN, GIN and hash floating as they sit in RAM',
         pose: () => shot(L(5.0, 2.4, -2.6), [7.5, 5.0, 12.5], 36),
+    },
+    {
+        id: 'autovacuum',
+        label: 'autovacuum',
+        entity: 'the vacuum drone',
+        hint: 'the drone that walks the heap: it reclaims space inside pages, never shrinks the file',
+        // The one subject that FLIES: the pose reads a live anchor, so the camera
+        // aims at where the drone is this frame, and the rig's follow then keeps it
+        // framed with inertia as it patrols — it trails a little and settles
+        // instead of snapping to it. It is a small thing on a wide disk plate, so
+        // the shot stands well back: close up the frame is one drone and no plate,
+        // and there is nothing to see it against.
+        pose: () => shot(ANCHOR.vacuum, [5.1, 4.4, 10.5], 34, [0, -1.4, 0]),
     },
     {
         id: 'free',

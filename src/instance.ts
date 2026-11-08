@@ -349,6 +349,12 @@ export const ANCHOR = {
    * frames it has to read the value at call time, not at boot.
    */
   walBuf: V(pageX(WAL_C0 + WAL_LEN - 1), 1.95, pageZ(WAL_ROW)),
+  /**
+   * The autovacuum drone, which patrols the disk plate. Like walBuf this is
+   * rewritten live every frame — a shot of it has to read the anchor at call time,
+   * or it would keep framing where the drone used to be.
+   */
+  vacuum: V(-8.5, 2.9, DISK_FIELD.cz),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
   disk: V(7.0, 0.5, 5.6),
@@ -2605,6 +2611,9 @@ export class PostgresInstance {
     } else {
       this.vacuumDrone.rotation.y += dt * 2.4
     }
+    // keep the world anchor on the drone wherever it is, so a shot of it follows:
+    // the pose reads this every time the camera asks where its subject is
+    WORLD_ANCHOR.vacuum.copy(this.vacuumDrone.position).add(POSTGRES_ORIGIN)
   }
 
   droneBusy = false
