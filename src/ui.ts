@@ -23,6 +23,8 @@ export interface HudHandlers {
   setRegime(r: Regime): void
   /** grab-the-cage mode: drag a cage to slide it on the floor */
   setMove(on: boolean): void
+  /** zen: hide the whole interface and hand the screen to the scene */
+  setZen(on: boolean): void
   /** which database card is open, so the address can say so — null for none */
   onDbPanel(db: DbName | null): void
   unpin(): void
@@ -44,6 +46,7 @@ export function initHud(handlers: HudHandlers) {
   const speedIn = $<HTMLInputElement>('#speed')
   const speedVal = $<HTMLElement>('#speed-val')
   const moveBtn = $<HTMLButtonElement>('#btn-move')
+  const zenBtn = $<HTMLButtonElement>('#btn-zen')
 
   /**
    * The clock reads as a glyph and a slider. At 1× there is nothing to say, so the
@@ -229,6 +232,12 @@ export function initHud(handlers: HudHandlers) {
     handlers.setMove(moveBtn.getAttribute('aria-pressed') !== 'true')
   })
 
+  // Zen is asked for, not reflected: the scene decides when it ends (a tap or a
+  // key), so this only ever requests the change and the scene reports back.
+  zenBtn.addEventListener('click', () => {
+    handlers.setZen(zenBtn.getAttribute('aria-pressed') !== 'true')
+  })
+
   // workload chips: exclusive, and they only change what arrives
   const regimeOpts = $<HTMLElement>('#regime-opts')
   const regimeButtons: HTMLButtonElement[] = []
@@ -293,6 +302,14 @@ export function initHud(handlers: HudHandlers) {
     setDb,
     /** one place that draws the clock speed, including from story mode */
     showSpeed,
+    /**
+     * Zen has no lit state: it is a thing you ask for, not a mode the bar reports,
+     * and the bar itself is fading away the moment it takes effect. `aria-pressed`
+     * still carries the truth for anyone listening rather than looking.
+     */
+    setZen(on: boolean) {
+      zenBtn.setAttribute('aria-pressed', String(on))
+    },
     get db() {
       return db
     },

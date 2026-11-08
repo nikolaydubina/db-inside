@@ -96,6 +96,31 @@ body {
   position: absolute;
   z-index: 10;
   pointer-events: none;
+  /* the one transition every piece of chrome shares: zen fades the lot, slowly —
+     two seconds is a breath, not an animation, and it reads as the interface
+     getting out of the way rather than as a control doing something */
+  transition: opacity 2s ease;
+}
+
+/*
+ * Zen: everything the app says about itself goes away and the scene is left alone.
+ *
+ * It fades instead of blinking out, and while it is gone the overlay takes no
+ * pointer events at all — every card, the switches and this bar included.
+ *
+ * Fading is the container's job alone: opacity on a child is not inherited and
+ * does not ride the parent's transition, so touching children here made every
+ * heading and card snap out in 0.16 s while the empty shells took two seconds.
+ * Only the pointer has to be pushed down, because children opt back in one by
+ * one and would otherwise catch the tap meant to wake the scene.
+ */
+body.zen .hud,
+body.zen .hud * {
+  pointer-events: none;
+}
+
+body.zen .hud {
+  opacity: 0;
 }
 
 .top-left {
@@ -225,6 +250,11 @@ body {
   outline: 1px solid rgba(53, 224, 255, 0.5);
   outline-offset: 3px;
   border-radius: 2px;
+}
+
+/* zen asks for something and is gone; a ring left on it would outlive the request */
+#btn-zen:focus-visible {
+  outline: none;
 }
 
 /* flight has no switch, so while it is on the row says how to leave it */
@@ -858,7 +888,7 @@ html:not(.js) #shelf {
   width: 330px;
   max-height: calc(100% - 210px);
   pointer-events: auto;
-  transition: right 0.18s ease;
+  transition: right 0.18s ease, opacity 2s ease;
   /* one line of a card title — the × measures itself against this */
   --title-line: 13px;
 }

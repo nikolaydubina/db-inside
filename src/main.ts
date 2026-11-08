@@ -226,6 +226,34 @@ function leaveMove() {
   if (moveMode) setMove(false)
 }
 
+/* ----------------------------------- zen ---------------------------------- */
+
+/**
+ * Zen: hide everything the app says about itself and leave the scene.
+ *
+ * It is a way to stop reading the interface for a minute, not a mode with rules —
+ * so it has exactly one exit, and it is the one people try: any tap, any key, a
+ * scroll. The whole overlay fades rather than vanishing, and stops taking the
+ * pointer while it is gone: otherwise the first tap meant to wake it would land on
+ * a control nobody can see.
+ */
+let zenMode = false
+
+function setZen(on: boolean) {
+  zenMode = on
+  document.body.classList.toggle('zen', on)
+  hud.setZen(on)
+}
+
+/** Any contact with the scene is the request to come back. */
+function wake() {
+  if (zenMode) setZen(false)
+}
+
+window.addEventListener('pointerdown', wake, { capture: true })
+window.addEventListener('keydown', wake, { capture: true })
+window.addEventListener('wheel', wake, { passive: true })
+
 const dragPlanePoint = new THREE.Vector3()
 /** The cage arrows nudge: whatever is under the pointer, else the last one dragged. */
 let lastCage: CageName | null = null
@@ -413,6 +441,7 @@ const hud = initHud({
   },
   setRegime: (r) => sim.setRegime(r),
   setMove: (on) => setMove(on),
+  setZen: (on) => setZen(on),
   onDbPanel: (open) => setPanelParam(open),
   unpin: () => {
     pinned = null
