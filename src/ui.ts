@@ -54,7 +54,8 @@ export function initHud(handlers: HudHandlers) {
    * next to the glyph and the slider gives up that space.
    */
   const showSpeed = (v: number) => {
-    speedVal.textContent = `${v}×`
+    // 0 is not a fraction of a pace, it is a stopped clock, and the readout says so
+    speedVal.textContent = v === 0 ? 'stopped' : `${v}×`
     // Hidden at 1×: the readout sits AFTER the slider, so dropping it out of the
     // layout shortens the row without moving anything the cursor is on.
     speedVal.hidden = v === 1
@@ -285,21 +286,28 @@ export function initHud(handlers: HudHandlers) {
   for (const p of panelsInShelf) {
     p.btn.addEventListener('click', () => {
       const open = p.card.hidden
-      for (const q of panelsInShelf) {
-        q.card.hidden = true
-        q.btn.classList.remove('on')
-        q.btn.setAttribute('aria-pressed', 'false')
-      }
+      closePanels()
       p.card.hidden = !open
       p.btn.classList.toggle('on', open === true)
       p.btn.setAttribute('aria-pressed', String(open))
     })
   }
 
+  /** Shut every shelf panel. A story opens into the space they were using. */
+  const closePanels = () => {
+    for (const q of panelsInShelf) {
+      q.card.hidden = true
+      q.btn.classList.remove('on')
+      q.btn.setAttribute('aria-pressed', 'false')
+    }
+  }
+
   const busy = (el: HTMLElement, on: boolean) => el.classList.toggle('busy', on)
 
   return {
     setDb,
+    /** shut the shelf panels — a story opens into the space they were using */
+    closePanels,
     /** one place that draws the clock speed, including from story mode */
     showSpeed,
     /**

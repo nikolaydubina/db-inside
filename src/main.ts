@@ -14,9 +14,8 @@ import type { Regime } from './sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, defaultView, slugOf, viewBySlug, viewForBox, viewsFor } from './views'
 import type { ViewDef } from './views'
-import { createStory } from './story'
-import { PLANNED_STORIES, STORIES } from './story'
-import type { StoryScene } from './story'
+import { createStory, PLANNED_STORIES, STORIES } from './stories'
+import type { StoryScene } from './stories'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
 import type { ShareDb } from './share'
 import { initHud } from './ui'
@@ -552,6 +551,36 @@ function drift(dt: number) {
   },
 }
 
+  /**
+   * Instrumentation for stories, tests and a person with the console open.
+   *
+   * `__clock.stop()` is the useful one: with time stopped the simulation is a still
+   * frame, so every coordinate can be read and asserted without it moving under the
+   * check — the camera's own follow still runs, because that is driven by real time
+   * and is not part of what is being timed.
+   */
+  ; (window as unknown as Record<string, unknown>).__clock = {
+    stop: () => applySpeed(0),
+    resume: () => applySpeed(1),
+    set: (v: number) => applySpeed(v),
+    get speed() {
+      return speed
+    },
+  }
+  ; (window as unknown as Record<string, unknown>).__ride = () => {
+    const p = redisSim.packetSubject()
+    const at = p ? p.object.getWorldPosition(new THREE.Vector3()) : null
+    return {
+      following: rig.following(),
+      settled: rig.settled(),
+      packet: p?.id ?? null,
+      packetAt: at ? at.toArray().map((n) => +n.toFixed(2)) : null,
+      camera: camera.position.toArray().map((n) => +n.toFixed(2)),
+      aim: world.controls.target.toArray().map((n) => +n.toFixed(2)),
+      gap: at ? +camera.position.distanceTo(at).toFixed(2) : null,
+    }
+  }
+
 world.controls.addEventListener('start', () => {
   userTookCamera = true
   noteCameraMove()
@@ -758,6 +787,11 @@ const storyScene: StoryScene = {
     return { id: `backend ${best.id + 1}`, box }
   },
   valid: (id: string) => {
+    // A packet is the one subject here that is guaranteed to stop existing: it
+    // leaves the cage. Its id carries the ride number, so "still valid" is exactly
+    // "that same packet is still in the air" — and when it is not, the step waits
+    // for the next one instead of holding a frame on empty space.
+    if (id.startsWith('publish packet ')) return redisSim.packetSubject()?.id === id
     // only backends can stop existing mid-step; a WAL run or a buffer strip is
     // a fixed structure, and treating it as invalid made the story re-frame
     // every 400 ms, which reads as the camera twitching instead of moving
@@ -769,6 +803,17 @@ const storyScene: StoryScene = {
   walRun: () => instance.walRunBox(),
   walBuffers: () => instance.walBuffersBox(),
   walHead: () => ({ id: `wal head`, box: instance.walHeadBox() }),
+  // the redis cage's only live subject: the copy of a publish that is in flight
+  redisPacket: () => {
+    const p = redisSim.packetSubject()
+    if (!p) return null
+    // A box the size of the packet's own position, not of its glow: setFromObject
+    // would measure the additive halo sprite around it, which is five times the
+    // cube, and framing that puts the camera 23 units out looking at a dot.
+    const at = p.object.getWorldPosition(new THREE.Vector3())
+    const box = new THREE.Box3(at.clone().addScalar(-0.5), at.clone().addScalar(0.5))
+    return { id: p.id, box, object: p.object }
+  },
 }
 
 const story = createStory({
@@ -776,6 +821,7 @@ const story = createStory({
   sim,
   scene: storyScene,
   redis: redisSim,
+  stories: STORIES,
   setSpeed: applySpeed,
   onEnter: () => {
     // no camera drift during a story: the scene is already moving enough, and
@@ -790,9 +836,13 @@ const story = createStory({
     // start from a clean pool: leave one connection, so "one request, one
     // connection" describes what is actually on screen
     instance.closeIdleBackendsTo(1)
-    // and two listeners on the redis floor, so a story about pub/sub starts from
-    // the state its first step claims rather than from whatever was left behind
-    redisSim.resetPubSub()
+    // and an empty channel on the redis floor: a story about pub/sub says something
+    // about a socket turning violet, so it has to start with nobody listening and
+    // no background episode arriving mid-caption
+    redisSim.suspendPubSub()
+    // the list you picked the story from is not part of the story: its panel closes
+    // so the card and the scene have the room
+    hud.closePanels()
     // the drift belongs to the idle page, not to a caption: it would carry the
     // camera off the step's pose a few seconds after the step opened
     storyActive = true
@@ -800,6 +850,7 @@ const story = createStory({
   },
   onExit: () => {
     sim.ambient = true
+    redisSim.resumePubSub()
     storyActive = false
     applySpeed(speedBeforeStory)
     hud.setRegime(regimeBeforeStory)
@@ -1257,6 +1308,10 @@ function frame() {
   const raw = Math.min((now - lastTime) / 1000, 0.05)
   lastTime = now
   // the speed slider scales the whole simulation clock, not the render rate
+  // 0 is a real setting, not an accident: the clock stops, the scene becomes a
+  // still frame, and every coordinate in it can be read and asserted. The drift
+  // is gated on it below for the same reason — a frozen scene that keeps turning
+  // is not frozen.
   const dt = raw * speed
 
   ticker.update(dt)
@@ -1331,11 +1386,20 @@ function frame() {
     hoverBox.visible = false
   }
 
-  // resume the slow drift after a quiet spell — every camera move pushes this out
-  if (!storyActive && !flyMode && !drag && !driftOn && performance.now() - lastInteraction > ORBIT_COOLDOWN) {
+  // resume the slow drift after a quiet spell — every camera move pushes this out.
+  // Stopped time counts as a reason not to: a frozen scene that goes on turning
+  // is not frozen, and a story that stops the clock wants the frame it stopped at.
+  if (
+    speed > 0 &&
+    !storyActive &&
+    !flyMode &&
+    !drag &&
+    !driftOn &&
+    performance.now() - lastInteraction > ORBIT_COOLDOWN
+  ) {
     driftOn = true
   }
-  if (driftOn) drift(raw)
+  if (driftOn && speed > 0) drift(raw)
 
   world.render(raw, dt)
   telemetry.tick(dt, raw)

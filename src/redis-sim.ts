@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { PALETTE } from './instance'
+import { BACKEND_ORIGIN, PALETTE } from './instance'
 import type { KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { BIG_REAL } from './redis'
 import { QueryChain, pathCurve } from './flow'
@@ -116,6 +116,30 @@ function makePacket(color: number, size: number, parent: THREE.Object3D) {
     return g
 }
 
+/**
+ * Paint a packet that is already in flight.
+ *
+ * The same bytes are a magenta COMMAND while they cross the wire and a violet
+ * MESSAGE once the thread is copying them to listeners. It is one object doing
+ * both, so it is recoloured rather than replaced — replacing it is what made the
+ * route look like three unrelated things.
+ */
+const recolorPacket = (obj: THREE.Object3D, hex: number) => {
+    obj.traverse((o) => {
+        const mat = (o as THREE.Mesh).material as
+            | THREE.MeshStandardMaterial
+            | THREE.SpriteMaterial
+            | undefined
+        if (!mat) return
+        // the core carries an emissive body; a sprite halo carries only a tint
+        if ((mat as THREE.MeshStandardMaterial).emissive) {
+            ; (mat as THREE.MeshStandardMaterial).emissive.setHex(hex)
+        } else if ((mat as THREE.SpriteMaterial).color) {
+            ; (mat as THREE.SpriteMaterial).color.setHex(hex)
+        }
+    })
+}
+
 const despawn = (ticker: Ticker, obj: THREE.Object3D, dur = 0.25) => {
     void ticker
         .add(dur, (k) => {
@@ -212,6 +236,38 @@ export class RedisSim {
     private note = 'idle'
     /** PUBLISH commands run, so a caption can be measured rather than assumed */
     private fanouts = 0
+    /** seconds to the next subscribe → publish → unsubscribe episode */
+    private pubsubTimer = rand(5, 9)
+    private episode = false
+    /** a story drives pub/sub itself and does not want episodes in its way */
+    private scriptedPubSub = false
+    /**
+     * The packet a following camera is on — and which ride that is.
+     *
+     * A publish is a chain of packets: one falls in from the client, then one copy
+     * per listener leaves, and the camera has to stay with the same message across
+     * the hand-off. The token is what says "this is still the same ride", so a
+     * second publish starting while the first is in flight cannot steal the
+     * camera mid-route.
+     */
+    private focusPacket: THREE.Object3D | null = null
+    private focusRide = 0
+    private rideToken = 0
+    /**
+     * Which leg of the route the ridden message is on: 'socket' once it has landed,
+     * 'channel' when the thread is about to copy it, 'delivered' when the first copy
+     * is in a listener's output buffer.
+     *
+     * A story freezes the clock on one of these, so the message stops where the
+     * caption is about and the next step continues the same object. Without it the
+     * route runs to the end in a few seconds and every step after the first is a
+     * description of something that has already gone.
+     */
+    private ridePhase: 'socket' | 'channel' | 'delivered' | null = null
+    /** when the focused packet went missing, in real ms — the safety valve */
+    private focusLostAt = 0
+    /** has the ridden packet come down into camera range yet */
+    private focusNear = false
     /** A note that owns the status line while a blocking job runs. */
     private lockedNote: string | null = null
 
@@ -301,6 +357,10 @@ export class RedisSim {
         const packet = makePacket(PALETTE.magenta, 0.42, cage)
         const sky = portTop.clone().setY(portTop.y + SKY_ABOVE_PORT)
         packet.position.copy(sky)
+        // A publish is the one command a camera may be asked to ride, and the ride
+        // starts here — in the sky, before the bytes have reached the socket — not
+        // at the fan, which is where the message is already half-way through.
+        const ride = cmd.fanout ? this.beginRide(packet) : 0
         const inbound = pathCurve([
             sky.clone(),
             sky.clone().setY(portTop.y + SKY_ABOVE_PORT * 0.5).add(new THREE.Vector3(0, 0, 0.8)),
@@ -328,34 +388,61 @@ export class RedisSim {
         // entry. Drawing loop → key directly would skip the only lookup in the
         // whole system — the thing that makes it O(1).
         const chain = new QueryChain(cage)
-        const target = key ? this.redis.keyTop(key) : loop.clone()
-        const bucket = key ? this.redis.bucketTop(key) : loop.clone()
-        // A publish stops at the loop: there is no bucket to hash into and no
-        // entry to follow, so the route ends where the fan begins. Drawing it
-        // through a bucket would claim a lookup this command never makes.
-        chain.add(
-            (cmd.fanout ? [portTop, queue, loop] : [portTop, queue, loop, bucket, target]).map((p) =>
-                p.clone(),
-            ),
-            PALETTE.violet,
-            { speed: 0.9, opacity: 0.5 },
-        )
-        despawn(this.ticker, packet)
+        const target = key ? this.redis.keyTop(key) : this.redis.channelPoint()
+        const bucket = key ? this.redis.bucketTop(key) : this.redis.channelPoint()
 
-        await this.ticker.wait(0.22)
-        // SAVE writes the dump on this very thread, so a command that arrives
-        // meanwhile is parsed, queued — and then waits. It is not a lock: the
-        // queue is simply not being drained by anyone.
-        while (this.blocked) await this.ticker.wait(0.1)
-        this.redis.pulseLoop()
-        // the thread takes the head of the queue now — everything behind it moves up
-        this.redis.queuePop()
+        // The bytes are in that socket's input buffer now, and they stay there
+        // until the one thread comes round to them. That is a real pause in a
+        // single-threaded server, and it is the instant a story stops the clock on
+        // to talk about a command arriving — so it lasts long enough to be an
+        // instant rather than a single frame, and only for a ridden message.
+        if (ride) {
+            this.ridePhase = 'socket'
+            await this.ticker.wait(0.3)
+        }
+
+        if (cmd.fanout) {
+            // ONE packet, the whole route: socket → queue → loop → channel, and
+            // then it becomes the message each listener receives. It used to stop
+            // at the socket and be replaced by a line nobody rode, then by copies
+            // that appeared out of the channel — three objects for one message, and
+            // no way to follow the thing the caption was about.
+            const route = pathCurve([
+                portTop.clone(),
+                queue.clone(),
+                loop.clone(),
+                this.redis.channelPoint(),
+            ])
+            chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.45 })
+            await travel(this.ticker, packet, route, 0.85)
+            // SAVE writes the dump on this very thread, so a command that arrives
+            // meanwhile is parsed, queued — and then waits. It is not a lock: the
+            // queue is simply not being drained by anyone.
+            while (this.blocked) await this.ticker.wait(0.1)
+            this.redis.pulseLoop()
+            this.redis.queuePop()
+            // the direction the message ARRIVED in. The fan has to leave along it:
+            // a burst of arcs setting off the other way is a corner at the node,
+            // and reads as two unrelated lines that happen to meet there.
+            await this.fanout(ride, packet, route.getTangent(1).normalize())
+        } else {
+            chain.add(
+                [portTop, queue, loop, bucket, target].map((p) => p.clone()),
+                PALETTE.violet,
+                { speed: 0.9, opacity: 0.5 },
+            )
+            despawn(this.ticker, packet)
+
+            await this.ticker.wait(0.22)
+            while (this.blocked) await this.ticker.wait(0.1)
+            this.redis.pulseLoop()
+            // the thread takes the head of the queue now — everything behind it moves up
+            this.redis.queuePop()
+        }
 
         let converted = false
         let bigRead = false
-        if (cmd.fanout) {
-            await this.fanout()
-        } else if (key) {
+        if (key) {
             this.redis.pulseBucket(key)
             // one bucket of the rehash per operation, exactly as redis does it —
             // the cron makes up the rest
@@ -434,9 +521,10 @@ export class RedisSim {
         // The reply climbs back up the same socket and leaves the frame the way
         // the request came in — a strand to the side of it, not a stub that stops
         // in mid-air above the port. A publish has no key to come back from, so
-        // its reply starts at the loop: the count is made there and nowhere else.
+        // its reply starts at the channel: the count is made there and nowhere else.
         const reply = pathCurve([
             ...(cmd.fanout ? [] : [target]),
+            ...(cmd.fanout ? [this.redis.channelPoint()] : [loop.clone()]),
             loop.clone(),
             queue.clone(),
             portTop.clone(),
@@ -447,7 +535,7 @@ export class RedisSim {
         const replyChain = new QueryChain(cage)
         replyChain.addCurve(reply, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
         const out = makePacket(PALETTE.teal, 0.26, cage)
-        out.position.copy(cmd.fanout ? loop : target)
+        out.position.copy(cmd.fanout ? this.redis.channelPoint() : target)
         await travel(this.ticker, out, reply, 0.8, easeOutCubic)
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)
@@ -467,6 +555,67 @@ export class RedisSim {
 
         pod.busy = false
         this.inFlight--
+    }
+
+    /**
+     * Take the camera's attention for this publish, if nobody has it.
+     *
+     * Called with the inbound packet, before it has reached the socket: the ride a
+     * story wants to show starts in the sky and ends leaving another socket, so the
+     * hand-off from the incoming message to the outgoing copies has to be one
+     * continuous subject.
+     */
+    private beginRide(packet: THREE.Object3D): number {
+        if (this.focusRide !== 0) return 0
+        this.focusRide = ++this.rideToken
+        this.focusPacket = packet
+        this.focusLostAt = 0
+        this.focusNear = false
+        return this.focusRide
+    }
+
+    /**
+     * The ride is over: the message has left the cage and there is nothing left to
+     * follow. Only the ride that still owns the camera may end it.
+     */
+    private endRide(ride: number) {
+        if (ride === 0 || ride !== this.focusRide) return
+        this.focusRide = 0
+        this.focusPacket = null
+        this.focusLostAt = 0
+        this.focusNear = false
+        this.ridePhase = null
+    }
+
+    /** Which leg of the route the ridden message is on, if any. */
+    phase(): 'socket' | 'channel' | 'delivered' | null {
+        return this.ridePhase
+    }
+
+    /**
+     * The packet a camera may ride, with an identity and a live position.
+     *
+     * A packet is an object in the scene like a page or a key: it has a world
+     * position and it moves. What it also needs is a NAME, because a camera holds
+     * on to an identity — without one, "the packet" becomes "the place a packet
+     * was when somebody measured a box", and the shot is stale the frame after.
+     *
+     * Null until the packet is nearly at a socket: a request falls in from 32
+     * units up, and a camera that locks on at the top of that fall spends several
+     * seconds watching an empty sky with a dot in it.
+     */
+    packetSubject(): { id: string; object: THREE.Object3D } | null {
+        const p = this.focusPacket
+        if (!p || !p.parent) return null
+        if (!this.focusNear) {
+            // cage-local y: the packet is a child of the cage, and the sockets sit
+            // at BACKEND_ORIGIN.y. Two units out, not four: the shot is about the
+            // packet reaching a socket, so the camera takes over just before it
+            // does, not while it is still falling through empty air.
+            if (p.position.y > BACKEND_ORIGIN.y + 2) return null
+            this.focusNear = true
+        }
+        return { id: `publish packet ${this.focusRide}`, object: p }
     }
 
     private evict(key: RedisKey) {
@@ -494,12 +643,16 @@ export class RedisSim {
      * with nobody on it is not an error — it is a successful publish to zero
      * clients.
      */
-    private async fanout() {
+    private async fanout(ride = 0, message?: THREE.Object3D, arrival?: THREE.Vector3) {
         const cage = this.redis.group
         const from = this.redis.channelPoint()
         const subs = this.redis.subscribers()
         this.redis.pulseChannel()
         if (subs.length === 0) {
+            // nobody to copy it to: the packet the client's command became has
+            // nowhere to go, and that is a successful publish to zero clients
+            if (message) despawn(this.ticker, message, 0.2)
+            this.endRide(ride)
             this.note = `PUBLISH ${this.redis.channelName} · nobody on the channel — delivered to 0 clients, and nothing was stored`
             return 0
         }
@@ -507,18 +660,25 @@ export class RedisSim {
         const fan = new QueryChain(cage)
         const arcs = subs.map((pod) => {
             const top = this.redis.portTop(pod)
-            // Bow each arc away from the channel so a fan reads as a fan instead of
-            // as a bundle of straight lines lying on top of the queue.
+            // Bow each arc outward, NEVER above the socket it is heading for: a bow
+            // that peaks higher than the socket makes the message come down into it
+            // from outside and then turn round to leave — arriving and leaving at
+            // 180° to each other, which is exactly what a wrong-side entry looks
+            // like. Under the rim, it climbs to the socket and keeps going out.
             const away = new THREE.Vector3(top.x - from.x, 0, top.z - from.z)
             const mid = from.clone().add(top).multiplyScalar(0.5)
-            mid.y += 1.4
-            mid.addScaledVector(away.normalize(), 0.7)
-            const toSocket = pathCurve([from.clone(), mid, top])
-            // and then out: the client is not drawn, so the bytes simply leave the
-            // way a request comes in — up and away from the socket, not stopping on
-            // the rim as if the message had reached the database itself
+            mid.y = Math.min(from.y, top.y) + 0.35
+            mid.addScaledVector(away.normalize(), 0.9)
+            // G0.25: the first step out of the channel continues the direction the
+            // message came in on, and only then turns.
+            const lead = from.clone().addScaledVector(arrival ?? new THREE.Vector3(0, 1, 0), 1.1)
+            const toSocket = pathCurve([from.clone(), lead, mid, top])
+            // and the way out continues the way in: the socket is a point on the
+            // route, not a corner in it
+            const leave = top.clone().addScaledVector(toSocket.getTangent(1).normalize(), 1.2)
             const out = pathCurve([
                 top.clone(),
+                leave,
                 top.clone().add(new THREE.Vector3(0.35, 4, 0.4)),
                 top.clone().add(new THREE.Vector3(0.7, 12, 0.7)),
             ])
@@ -529,17 +689,34 @@ export class RedisSim {
 
         // One packet per socket, a beat apart: the thread writes them one after
         // another, and every one of them is a copy — the message is never shared.
-        for (const arc of arcs) {
-            const packet = makePacket(PALETTE.violet, 0.24, cage)
+        // The copies exist from here: this is the moment the list is walked, so it
+        // is also the moment a story can stop on.
+        if (ride) this.ridePhase = 'channel'
+        for (let i = 0; i < arcs.length; i++) {
+            const arc = arcs[i]
+            // The message that came down the route IS the first copy. It only
+            // changes colour here, at the moment it stops being a command on the
+            // wire and becomes a value the thread is handing to sockets. The rest
+            // are made at the channel, because that is exactly what a copy is.
+            const packet =
+                i === 0 && message ? message : makePacket(PALETTE.violet, 0.24, cage)
+            if (i === 0 && message) recolorPacket(packet, PALETTE.violet)
+            // it leaves from the channel, wherever it was made
             packet.position.copy(from)
+            // the first copy is the one a following camera rides: the others are
+            // the same moment repeated, and watching all of them at once is what
+            // the wide shot is for
+            if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = packet
             void travel(this.ticker, packet, arc.toSocket, 0.42).then(() => {
-                // the bytes landed in that socket's output buffer: its fd fired,
+                // the first copy has reached a listener's output buffer
+                if (i === 0 && ride) this.ridePhase = 'delivered'
                 // its ring answers. The connection is not a key-space client and
                 // does not become busy.
                 this.redis.pulseSend(arc.pod)
                 despawn(this.ticker, packet, 0.15)
                 const away = makePacket(PALETTE.violet, 0.2, cage)
                 away.position.copy(arc.top)
+                if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = away
                 void travel(this.ticker, away, arc.out, 0.6).then(() =>
                     despawn(this.ticker, away, 0.2),
                 )
@@ -549,6 +726,9 @@ export class RedisSim {
         fan.fadeOut(this.ticker, 1.2)
         this.fanouts++
         this.note = `PUBLISH ${this.redis.channelName} · fan-out to ${subs.length} subscriber${subs.length === 1 ? '' : 's'} — no key read, nothing appended, nothing stored`
+        // hold the ride until the last copy has actually left the frame
+        await this.ticker.wait(0.8)
+        this.endRide(ride)
         return subs.length
     }
 
@@ -561,8 +741,12 @@ export class RedisSim {
      * the socket is a listener — and only from that moment, which is why the
      * colour changes here and not at connect time.
      */
-    private async subscribe(pod: RedisPort) {
-        if (this.loading || pod.subs) return
+    private async subscribe(pod: RedisPort, note = true) {
+        // `loading` guards ambient traffic, which must not compete with the dump
+        // being read at boot. A story that asks for a SUBSCRIBE has to get one: the
+        // boot is over by the time anybody is reading a caption, and a cue swallowed
+        // by this guard left the story waiting forever for a listener.
+        if ((this.loading && !this.scriptedPubSub) || pod.subs) return
         this.inFlight++
         const cage = this.redis.group
         const portTop = this.redis.portTop(pod)
@@ -585,7 +769,9 @@ export class RedisSim {
         this.redis.pulseChannel()
         // the list now has this socket on it
         this.redis.setSubscribed(pod, true)
-        this.note = `SUBSCRIBE ${this.redis.channelName} · socket ${pod.id + 1} joined the list — the channel holds its fd, not a copy of anything`
+        if (note) {
+            this.note = `SUBSCRIBE ${this.redis.channelName} · socket ${pod.id + 1} joined the list — the channel holds its fd, not a copy of anything`
+        }
         despawn(this.ticker, packet, 0.2)
 
         // the reply climbs back up the same socket and leaves the frame: the client
@@ -608,6 +794,42 @@ export class RedisSim {
     }
 
     /**
+     * UNSUBSCRIBE — the same route backwards, and the socket is an ordinary client
+     * again. The channel keeps no memory of it: with the last subscriber gone the
+     * entry is as good as deleted, because there is nothing in it but the list.
+     */
+    private async unsubscribe(pod: RedisPort, note = true) {
+        if (this.loading || !pod.subs) return
+        this.inFlight++
+        const cage = this.redis.group
+        const portTop = this.redis.portTop(pod)
+        const slot = this.redis.queuePush()
+        const queue = this.redis.queueCellTop(slot)
+        const loop = this.redis.loopTop()
+        const channel = this.redis.channelPoint()
+
+        const route = pathCurve([portTop, queue.clone(), loop.clone(), channel.clone()])
+        const chain = new QueryChain(cage)
+        chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.32 })
+        const packet = makePacket(PALETTE.violet, 0.26, cage)
+        packet.position.copy(portTop)
+        void travel(this.ticker, packet, route, 0.5)
+        await this.ticker.wait(0.45)
+        this.redis.pulseLoop()
+        this.redis.queuePop()
+        this.redis.setSubscribed(pod, false)
+        this.redis.pulseChannel()
+        if (note) {
+            this.note = `UNSUBSCRIBE ${this.redis.channelName} · socket ${pod.id + 1} left the list — an ordinary client again`
+        }
+        despawn(this.ticker, packet, 0.2)
+        await this.ticker.wait(0.3)
+        this.redis.pulseSend(pod)
+        chain.fadeOut(this.ticker, 0.8)
+        this.inFlight--
+    }
+
+    /**
      * How the violet gets there. A client connects to listen and sends SUBSCRIBE;
      * this picks the next ordinary socket and says it — a story's cue, not
      * ambient traffic, because subscriptions are rare and started by hand.
@@ -623,16 +845,56 @@ export class RedisSim {
     }
 
     /**
-     * Who is listening, back to the state a fresh instance has.
+     * One whole life of a subscription, in the background: a client or two joins
+     * the channel, a few messages go out, and then they leave.
      *
-     * A restart drops every connection, so this runs after the ports come back;
-     * a story runs it too, so its first step is true of a floor it did not
-     * inherit. Two of each on a four-socket floor, never all of them.
+     * Channels are not a permanent fixture of a server — a pub/sub workload is
+     * clients arriving to watch something and going away again — and a floor that
+     * is violet all the time would say it was. So the default regime has nobody
+     * listening at rest, and episodes come and go on their own.
      */
-    resetPubSub() {
-        const open = this.redis.ports.filter((p) => p.active)
-        const n = Math.max(0, Math.min(2, open.length - 2))
-        open.forEach((pod, i) => this.redis.setSubscribed(pod, i >= open.length - n))
+    private async pubsubEpisode() {
+        if (this.episode || this.loading) return
+        this.episode = true
+        try {
+            const ordinary = this.redis.ports.filter((p) => p.active && !p.subs)
+            // never all of them: a subscriber cannot issue GET
+            const n = Math.max(0, Math.min(randInt(1, 2), ordinary.length - 1))
+            const joiners = ordinary.slice(0, n)
+            for (const pod of joiners) {
+                await this.subscribe(pod)
+                await this.ticker.wait(0.5)
+            }
+            if (joiners.length > 0) {
+                const beats = randInt(2, 4)
+                for (let i = 0; i < beats; i++) {
+                    await this.fanout()
+                    await this.ticker.wait(0.9)
+                }
+            }
+        } finally {
+            const listeners = this.redis.subscribers()
+            for (const pod of listeners) {
+                await this.unsubscribe(pod)
+                await this.ticker.wait(0.4)
+            }
+            this.episode = false
+        }
+    }
+
+    /**
+     * Channels are quiet unless something drives them. A story drives them itself
+     * and needs a floor with nobody on it, so it suspends the background episodes
+     * and clears the listeners; exiting hands them back.
+     */
+    suspendPubSub() {
+        this.scriptedPubSub = true
+        this.redis.clearSubscribers()
+    }
+
+    resumePubSub() {
+        this.scriptedPubSub = false
+        this.pubsubTimer = rand(6, 12)
     }
 
     /* ---------------------------------- events ------------------------------- */
@@ -692,11 +954,9 @@ export class RedisSim {
         this.lockedNote = `load · reading dump.rdb, then replaying ${this.redis.aofUsed} AOF records — not listening`
         await this.redis.runLoad(target)
         this.redis.openPorts(4)
-        // the sockets are new, so are the subscriptions: some clients connect to
-        // listen, the rest are ordinary key-space clients. Set rather than drawn:
-        // a subscriber's arrival is a story beat, and the boot is not the place to
-        // spend three seconds explaining it.
-        this.resetPubSub()
+        // A fresh instance has nobody on the channel: subscriptions are something
+        // clients come and do, not a state the server starts in.
+        this.redis.clearSubscribers()
         this.loading = false
         this.lockedNote = null
         this.nextArrival = 0.2
@@ -768,6 +1028,21 @@ export class RedisSim {
     update(dt: number) {
         this.clock += dt
 
+        // A ride survives the hand-off from the inbound packet to the outgoing
+        // copies, so a packet disappearing is NOT the end of it — the fan replaces
+        // it within the same publish. This is only the safety valve for a ride that
+        // died some other way, so the camera cannot be stuck on a stale box forever.
+        if (this.focusRide !== 0) {
+            if (this.focusPacket?.parent) this.focusLostAt = 0
+            else if (this.focusLostAt === 0) this.focusLostAt = performance.now()
+            else if (performance.now() - this.focusLostAt > 4000) {
+                this.focusRide = 0
+                this.focusPacket = null
+                this.focusLostAt = 0
+                this.ridePhase = null
+            }
+        }
+
         if (this.ambient && !this.loading) {
             this.nextArrival -= dt
             if (this.nextArrival <= 0 && this.inFlight < 5) {
@@ -778,6 +1053,16 @@ export class RedisSim {
 
         // the expire cycle is a background chore, not a command
         if (!this.loading) this.expireCycle()
+
+        // channels come and go: somebody subscribes, a few messages go out, they
+        // leave. Paused while a story drives the same machinery by hand.
+        if (this.ambient && !this.loading && !this.scriptedPubSub) {
+            this.pubsubTimer -= dt
+            if (this.pubsubTimer <= 0) {
+                this.pubsubTimer = rand(14, 24)
+                void this.pubsubEpisode()
+            }
+        }
 
         // appendfsync everysec: whatever is in aof_buf is written to the file and
         // fsynced. This is the only moment redis touches the disk for a write —

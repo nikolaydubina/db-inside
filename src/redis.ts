@@ -142,8 +142,12 @@ const QUEUE = { cells: 10, y: 8.95, z: BACKEND_ORIGIN.z }
  * the AOF or the dump. Which is why it is drawn up here beside the loop, off the
  * keyspace plane and off the floor — it belongs to the thread's own bookkeeping,
  * not to the dataset.
+ *
+ * Stood on edge in the gap between the queue and the loop, half-way in z. Laid
+ * flat above the loop it was a lid over it, and the loop is the one thing in this
+ * cage that reads as a sun from above: nothing is allowed to sit on it.
  */
-const CHANNEL = { name: 'news', at: LOOP.clone().add(new THREE.Vector3(0, 1.35, 0)) }
+const CHANNEL = { name: 'news', at: new THREE.Vector3(0, 8.3, 3.5) }
 /**
  * The kernel's readiness set — epoll's registered fds, drawn as one tile per
  * connection on a plate hanging under the loop that consults it. This is the
@@ -1192,7 +1196,7 @@ export class RedisInstance {
      */
     private buildPubSub() {
         const ring = new THREE.Mesh(
-            new THREE.TorusGeometry(0.46, 0.014, 6, 56),
+            new THREE.TorusGeometry(0.4, 0.013, 6, 56),
             new THREE.MeshBasicMaterial({
                 color: PALETTE.violet,
                 transparent: true,
@@ -1201,8 +1205,9 @@ export class RedisInstance {
                 depthWrite: false,
             }),
         )
-        ring.rotation.x = Math.PI / 2
         ring.position.copy(CHANNEL.at)
+        // left in its own plane: a ring standing on edge, facing the front of the
+        // cage, so it is a circle from the house shot and a thin line from above
         this.group.add(ring)
         this.channelRing = ring
 
@@ -1211,18 +1216,22 @@ export class RedisInstance {
         this.group.add(glow)
 
         const lab = label(`CHANNEL · ${CHANNEL.name}`)
-        lab.position.copy(CHANNEL.at).add(new THREE.Vector3(0.58, 0.24, 0))
+        // under the ring, not beside it: to the side it collided with the KEYS
+        // label, which lives further back and lands in the same place from the
+        // house shot
+        lab.position.copy(CHANNEL.at).add(new THREE.Vector3(0, -0.82, 0))
         this.group.add(lab)
 
         const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(1.0, 0.5, 1.0),
+            new THREE.BoxGeometry(0.92, 0.92, 0.42),
             new THREE.MeshBasicMaterial({ visible: false }),
         )
         pick.position.copy(CHANNEL.at)
         this.group.add(pick)
-        // dashed, like every cage that marks a drawing rather than a volume of
-        // bytes: there is no such box in the server, there is a dict entry
-        const cage = new OutlineBox(1.02, 0.46, 1.02, PALETTE.violet, 0.28, {
+        // The cage is the ring's own plane, not the floor's: a vertical ring of
+        // radius 0.4 is a square standing on edge, so the box is tall, wide and
+        // thin — a flat XZ box would draw a lid over a ring that stands up.
+        const cage = new OutlineBox(0.96, 0.96, 0.2, PALETTE.violet, 0.28, {
             dashed: true,
         }).centre(CHANNEL.at.x, CHANNEL.at.y, CHANNEL.at.z)
         this.group.add(cage)
@@ -1870,6 +1879,11 @@ export class RedisInstance {
     /** The sockets a PUBLISH has to reach: every open connection in subscriber mode. */
     subscribers(): RedisPort[] {
         return this.ports.filter((p) => p.active && p.subs)
+    }
+
+    /** Nobody is listening any more: every socket back to an ordinary client. */
+    clearSubscribers() {
+        for (const pod of this.ports) this.setSubscribed(pod, false)
     }
 
     pulsePort(pod: RedisPort) {

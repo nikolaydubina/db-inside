@@ -1,0 +1,79 @@
+import type { StoryStep } from './types'
+
+/**
+ * The write-ahead log. The interesting claim is not "there is a log" but the
+ * ordering rule: the record describing a change reaches durable storage before
+ * the page it changes ever could, and a commit is exactly the wait for that.
+ */
+export const WAL_STORY: StoryStep[] = [
+    {
+        title: 'a log beside the data',
+        body: 'PostgreSQL never writes a changed page straight to disk. Every change is first appended to this run of 16 MB segment blocks — the write-ahead log. If the server dies mid-write, the log is what it replays to rebuild the data files.',
+        subject: (s) => ({ id: 'wal run', box: s.walRun() }),
+        dir: [0.15, 0.6, 1],
+        fov: 30,
+        padding: 1.25,
+        expect: (c) => c.walSegments >= 1,
+        waitFor: 'at least one segment in use',
+    },
+    {
+        title: 'the head moves',
+        body: 'Records are appended at the head, and the head walks along the run as segments fill. Only the tail is active; everything behind it is already written. When the head reaches the end it wraps to the start and writes over the oldest segment — which is why pg_wal never grows without bound.',
+        subject: (s) => s.walHead(),
+        dir: [0.2, 0.5, 1],
+        fov: 26,
+        padding: 6.6,
+        lookShift: [0, -0.5, 0],
+        send: 6,
+        delay: 700,
+        sustain: 4,
+        speed: 4,
+        expect: (c) => c.walSegments >= 3,
+        waitFor: 'the run filling past the third segment',
+    },
+    {
+        title: 'wal_buffers is memory',
+        body: 'The newest records sit in wal_buffers — a small circular strip of shared memory above the head, not on disk. These cubes are a staging area: if the machine loses power now, everything in them is gone. That is why they float.',
+        subject: (s) => ({ id: 'wal_buffers', box: s.walBuffers() }),
+        dir: [0, 0.42, 1],
+        fov: 26,
+        padding: 1.35,
+        lookShift: [0, -0.55, 0],
+        send: 6,
+        delay: 450,
+        speed: 3,
+        expect: (c) => c.walPending > 0,
+        waitFor: 'bytes sitting in the in-memory buffer',
+    },
+    {
+        title: 'commit waits for the flush',
+        body: 'COMMIT does not return when the statement finishes — it returns when the log up to that commit record has been written and fsynced. That fsync is the durability guarantee, and it is also why synchronous commits cost what they do.',
+        subject: (s) => ({ id: 'wal_buffers', box: s.walBuffers() }),
+        dir: [0, 0.42, 1],
+        fov: 26,
+        padding: 1.35,
+        lookShift: [0, -0.55, 0],
+        act: (s) => {
+            void s.flush()
+        },
+        delay: 600,
+        speed: 2,
+        expect: (c) => c.walBytes > 0 && c.walPending === 0,
+        waitFor: 'the buffer tail forced to disk',
+    },
+    {
+        title: 'checkpoint recycles the run',
+        body: 'A checkpoint flushes everything, marks the data files consistent, then recycles the old segments: they are overwritten in place, never moved elsewhere. The run does not grow forever — it comes back around to the start.',
+        subject: (s) => ({ id: 'wal run', box: s.walRun() }),
+        dir: [0.15, 0.6, 1],
+        fov: 30,
+        padding: 1.25,
+        act: (s) => {
+            void s.checkpoint()
+        },
+        delay: 500,
+        speed: 2,
+        expect: (c) => c.walSegments <= 2,
+        waitFor: 'old segments recycled back to the start',
+    },
+]

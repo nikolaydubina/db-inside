@@ -383,9 +383,9 @@
         <button class="tbtn" id="btn-zen" aria-pressed="false" title="zen — hide everything and just look; any tap or key brings it back">
           zen
         </button>
-        <label class="clock" title="clock speed — 1x is the scene's own pace">
+        <label class="clock" title="clock speed — 1x is the scene's own pace, 0x stops it">
           <span class="clock-glyph" aria-hidden="true">⏱</span>
-          <input type="range" id="speed" min="0.25" max="4" step="0.25" value="1" />
+          <input type="range" id="speed" min="0" max="4" step="0.25" value="1" />
           <b id="speed-val" hidden>1x</b>
         </label>
         <span class="flyhint" id="fly-hint" hidden>press esc to stop flying</span>

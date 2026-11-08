@@ -472,8 +472,24 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
     /** How hard the camera is pulled after a target that moved, in 1/s. */
     const FOLLOW_RATE = 3.2
     const followDelta = new THREE.Vector3()
+    /**
+     * A ride: a subject the camera sits a fixed distance from and looks straight
+     * at, for as long as it lasts.
+     *
+     * This is not the pan-follow above. That one keeps the aim point relative to
+     * the camera and only ever translates, which is right for a structure that
+     * drifts a little. A packet crosses the cage in seconds and changes direction
+     * on the way, so the ride eases the camera toward `subject + dir × dist` and
+     * the aim point onto the subject itself — one rule per frame, no tween to
+     * fight, and it settles instead of lagging a fixed fraction behind.
+     */
+    let ride: { target: THREE.Object3D; dir: THREE.Vector3; dist: number } | null = null
+    const rideAt = new THREE.Vector3()
+    const rideWant = new THREE.Vector3()
+    const RIDE_RATE = 6
 
     const apply = (pose: CameraPose) => {
+        ride = null
         camera.position.copy(pose.pos)
         controls.target.copy(pose.target)
         if (Math.abs(camera.fov - pose.fov) > 0.01) {
@@ -565,6 +581,7 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         // A box was measured at this instant, so there is nothing live to hold on
         // to — but a picked OBJECT has a position of its own, so a double-tapped
         // cage can still be dragged afterwards and the camera stays on it.
+        ride = null
         if (target instanceof THREE.Box3) {
             followPoint = null
             followName = null
@@ -604,6 +621,8 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         current = id
         // a drifting auto-orbit would immediately drag the camera off the pose
         beforeNavigate?.()
+        // a named view is not a ride: it aims at a place, not at a moving object
+        ride = null
 
         // from now on the camera holds on to whatever this view is about
         followPoint = () => view.pose().target
@@ -667,12 +686,51 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
          * trails a little and settles, instead of teleporting after every step.
          */
         follow(dt: number) {
+            // A ride moves the camera even while a tween is "in flight" — the ride
+            // cancelled that tween when it was installed, and time may be stopped,
+            // in which case the tween would never finish and the camera would sit
+            // waiting forever.
+            if (ride) {
+                // An object that has left the scene is not a subject any more. Its
+                // world position is then just its cage-local numbers with no cage
+                // around them, which is a point in the middle of the floor — the
+                // camera used to be dragged over to it the instant a packet was
+                // despawned.
+                if (!ride.target.parent) {
+                    ride = null
+                    followName = null
+                    return
+                }
+                ride.target.getWorldPosition(rideAt)
+                rideWant.copy(rideAt).addScaledVector(ride.dir, ride.dist)
+                const k = 1 - Math.exp(-dt * RIDE_RATE)
+                camera.position.lerp(rideWant, k)
+                controls.target.lerp(rideAt, k)
+                controls.update()
+                return
+            }
             if (!followPoint || tweening > 0) return
             followDelta.copy(followPoint()).sub(controls.target)
             if (followDelta.lengthSq() < 1e-8) return
             followDelta.multiplyScalar(1 - Math.exp(-dt * FOLLOW_RATE))
             controls.target.add(followDelta)
             camera.position.add(followDelta)
+        },
+        /** Is a ride framing its subject yet? The story's arrival test. */
+        settled() {
+            if (!ride) return false
+            ride.target.getWorldPosition(rideAt)
+            rideWant.copy(rideAt).addScaledVector(ride.dir, ride.dist)
+            // A ride on something that is moving never sits dead still: it trails
+            // by roughly speed/rate. So "arrived" means framing — inside a margin
+            // that scales with the standoff, with the aim on the subject — not
+            // "motionless at an absolute point", which it would never satisfy and
+            // the panel would sit on "camera → …" for the whole step.
+            const tol = Math.max(0.4, ride.dist * 0.12)
+            return (
+                camera.position.distanceTo(rideWant) < tol &&
+                controls.target.distanceTo(rideAt) < tol
+            )
         },
         /** What the camera is currently holding on to, if anything. */
         following: () => followName,
@@ -704,9 +762,44 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
          * view again re-arms it.
          */
         release() {
+            ride = null
             if (!followPoint && !followName) return
             followPoint = null
             followName = null
+        },
+        /**
+         * Keep the camera on this object as it moves, without moving it now.
+         *
+         * `frame()` measures a box once and then lets go, which is right for a
+         * structure that stands still. A packet does not: it crosses the cage in a
+         * couple of seconds, so a story frames it once and then hands the camera
+         * the OBJECT — the same live follow a dragged cage gets, so the orbit, the
+         * distance and the lens the frame chose are kept and only the position
+         * tracks. Panning the camera by hand from a 200 ms poll instead leaves it
+         * lagging a fixed fraction behind its subject, which reads as jitter.
+         */
+        hold(target: THREE.Object3D | null, shot?: { dir: [number, number, number]; dist: number; fov?: number }) {
+            if (!target || !shot) {
+                ride = null
+                followPoint = null
+                followName = null
+                return
+            }
+            // any tween still aiming the camera is cancelled: from here on the ride
+            // is the only thing writing, so there is nothing to fight
+            nav++
+            tweening = 0
+            followPoint = null
+            ride = {
+                target,
+                dir: new THREE.Vector3(...shot.dir).normalize(),
+                dist: Math.max(1.2, shot.dist),
+            }
+            followName = 'riding'
+            if (shot.fov !== undefined && Math.abs(camera.fov - shot.fov) > 0.01) {
+                camera.fov = shot.fov
+                camera.updateProjectionMatrix()
+            }
         },
         /**
          * Frame a world-space box from a direction. This is how the story aims
@@ -741,6 +834,7 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
 
             current = null
             // the box was measured once, so there is nothing live to follow
+            ride = null
             followPoint = null
             followName = null
             beforeNavigate?.()

@@ -1,0 +1,117 @@
+import type { StoryStep } from './types'
+
+/**
+ * Too many requests: what one connection is, and why six of them do not get
+ * faster when more work arrives.
+ *
+ * The whole story is about backpressure, so every step is measured against the
+ * pool: connections, busy backends, bytes buffered in a backend, bytes stuck in
+ * a socket. Nothing here is a tour of the drawing.
+ */
+export const QUEUE_STORY: StoryStep[] = [
+    {
+        title: 'the setup',
+        body: 'One PostgreSQL instance, one client pressing run, and six connection slots — max_connections = 6. Everything from here happens inside this one server.',
+        view: 'overview',
+        expect: (c) => c.connections <= 1,
+        waitFor: 'pool back down to one connection',
+    },
+    {
+        title: 'one request, one connection',
+        body: 'A tap is sent immediately. The magenta wire is the request, the green one is the answer coming back. One backend picked it up and is executing it; every other slot is idle.',
+        subject: (s) => s.executing(),
+        dir: [0, 0.25, 1],
+        fov: 22,
+        padding: 2.4,
+        lookShift: [0, -0.8, 0],
+        expect: (c) => c.busyBackends === 1,
+        waitFor: 'one statement running, everything else idle',
+        send: 1,
+        delay: 500,
+    },
+    {
+        title: 'more clients connect',
+        body: 'More taps reuse idle connections first, then open new ones. Every port is a separate process with its own memory. Six is as many as this server will accept.',
+        subject: (s) => ({ id: 'all ports', box: s.ports() }),
+        dir: [0, 0.3, 1],
+        fov: 36,
+        padding: 1.3,
+        lookShift: [0, -1.6, 0],
+        expect: (c) => c.connections === c.maxConnections,
+        waitFor: 'all six connection slots open',
+        send: 6,
+        delay: 800,
+        speed: 2,
+    },
+    {
+        title: 'every connection is busy',
+        body: 'All six are executing now. PostgreSQL does not split one connection across cores: a connection runs one statement at a time, in order. Extra requests cannot go faster, only further.',
+        subject: (s) => ({ id: 'all ports', box: s.ports() }),
+        dir: [0, 0.3, 1],
+        fov: 36,
+        padding: 1.3,
+        lookShift: [0, -1.6, 0],
+        expect: (c) => c.busyBackends === c.maxConnections,
+        waitFor: 'a statement running on every connection',
+        send: 5,
+        delay: 800,
+        sustain: 4,
+        speed: 3,
+    },
+    {
+        title: 'waiting in the input buffer',
+        body: 'Each backend reads ahead into a buffer in its own process memory — the violet cells. Those requests have already arrived and are queued there. That is private heap, not shared_buffers, and no other backend can see it.',
+        // the busiest connection: the one with the most cells actually lit
+        subject: (s) => s.executing(),
+        dir: [0, 0.25, 1],
+        fov: 22,
+        padding: 2.4,
+        lookShift: [0, -0.8, 0],
+        expect: (c) => c.buffered >= 2,
+        waitFor: 'requests waiting in input buffers',
+        send: 4,
+        delay: 800,
+        sustain: 4,
+        speed: 3,
+    },
+    {
+        title: 'buffer full — backpressure',
+        body: 'When a buffer is full the backend simply stops reading the socket. TCP pushes back, the client\u2019s send() blocks, and the requests pile up as bytes on the wire. Nothing is dropped: there is no server-side queue to overflow.',
+        subject: (s) => s.executing(),
+        dir: [0, 0.25, 1],
+        fov: 22,
+        padding: 2.4,
+        lookShift: [0, -0.8, 0],
+        expect: (c) => c.queued >= 1,
+        waitFor: 'bytes blocked in a socket',
+        // capacity across the pool is 6 connections × 2 buffered cells, so this
+        // has to overshoot it for bytes to actually spill into the sockets
+        send: 16,
+        delay: 800,
+        sustain: 5,
+        speed: 3,
+    },
+    {
+        title: 'throughput plateaus',
+        body: 'More taps no longer buy more throughput. Six connections at one statement each is the ceiling, so RPS goes flat while latency climbs. The queue you feel is the wait.',
+        view: 'overview',
+        expect: (c) => c.busyBackends === c.maxConnections && c.queued > 0,
+        waitFor: 'every connection at its ceiling, with a backlog',
+        send: 4,
+        delay: 800,
+        sustain: 5,
+        speed: 3,
+    },
+    {
+        title: 'and it drains',
+        body: 'As each statement finishes, that backend pulls the next bytes out of its buffer — the stack empties from the bottom up. Nothing was ever lost, it was only delayed.',
+        subject: (s) => ({ id: 'all ports', box: s.ports() }),
+        dir: [0, 0.3, 1],
+        fov: 36,
+        padding: 1.3,
+        lookShift: [0, -1.6, 0],
+        expect: (c) => c.queued === 0,
+        waitFor: 'the socket backlog to clear',
+        speed: 4,
+    },
+]

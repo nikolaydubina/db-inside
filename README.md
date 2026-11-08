@@ -90,6 +90,18 @@ tail, that no block is in both files, that each cage equals its file's footprint
 block survives a rewrite, and that no drawn block is black. `?debug` runs the same check after
 every layout, save, load and rewrite and throws on the first broken statement.
 
+The clock slides all the way to zero, and zero is a real setting: the simulation stops, so every
+coordinate in the scene holds still and can be read and asserted. The camera keeps working — its
+follow is driven by real time, not by the simulation clock — so a frozen packet still gets framed.
+
+```js
+__clock.stop()              // freeze; __clock.resume(), __clock.set(0.25), __clock.speed
+__ride()                    // what the camera is riding: packet id, packet, camera, aim, gap
+```
+
+`__ride()` is how the pub/sub story's follow is checked: with time stopped, the camera should settle
+at `aim == packet` and `gap == the shot's dist`, and any drift shows up as a number.
+
 ## Stack
 
 TypeScript + [three.js](https://threejs.org) + Vite, with an `EffectComposer` bloom pass, PCF shadows,
