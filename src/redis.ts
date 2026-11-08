@@ -67,11 +67,12 @@ const AOF_C0 = 22
 /** Blocks the log occupies at boot — it has been running and has not been rewritten yet. */
 const AOF_SEED = 13
 /**
- * Where a rewrite builds its new file: free floor immediately in front of where
- * the log starts, so the two files are visibly side by side and the swap is a
- * change of which one is the log.
+ * Where a rewrite builds its new file: the row in front of the log, opposite the
+ * blocks those writes will end up in. Close enough that the swap is a one-row
+ * move you can follow, and far enough that the log's own growth never lands on
+ * it (row 14 is 74 blocks away in the growth order).
  */
-const STAGING_C0 = AOF_C0 - 10
+const STAGING_ROW = AOF_ROW - 2
 const RDB = { c0: 4, c1: 13, r0: 2, r1: 8 }
 
 /**
@@ -81,6 +82,22 @@ const RDB = { c0: 4, c1: 13, r0: 2, r1: 8 }
  */
 const RDB_BLOCK_TIME = 0.035
 const AOF_RECORD_TIME = 0.055
+
+/**
+ * Invariant checking for the two files on this floor.
+ *
+ * Off by default — it walks the whole block field — and on when the page is
+ * opened with `?debug`, or when the console sets `__redis.check()` on demand.
+ * With it on, every structural change re-checks that the drawn blocks are
+ * exactly the blocks the file state says, and throws if they are not: a scene
+ * that draws a file it does not have is the bug that is hardest to see by eye.
+ */
+export let checkInvariants =
+    typeof location !== 'undefined' && new URLSearchParams(location.search).has('debug')
+
+export function setInvariantChecks(on: boolean) {
+    checkInvariants = on
+}
 
 /** The keyspace: a bucket array, and the entries it points at, both floating. */
 const DICT = { cols: 32, rows: 7, y: 3.9, cz: -2.2 }
@@ -241,6 +258,8 @@ export class RedisInstance {
     aofFull = false
     private aofEdge!: OutlineBox
     private aofPick!: THREE.Mesh
+    /** the "this is a new file" tag over the staging area, shown only while rewriting */
+    private stagingLab!: THREE.Object3D
 
     /** The base file's blocks in the order the encoder writes them. */
     private rdbOrder: number[] = []
@@ -272,6 +291,9 @@ export class RedisInstance {
     private aofBufMats: THREE.MeshStandardMaterial[] = []
     /** bytes sitting in aof_buf, as a fraction of the strip */
     private aofBuffered = 0
+    /** records in aof_buf that have not reached the file yet */
+    private aofPending = 0
+    private aofPendingBytes = 0
 
     private queueCells: THREE.Mesh[] = []
     private queueMats: THREE.MeshStandardMaterial[] = []
@@ -528,6 +550,16 @@ export class RedisInstance {
         // Now that the outline and the pick volume exist, draw the blocks the
         // file has reached: layoutAof() fits both to the file.
         this.layoutAof()
+
+        // The rewrite writes a *different* file, so it needs somewhere to write
+        // that the parent is not appending to. That floor is marked while it is
+        // in use, and only while it is in use — an empty area labelled "new file"
+        // would be a permanent claim about nothing.
+        const stagingLab = label('AOF REWRITE · new file')
+        stagingLab.position.set(xAt(AOF_C0) + 0.2, 1.1, zAt(STAGING_ROW) - 0.45)
+        stagingLab.visible = false
+        this.group.add(stagingLab)
+        this.stagingLab = stagingLab
 
         // The base file gets the same treatment as the log: an extent outline, so
         // the file is a thing you can point at and read about rather than a patch
@@ -1359,16 +1391,43 @@ export class RedisInstance {
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
         this.fitAofEdge()
+        this.assertInvariants('layoutAof')
     }
 
     /**
-     * Append one write: the log gains a block, and that block pulses once.
+     * A command's bytes go into aof_buf in memory. Nothing touches the file yet.
      *
-     * Returns where the record landed, or null when the floor is full — a log
-     * that cannot grow has nowhere to put the bytes, and that is a write error,
-     * not a silent loss.
+     * This is the point of the buffer: with `appendfsync everysec` redis does not
+     * write (let alone fsync) per command — it copies into the buffer and lets the
+     * periodic flush carry everything to the file at once. So the bytes on this
+     * strip are exactly the ones a crash would lose.
      */
-    appendAof(bytes: number): THREE.Vector3 | null {
+    bufferAof(bytes: number) {
+        this.aofPending++
+        this.aofPendingBytes += bytes
+        this.aofBuffered = Math.min(1, this.aofBuffered + bytes / BLOCK_BYTES)
+        const mat = this.aofBufMats[this.bufferCubeIndex()]
+        if (mat) {
+            void this.ticker.add(0.5, (k) => {
+                mat.emissiveIntensity = 1.3 - 0.8 * k
+            })
+        }
+    }
+
+    /** Records currently sitting in aof_buf, i.e. not durable yet. */
+    get aofPendingRecords() {
+        return this.aofPending
+    }
+
+    /**
+     * Write one buffered record into the file: the log gains a block, and that
+     * block pulses once.
+     *
+     * Returns where it landed, or null when the floor is full — a log that cannot
+     * grow has nowhere to put the bytes, and that is a write error, not a silent
+     * loss.
+     */
+    private writeAofBlock(bytes: number): THREE.Vector3 | null {
         // the record goes after the last byte of the file, so at most it starts a
         // new block; it never rewrites one that is already there
         if (this.aofHead >= this.aofOrder.length - 1) {
@@ -1382,22 +1441,13 @@ export class RedisInstance {
         const i = this.aofOrder[this.aofHead]
         const block = this.aofBlockPos(this.aofHead)
 
-        // One pulse per append, on the one block that changed — the same pulse an
-        // edited page gets on the postgres disk. No frame, no standing second
-        // colour: after ~0.4 s it is an ordinary block again.
+        // One pulse per block written, on the one block that changed — the same
+        // pulse an edited page gets on the postgres disk. No frame, no standing
+        // second colour: after ~0.4 s it is an ordinary block again.
         this.diskBoost.set(i, 1)
         this.disk.setColorAt(i, this.tmpColor.setHex(PALETTE.amber))
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
         this.markBlockTop(block)
-
-        // the bytes are in aof_buf until the next flush, not on the device yet
-        this.aofBuffered = Math.min(1, this.aofBuffered + bytes / BLOCK_BYTES)
-        const mat = this.aofBufMats[this.bufferCubeIndex()]
-        if (mat) {
-            void this.ticker.add(0.5, (k) => {
-                mat.emissiveIntensity = 1.3 - 0.8 * k
-            })
-        }
 
         return block.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
     }
@@ -1492,19 +1542,34 @@ export class RedisInstance {
     }
 
     /**
-     * appendfsync: everything in aof_buf is written out and flushed. With the
-     * default `everysec` this runs once a second, which is exactly the durability
-     * window — a crash can lose the last second of acknowledged writes and not
-     * one byte more. `always` would drain on every command, `no` would leave the
-     * dirty pages to the kernel.
+     * appendfsync: everything in aof_buf is written to the file and fsynced.
+     *
+     * With the default `everysec` this runs once a second, and that interval IS
+     * the durability window — a crash can lose the last second of acknowledged
+     * writes and not one byte more. `always` would drain on every command (no
+     * window, but an fsync per write); `no` would leave the pages to the kernel
+     * (a window nobody controls).
      *
      * The buffer is a staging area, not a queue that can overflow: what it holds
      * is copied into the file and then reused. Nothing is discarded by a flush.
      */
-    flushAofBuffer() {
-        if (this.aofBuffered <= 0) return
+    flushAofBuffer(): { head: THREE.Vector3; records: number } | null {
+        const records = this.aofPending
+        const bytes = this.aofPendingBytes
+        if (records === 0) return null
+
+        this.aofPending = 0
+        this.aofPendingBytes = 0
         this.aofBuffered = 0
+
+        // one block per buffered record: this file is a stream of commands, and a
+        // 4 kB block holds a whole number of them, never a fraction
+        let head: THREE.Vector3 | null = null
+        for (let i = 0; i < records; i++) {
+            head = this.writeAofBlock(bytes / records) ?? head
+        }
         this.pulseBuffered()
+        return head ? { head, records } : null
     }
 
     /** A single lift of the strip as it empties: "these bytes just became durable". */
@@ -1703,6 +1768,7 @@ export class RedisInstance {
         this.saves++
         this.pulseAgent(this.bgsaveDrone)
         this.savingRdb = false
+        this.assertInvariants('bgsave')
     }
 
     /**
@@ -1764,6 +1830,7 @@ export class RedisInstance {
         while (restored < tail.length) this.reviveKey(tail[restored++])
 
         this.loading = false
+        this.assertInvariants('load')
     }
 
     /** Nothing is in memory yet: a process that has not loaded has no data. */
@@ -1843,6 +1910,7 @@ export class RedisInstance {
 
         // 2. it drops to the staging area — free floor in front of the log, not
         //    the log itself — and writes the new file there, block by block
+        this.stagingLab.visible = true
         this.rewriteAim.copy(this.stagingSlot(0)).setY(1.4)
         await this.ticker.wait(0.45)
         let staged = 0
@@ -1856,36 +1924,84 @@ export class RedisInstance {
             this.rewriteAim.copy(this.stagingSlot(upto - 1)).setY(1.4)
         })
 
-        // 3. swap: the new file takes the log's place and the old one is unlinked.
-        //    Nothing was read back out of the old file to do this, and nothing
-        //    moved into memory: the data came from RAM and went to disk.
+        // 3. swap: rename(2). The blocks of the new file move into the log's own
+        //    places and the history past them is unlinked — so what disappears is
+        //    the OLD records, not the new ones. Nothing was read back out of the
+        //    old file to do this, and nothing moved into memory: the data came
+        //    from RAM and went to disk.
+        const smooth = (t: number) => t * t * (3 - 2 * t)
+        await this.ticker.add(0.5, (k) => {
+            for (let j = 0; j < staged; j++) {
+                // staggered so the file arrives as a run, not as one slab
+                const t = smooth(Math.max(0, Math.min(1, k * 1.5 - j * 0.05)))
+                const pos = this.stagingSlot(j).lerp(this.aofBlockPos(j), t)
+                this.placeDiskBlock(this.stagingId(j), pos, true)
+            }
+            this.rewriteAim.copy(this.aofBlockPos(Math.min(staged - 1, target - 1))).setY(1.4)
+        })
+
+        // the length the new file leaves the log with — writes that landed during
+        // the rewrite are already in it, which is why this is a subtraction and
+        // not the target itself
+        const newHead = Math.max(target, this.aofHead - (oldHead - target))
+
+        // 4. the records past the new length are unlinked. They fade instead of
+        //    blinking out, because "this history is gone" is the actual event, and
+        //    a frame where blocks simply stop existing reads as a rendering bug.
+        if (oldHead > newHead) {
+            await this.ticker.add(0.32, (k) => {
+                const sc = Math.max(0.001, 1 - k)
+                for (let j = newHead + 1; j <= oldHead; j++) {
+                    const id = this.aofOrder[j]
+                    if (id === undefined) continue
+                    this.tmpObj.position.copy(this.aofBlockPos(j))
+                    this.tmpObj.scale.set(sc, sc, sc)
+                    this.tmpObj.updateMatrix()
+                    this.disk.setMatrixAt(id, this.tmpObj.matrix)
+                }
+                this.disk.instanceMatrix.needsUpdate = true
+            })
+        }
+
         for (let j = 0; j < staged; j++) this.setStaged(j, false)
+        this.stagingLab.visible = false
         this.rewrites++
-        this.aofHead = Math.max(target, this.aofHead - (oldHead - target))
+        this.aofHead = newHead
         this.aofBytes = Math.round(this.aofBytes * 0.25)
         this.aofFull = false
         this.layoutAof()
+        this.trace(`rewrite swap · head ${oldHead} → ${this.aofHead}, ${staged} blocks became the file`)
         this.markBlockTop(this.aofBlockPos(this.aofHead))
         this.pulseAgent(this.rewriteDrone)
         this.rewriting = false
+        this.assertInvariants('bgrewriteaof')
     }
 
     /**
-     * Free floor in front of the log, where a rewrite builds its new file.
+     * Where a rewrite builds its new file: the row in front of the log, directly
+     * opposite the blocks those writes will become.
      *
-     * It is a *different* file, so it does not go on top of the one it replaces:
+     * It is a *different* file, so it does not go on top of the one it replaces —
      * the child needs somewhere to write that the parent is not appending to, and
-     * only the rename at the end makes the two the same file.
+     * only the rename makes the two the same file. One row of separation keeps the
+     * swap a short move you can follow instead of a jump across the floor.
      */
     private stagingSlot(k: number): THREE.Vector3 {
-        return new THREE.Vector3(xAt(STAGING_C0 + k), PAGE_Y, zAt(AOF_ROW))
+        return new THREE.Vector3(xAt(AOF_C0 + k), PAGE_Y, zAt(STAGING_ROW))
     }
 
     /** Draw or erase one block of the file being staged. */
     private setStaged(k: number, on: boolean) {
-        const col = STAGING_C0 + k
-        const id = AOF_ROW * COLS + col
-        this.tmpObj.position.set(xAt(col), PAGE_Y, zAt(AOF_ROW))
+        this.placeDiskBlock(this.stagingId(k), this.stagingSlot(k), on)
+    }
+
+    private stagingId(k: number) {
+        return STAGING_ROW * COLS + AOF_C0 + k
+    }
+
+    /** Draw or erase one instance of the block field at an explicit position. */
+    private placeDiskBlock(id: number, pos: THREE.Vector3, on: boolean) {
+        this.tmpObj.position.copy(pos)
         const s = on ? 1 : 0.001
         this.tmpObj.scale.set(s, s, s)
         this.tmpObj.updateMatrix()
@@ -1896,6 +2012,113 @@ export class RedisInstance {
         )
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+    }
+
+    /* ------------------------------- invariants ------------------------------ */
+
+    /**
+     * Check the picture against the numbers.
+     *
+     * The floor is one instanced mesh with no idea what is in it, and the files
+     * are a handful of indices. If the two ever disagree, the scene draws a file
+     * that does not exist — and by eye that looks like "blocks appeared and then
+     * vanished" rather than like a bug. Each check below is a statement that has
+     * to hold; the returned strings name the ones that do not.
+     */
+    verify(): string[] {
+        const bad: string[] = []
+        const s = this.disk.instanceMatrix.array
+        /** instance scale (the matrices here are uniform scale + translation) */
+        const scale = (id: number) => s[id * 16 + 5]
+        const pos = (id: number) =>
+            new THREE.Vector3(s[id * 16 + 12], s[id * 16 + 13], s[id * 16 + 14])
+
+        const aofDrawn = new Set<number>()
+        // 1. the log is exactly the blocks the file has reached
+        for (let k = 0; k <= this.aofHead; k++) {
+            const id = this.aofOrder[k]
+            if (id === undefined) {
+                bad.push(`log block ${k} has no floor slot`)
+                continue
+            }
+            if (Math.abs(scale(id) - 1) > 2e-3) {
+                bad.push(`log block ${k} (id ${id}) should be drawn, scale is ${scale(id).toFixed(3)}`)
+            }
+            const want = this.aofBlockPos(k)
+            if (pos(id).distanceTo(want) > 1e-3) {
+                bad.push(`log block ${k} sits at ${pos(id).toArray().map((n) => n.toFixed(2))}, expected ${want.toArray().map((n) => n.toFixed(2))}`)
+            }
+            aofDrawn.add(id)
+        }
+        // 2. the floor just past the end of the file is empty
+        for (let k = this.aofHead + 1; k <= Math.min(this.aofHead + 4, this.aofOrder.length - 1); k++) {
+            const id = this.aofOrder[k]
+            if (scale(id) > 1e-2) bad.push(`log block ${k} is drawn, but the file ends at ${this.aofHead}`)
+        }
+        // 3. the base file is exactly its blocks, the last one partial
+        for (let k = 0; k < this.rdbLen; k++) {
+            const id = this.rdbOrder[k]
+            if (scale(id) < 0.1) bad.push(`base block ${k} (id ${id}) is missing`)
+        }
+        for (let k = this.rdbLen; k < Math.min(this.rdbLen + 3, this.rdbOrder.length); k++) {
+            const id = this.rdbOrder[k]
+            if (scale(id) > 1e-2) bad.push(`base block ${k} is drawn, but the file ends at ${this.rdbLen - 1}`)
+        }
+        // 4. the two files never share a block
+        for (let k = 0; k < this.rdbLen; k++) {
+            if (aofDrawn.has(this.rdbOrder[k])) bad.push(`block ${k} of the base file is also in the log`)
+        }
+        // 5. the log's cage is the log's footprint
+        if (this.aofHead >= 0 && this.aofOrder.length > 0) {
+            let minC = COLS
+            let maxC = -1
+            let minR = ROWS
+            let maxR = -1
+            for (let k = 0; k <= this.aofHead; k++) {
+                const id = this.aofOrder[k]
+                if (id === undefined) continue
+                const c = id % COLS
+                const r = Math.floor(id / COLS)
+                minC = Math.min(minC, c)
+                maxC = Math.max(maxC, c)
+                minR = Math.min(minR, r)
+                maxR = Math.max(maxR, r)
+            }
+            const wantW = (maxC - minC + 1) * PITCH
+            const wantD = (maxR - minR + 1) * PITCH
+            if (Math.abs(this.aofEdge.w - wantW) > 1e-3) {
+                bad.push(`log cage width ${this.aofEdge.w.toFixed(2)} ≠ the file's ${wantW.toFixed(2)}`)
+            }
+            if (Math.abs(this.aofEdge.d - wantD) > 1e-3) {
+                bad.push(`log cage depth ${this.aofEdge.d.toFixed(2)} ≠ the file's ${wantD.toFixed(2)}`)
+            }
+        }
+        // 6. nothing is left staged. During a rewrite the staged blocks are the
+        //    point; after one, any of them still drawn belong to no file, and that
+        //    is exactly what reads as "blocks appeared and then vanished".
+        if (!this.rewriting) {
+            for (let k = 0; k < 16; k++) {
+                if (scale(this.stagingId(k)) > 1e-2) {
+                    bad.push(`staging block ${k} is still drawn after the rewrite finished`)
+                }
+            }
+        }
+        return bad
+    }
+
+    /** Throw loudly in development, print in production — never silently. */
+    private assertInvariants(where: string) {
+        if (!checkInvariants) return
+        const bad = this.verify()
+        if (bad.length === 0) return
+        const msg = `[redis] invariants broken after ${where}:\n  ${bad.join('\n  ')}`
+        console.error(msg)
+        throw new Error(msg)
+    }
+
+    /** A trace line for the rewrite, only when invariants are being checked. */
+    private trace(msg: string) {
+        if (checkInvariants) console.log(`[redis] ${msg}`)
     }
 
     /* --------------------------------- agents -------------------------------- */

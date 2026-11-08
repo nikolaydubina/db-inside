@@ -58,7 +58,12 @@ const markRedis = axes.mark('redis', new THREE.Vector3(-36, 0, 0))
 
   // handy for debugging in the browser console
   ; (window as unknown as Record<string, unknown>).__psql = { scene, world, instance, sim, paths, flows }
-  ; (window as unknown as Record<string, unknown>).__redis = { redis, redisSim }
+  ; (window as unknown as Record<string, unknown>).__redis = {
+    redis,
+    redisSim,
+    // ask the floor to prove it matches the files: returns [] when it does
+    check: () => redis.verify(),
+  }
   ; (window as unknown as Record<string, unknown>).__axes = axes
 if (new URLSearchParams(location.search).has('axes')) axes.on()
 console.info(

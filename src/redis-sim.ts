@@ -305,21 +305,13 @@ export class RedisSim {
                     { speed: 0.9, opacity: 0.4 },
                 )
                 await this.ticker.wait(0.14)
-                const head = this.redis.appendAof(bytes)
-                if (head) {
-                    const toFile = new QueryChain(cage)
-                    toFile.addCurve(
-                        pathCurve([
-                            bufTop.clone(),
-                            bufTop.clone().add(new THREE.Vector3(0.4, -0.5, 0.6)),
-                            head.clone(),
-                        ]),
-                        PALETTE.amber,
-                        { speed: 1.1, opacity: 0.55 },
-                    )
-                    toFile.fadeOut(this.ticker, 0.6)
-                    this.note = `${cmd.name} · ${bytes} B appended in block ${this.redis.aofUsed}`
-                }
+                // The command stops HERE. Its bytes are in aof_buf, in memory, and
+                // the file has not been touched: with appendfsync everysec the
+                // write happens on the periodic flush, up to a second later. That
+                // gap is the durability window, so the reply has to be seen as
+                // "buffered", not "persisted".
+                this.redis.bufferAof(bytes)
+                this.note = `${cmd.name} · ${bytes} B into aof_buf — durable at the next fsync`
                 toBuf.fadeOut(this.ticker, 0.6)
             } else {
                 this.redis.markKey(key, PALETTE.ice)
@@ -505,11 +497,30 @@ export class RedisSim {
         // the expire cycle is a background chore, not a command
         if (!this.loading) this.expireCycle()
 
-        // appendfsync everysec: whatever is in aof_buf goes to the file
+        // appendfsync everysec: whatever is in aof_buf is written to the file and
+        // fsynced. This is the only moment redis touches the disk for a write —
+        // the leg from the buffer down to the block is drawn here, not on the
+        // command, because on the command it would be a lie.
         this.fsyncTimer -= dt
         if (this.fsyncTimer <= 0) {
             this.fsyncTimer = 1
-            this.redis.flushAofBuffer()
+            const flushed = this.redis.flushAofBuffer()
+            if (flushed) {
+                const cage = this.redis.group
+                const leg = new QueryChain(cage)
+                const from = this.redis.aofBufferTop()
+                leg.addCurve(
+                    pathCurve([
+                        from.clone(),
+                        from.clone().add(new THREE.Vector3(0.4, -0.5, 0.6)),
+                        flushed.head.clone(),
+                    ]),
+                    PALETTE.amber,
+                    { speed: 1.1, opacity: 0.55 },
+                )
+                leg.fadeOut(this.ticker, 0.6)
+                this.note = `appendfsync · ${flushed.records} record${flushed.records > 1 ? 's' : ''} written and fsynced`
+            }
         }
 
         if (this.ambient && !this.loading) {
