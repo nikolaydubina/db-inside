@@ -155,7 +155,6 @@ export class EngineSim {
   private clock = 0
   private scanning = false
   private chains: QueryChain[] = []
-  private walHeadSeen = -1
 
   constructor(
     private inst: PostgresInstance,
@@ -233,15 +232,6 @@ export class EngineSim {
     ])
   }
 
-  private readonly walBufferArc = (target: THREE.Vector3) =>
-    pathCurve([
-      ANCHOR.exec.clone(),
-      new THREE.Vector3(3.8, 6.7, -1.4),
-      new THREE.Vector3(6.9, 5.7, -0.3),
-      target.clone().add(new THREE.Vector3(0, 1.5, 0)),
-      target,
-    ])
-
   /** wal_buffers → the segment head: the write + fsync a commit waits on. */
   private readonly walFlushArc = (from: THREE.Vector3, head: THREE.Vector3) =>
     pathCurve([
@@ -250,14 +240,6 @@ export class EngineSim {
       head.clone().add(new THREE.Vector3(0, 1.15, 0)),
       head,
     ])
-
-  /** Re-aim the ambient executor→WAL arrow whenever the write head advances. */
-  private syncWalArrow() {
-    const head = this.inst.walHeadIndex
-    if (head === this.walHeadSeen) return
-    this.walHeadSeen = head
-    this.flows.execToWal.repoint(this.walBufferArc(this.inst.walBufferTop()).getPoints(28))
-  }
 
   /**
    * Requests held by TCP backpressure. Not a queue postgres keeps — these bytes
@@ -468,8 +450,8 @@ export class EngineSim {
       if (writes) {
         const walBytesFor = kind === 'insert' ? 384 : 320
         const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
-        walPack.position.copy(ANCHOR.exec)
-        void travel(this.ticker, walPack, this.walBufferArc(this.inst.walBufferTop()), 0.4).then(() => {
+        walPack.position.copy(this.paths.ambient.execToWal.points(1)[0])
+        void travel(this.ticker, walPack, this.paths.ambient.execToWal.curve(), 0.4).then(() => {
           this.inst.appendWal(0.3)
           this.walBytes += walBytesFor
           this.bufferedBytes += walBytesFor
@@ -792,8 +774,10 @@ export class EngineSim {
   }
 
   update(dt: number) {
-    // the write head advances as the log fills — keep the arrow on it
-    this.syncWalArrow()
+    // Ambient paths hold the parts at their ends, not the numbers those parts
+    // had at boot: following them here is all it takes to stay attached while
+    // the executor bobs and the buffer strip drifts with the write head.
+    for (const [line, path] of this.flows.live) line.follow(path)
     for (const f of this.flows.all) f.update(dt)
 
     // per-query paths: animate, then drop the finished ones

@@ -36,7 +36,7 @@ const bufferLabel = label('SHARED BUFFERS')
 bufferLabel.position.copy(instance.bufferCorners.farLeft).add(new THREE.Vector3(-0.02, 0.34, -0.06))
 instance.group.add(bufferLabel)
 
-const paths = makePaths()
+const paths = makePaths(instance)
 // both instances own their own traffic: paths and packets are parented to the
 // cage, so moving a cage takes them with it
 const flows = makeFlows(instance.group, paths)

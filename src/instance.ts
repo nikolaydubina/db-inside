@@ -15,6 +15,7 @@ import {
   rand,
   randInt,
 } from './util'
+import type { PathEnd } from './flow'
 
 export const PALETTE = {
   cyan: 0x35e0ff,
@@ -2139,10 +2140,51 @@ export class PostgresInstance {
   /** Top face of the wal_buffers cube being written — where an append lands. */
   walBufferTop(): THREE.Vector3 {
     const m = this.walBufBlocks[this.bufferCubeIndex()]
-    if (!m) return this.walHeadTop()
-    const v = new THREE.Vector3()
-    m.getWorldPosition(v)
-    return v.setY(v.y + PAGE_GRID.bh * 0.7)
+    if (!m || !this.walBufGroup) return this.walHeadTop()
+    // CAGE-LOCAL, like every other point the paths are built from: the flows are
+    // parented to the cage, so a world coordinate here would send the arrow out
+    // of the instance the moment the cage is not sitting on the world origin.
+    // (It looked fine only while the cage happened to be at 0,0,0.)
+    return new THREE.Vector3(
+      this.walBufGroup.position.x + m.position.x,
+      this.walBufGroup.position.y + m.position.y + PAGE_GRID.bh * 0.7,
+      this.walBufGroup.position.z,
+    )
+  }
+
+  /**
+   * Where a named part of this instance is RIGHT NOW, in cage-local units.
+   *
+   * Paths ask this instead of remembering coordinates. Everything they point at
+   * moves: the pipeline nodes drift on their own axes, the WAL head advances as
+   * the log fills, wal_buffers drifts along with it. A curve built once from the
+   * numbers these things had at boot detaches from them the moment they move —
+   * which is exactly how the executor→wal_buffers arrow ended up outside the
+   * cage. Attach the path to the part, and let the part say where it is.
+   */
+  pathEnd(name: PathEnd): THREE.Vector3 {
+    switch (name) {
+      case 'parse':
+        return this.nodes.parse.group.position.clone()
+      case 'plan':
+        return this.nodes.plan.group.position.clone()
+      case 'exec':
+        return this.nodes.exec.group.position.clone()
+      case 'walBuf':
+        return this.walBufferTop()
+      case 'walHead':
+        return this.walHeadTop()
+      case 'buffer':
+        return new THREE.Vector3(bufferSlotX(6), BUFFER_TOP_Y, bufferSlotZ(3))
+      case 'heap':
+        return new THREE.Vector3(ANCHOR.heap.x, PAGE_TOP_Y + 0.3, ANCHOR.heap.z)
+      case 'index':
+        return ANCHOR.index.clone()
+      case 'gin':
+        return ANCHOR.gin.clone()
+      case 'disk':
+        return new THREE.Vector3(ANCHOR.disk.x, PAGE_TOP_Y, ANCHOR.disk.z)
+    }
   }
 
   /**
