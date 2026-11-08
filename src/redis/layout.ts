@@ -115,12 +115,16 @@ export function setInvariantChecks(on: boolean) {
     checkInvariants = on
 }
 
-/** The keyspace: a bucket array, and the entries it points at, both floating. */
-export const DICT = { cols: 32, rows: 7, y: 3.9, cz: -2.2 }
 /**
- * Bucket counts the floor can draw. Real dicts double forever; this lattice holds
- * 224 tiles, so the demonstration stops at 128 and says so in the card rather
- * than silently refusing to grow.
+ * The dict's two tables, side by side. Each half is 16 × 8 tiles and holds up
+ * to 128 buckets, so the table shapes are real rectangles: 32 buckets = 16×2,
+ * 64 = 16×4, 128 = 16×8. A tile is one BUCKET (one pointer), not a disk block.
+ */
+export const DICT = { cols: 32, rows: 8, tableCols: 16, y: 3.9, cz: -2.2 }
+/**
+ * Bucket counts the floor can draw. Each table half holds 128 tiles, so the
+ * demonstration stops at 128 and says so in the card rather than silently
+ * refusing to grow.
  */
 export const HASH_SIZES = [32, 64, 128] as const
 export const HASH_MAX = HASH_SIZES[HASH_SIZES.length - 1]
