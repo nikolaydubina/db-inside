@@ -123,6 +123,12 @@ export const BACKEND_ORIGIN = { y: 9.88, z: 5.8 }
 const INBUF_PITCH = 0.52
 /** local y of the oldest cell — the head of the buffer, about to be executed */
 const INBUF_BOTTOM = -1.86
+/**
+ * The size of one buffered request. One definition, because the flow in and out
+ * of the buffer attaches to a cell's faces, not to a position under the cage:
+ * change the cube and the route still leaves from the right place.
+ */
+const INBUF_CELL = { w: 0.22, h: 0.16, d: 0.22 }
 
 export interface BackendPod {
   id: number
@@ -1704,7 +1710,7 @@ export class PostgresInstance {
     const pickGeo = new THREE.BoxGeometry(0.9, 0.5, 0.9)
     // one buffered request: small, because it stands for a queued statement, not
     // for 8 kB of buffer that may or may not be in use
-    const cellGeo = new THREE.BoxGeometry(0.22, 0.16, 0.22)
+    const cellGeo = new THREE.BoxGeometry(INBUF_CELL.w, INBUF_CELL.h, INBUF_CELL.d)
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
@@ -1883,17 +1889,39 @@ export class PostgresInstance {
   }
 
   /**
-   * Where a backend's work leaves its input buffer: below the last cell.
-   * The internal pipeline line starts here, so the flow is continuous — client
-   * wire, port, buffer, then into the machine.
+   * Where a backend's work leaves its input buffer: the BOTTOM FACE OF THE BLOCK
+   * IT IS EXECUTING — cell 0, the oldest request, the one at the bottom of the
+   * shaft.
+   *
+   * Not a point under the cage. This route is the claim "this request goes to the
+   * parser", so it has to start at the block that holds the request. A fixed
+   * anchor below the buffer described a statement that is nowhere in the drawing,
+   * and a line that begins under a stack of three cubes is a line from no cube in
+   * particular.
    */
   backendBufferExit(pod: BackendPod) {
-    return pod.group.position.clone().add(new THREE.Vector3(0, INBUF_BOTTOM - 0.55, 0))
+    const head = pod.cells[0]
+    const out = pod.group.position.clone().add(head.position)
+    // off the bottom face, so the line does not start inside the block
+    out.y -= INBUF_CELL.h / 2
+    return out
   }
 
-  /** The top cell of a backend's input buffer — where new bytes drop in. */
-  backendBufferEntry(pod: BackendPod) {
-    return pod.group.position.clone().add(new THREE.Vector3(0, INBUF_BOTTOM + (INBUF_CELLS - 1) * INBUF_PITCH, 0))
+  /**
+   * Where a request lands in a backend's input buffer: the TOP FACE of the block
+   * it will occupy, `queued` cells above the one being executed.
+   *
+   * The buffer fills from the bottom, so the cube is not a free choice: an idle
+   * connection takes cell 0, and a busy one takes the cell above the requests
+   * already stacked behind the head. The old fixed point at the top of the cage
+   * drew the bytes landing on a cube that was not the one they fill.
+   */
+  backendBufferEntry(pod: BackendPod, queued: number) {
+    const cell = pod.cells[Math.min(INBUF_CELLS - 1, Math.max(0, queued))]
+    const out = pod.group.position.clone().add(cell.position)
+    // onto the top face, so the packet lands on the cube rather than in it
+    out.y += INBUF_CELL.h / 2
+    return out
   }
 
   get activeBackendCount() {

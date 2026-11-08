@@ -365,8 +365,12 @@ export class EngineSim {
   }
 
   private admit(pod: BackendPod, packet: THREE.Group) {
-    // the bytes drop down the shaft into the buffer, then execute in order
-    const entry = this.inst.backendBufferEntry(pod)
+    // the bytes drop down the shaft into the buffer, then execute in order. The
+    // cube they fill is not a guess: an idle connection takes cell 0 and starts
+    // executing it, a busy one takes the cell above whatever is already stacked
+    // behind its head — this is the only place that counts those
+    const queued = this.running.has(pod.id) ? pod.inbuf + 1 : 0
+    const entry = this.inst.backendBufferEntry(pod, queued)
     void travel(this.ticker, packet, pathCurve([packet.position.clone(), entry]), 0.2).then(
       () => despawn(this.ticker, this.scene, packet, 0.15),
     )
