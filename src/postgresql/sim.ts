@@ -1,8 +1,8 @@
 import * as THREE from 'three'
 import { ANCHOR, INBUF_CELLS, PALETTE, PostgresInstance } from './instance'
 import type { BackendPod } from './instance'
-import { QueryChain, pathCurve } from './flow'
-import type { FlowSet, Paths } from './flow'
+import { QueryChain, pathCurve } from '../core/flow'
+import type { FlowSet, Paths } from '../core/flow'
 import {
   Ticker,
   easeInOutCubic,
@@ -12,7 +12,7 @@ import {
   rand,
   randInt,
   travel,
-} from './util'
+} from '../core/util'
 
 export interface SimStats {
   queries: number

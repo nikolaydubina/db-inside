@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { label } from './util'
+import { label } from './core/util'
 
 /**
  * A hidden measuring aid, not part of the scene's art. It answers the one

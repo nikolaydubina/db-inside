@@ -1,6 +1,6 @@
 import * as THREE from 'three'
-import { WORLD_ANCHOR as ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, POSTGRES_ORIGIN, pageX, pageZ } from './instance'
-import { REDIS_ANCHOR, REDIS_ORIGIN } from './redis'
+import { WORLD_ANCHOR as ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, POSTGRES_ORIGIN, pageX, pageZ } from '../postgresql/instance'
+import { REDIS_ANCHOR, REDIS_ORIGIN } from '../redis/redis'
 import type { Ticker } from './util'
 import { easeInOutCubic } from './util'
 

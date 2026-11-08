@@ -9,7 +9,7 @@ import {
   PALETTE,
   bufferSlotX,
   bufferSlotZ,
-} from './instance'
+} from '../postgresql/instance'
 import { registerLineMaterial, releaseLineMaterial } from './util'
 import { Ticker, easeInOutCubic } from './util'
 

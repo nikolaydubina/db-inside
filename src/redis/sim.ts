@@ -1,9 +1,9 @@
 import * as THREE from 'three'
-import { BACKEND_ORIGIN, PALETTE } from './instance'
+import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
 import type { KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { BIG_REAL } from './redis'
-import { QueryChain, pathCurve } from './flow'
-import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from './util'
+import { QueryChain, pathCurve } from '../core/flow'
+import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from '../core/util'
 
 export interface RedisStats {
     ops: number

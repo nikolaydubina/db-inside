@@ -1,6 +1,6 @@
 import type * as THREE from 'three'
-import type { Page8K, PostgresInstance } from './instance'
-import type { EngineSim } from './sim'
+import type { Page8K, PostgresInstance } from './postgresql/instance'
+import type { EngineSim } from './postgresql/sim'
 
 /**
  * Console telemetry for the simulation. Reading the scene off a screenshot is

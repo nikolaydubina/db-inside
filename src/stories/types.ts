@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { EngineSim, SimStats } from '../sim'
+import type { EngineSim, SimStats } from '../postgresql/sim'
 
 /**
  * The shapes a story is written in.

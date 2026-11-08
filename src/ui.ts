@@ -1,6 +1,6 @@
-import type { Info } from './instance'
-import { REGIME_ORDER, regimeLabel } from './sim'
-import type { Regime, SimStats } from './sim'
+import type { Info } from './postgresql/instance'
+import { REGIME_ORDER, regimeLabel } from './postgresql/sim'
+import type { Regime, SimStats } from './postgresql/sim'
 
 export type DbName = 'postgres' | 'redis'
 

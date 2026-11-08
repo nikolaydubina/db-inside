@@ -5,7 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
-import { FLOOR_Y, rand, setLineResolution } from './util'
+import { FLOOR_Y, rand, setLineResolution } from './core/util'
 
 export interface World {
   renderer: THREE.WebGLRenderer
