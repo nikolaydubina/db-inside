@@ -5,7 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
-import { neonEdges, rand, setLineResolution } from './util'
+import { rand, setLineResolution } from './util'
 
 export interface World {
   renderer: THREE.WebGLRenderer
@@ -197,72 +197,11 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   coreLight.position.set(0, 9, 0)
   scene.add(coreLight)
 
-  /* ----------------------------------- island -------------------------------- */
-
-  const island = new THREE.Group()
-
-  const rock = new THREE.Mesh(
-    new THREE.CylinderGeometry(18.2, 14.2, 3.6, 96, 1),
-    new THREE.MeshStandardMaterial({ color: 0x060b13, roughness: 0.92, metalness: 0.12 }),
-  )
-  rock.position.y = -1.8
-  rock.receiveShadow = true
-  island.add(rock)
-
-  const deck = new THREE.Mesh(
-    new THREE.CylinderGeometry(18.05, 18.05, 0.35, 96),
-    new THREE.MeshStandardMaterial({
-      color: 0x05090f,
-      emissive: 0x030a12,
-      emissiveIntensity: 1,
-      roughness: 0.92,
-      metalness: 0.1,
-    }),
-  )
-  deck.position.y = -0.18
-  deck.receiveShadow = true
-  island.add(deck)
-
-  const rimRing = new THREE.Mesh(
-    new THREE.TorusGeometry(18.05, 0.055, 8, 200),
-    new THREE.MeshBasicMaterial({ color: 0x35e0ff, transparent: true, opacity: 0.62 }),
-  )
-  rimRing.rotation.x = Math.PI / 2
-  rimRing.position.y = 0.02
-  island.add(rimRing)
-
-  const lowerRing = new THREE.Mesh(
-    new THREE.TorusGeometry(14.4, 0.03, 6, 160),
-    new THREE.MeshBasicMaterial({ color: 0xffb03a, transparent: true, opacity: 0.35 }),
-  )
-  lowerRing.rotation.x = Math.PI / 2
-  lowerRing.position.y = -3.5
-  island.add(lowerRing)
-
-  // technical polar grid etched into the deck
-  const polar = new THREE.PolarGridHelper(17.8, 12, 5, 96, 0x123c52, 0x0b2634)
-  polar.position.y = 0.012
-    ; (polar.material as THREE.Material).transparent = true
-    ; (polar.material as THREE.Material).opacity = 0.6
-    ; (polar.material as THREE.Material).depthWrite = false
-  island.add(polar)
-
-  // soft bounce glow beneath the island
-  const levitation = new THREE.Mesh(
-    new THREE.TorusGeometry(16.6, 0.16, 8, 128),
-    new THREE.MeshBasicMaterial({
-      color: 0x2aa8c8,
-      transparent: true,
-      opacity: 0.28,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    }),
-  )
-  levitation.rotation.x = Math.PI / 2
-  levitation.position.y = -3.75
-  island.add(levitation)
-
-  scene.add(island)
+  /* ----------------------------------- floor --------------------------------- */
+  // There is no island. The instance is not parked on a round slab: the only
+  // surface in the scene is the global grid below, the same one that runs out
+  // to the horizon. Nothing is propped up on a pedestal, so nothing has to be
+  // levitated either.
 
   /* --------------------------------- sea + grid ------------------------------ */
 
@@ -284,7 +223,9 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.add(sea)
 
   const grid = new THREE.GridHelper(600, 300, 0x2a7f9e, 0x123a4a)
-  grid.position.y = -5.84
+  // The grid is the floor everything stands on, so it sits at the island's own
+  // level rather than down on the sea: one continuous floor, no pedestal.
+  grid.position.y = -0.02
   const gm = grid.material as THREE.Material
   gm.transparent = true
   gm.opacity = 0.42
@@ -292,7 +233,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.add(grid)
 
   const grid2 = new THREE.GridHelper(600, 60, 0x3aa2c4, 0x19546a)
-  grid2.position.y = -5.83
+  grid2.position.y = -0.01
   const gm2 = grid2.material as THREE.Material
   gm2.transparent = true
   gm2.opacity = 0.40
@@ -396,17 +337,10 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
     // simulation clock, so their ratio is the speed slider.
     const speed = dt > 1e-4 ? animDt / dt : 1
     stars.rotation.y += animDt * 0.002 * Math.pow(speed, 0.6)
-    const k = performance.now() * 0.001
-      ; (rimRing.material as THREE.MeshBasicMaterial).opacity = 0.72 + 0.22 * Math.sin(k * 0.9)
     controls.update(dt)
     composer.render(dt)
     labelRenderer.render(scene, camera)
   }
-
-  // decorative edge accent on the island deck
-  const deckEdges = neonEdges(new THREE.CylinderGeometry(18.05, 18.05, 0.35, 12, 1), 0x2b6d88, 0.22)
-  deckEdges.position.y = -0.18
-  island.add(deckEdges)
 
   resize()
 

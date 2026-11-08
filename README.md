@@ -12,7 +12,7 @@ npm run build    # static build in dist/
 
 ## What you are looking at
 
-The floating island is **a running PostgreSQL instance** — deliberately not called "one process",
+The wireframe cage in the middle of the floor is **a running PostgreSQL instance** — deliberately not called "one process",
 because it is several: a postmaster, one backend per connection, and the auxiliary processes.
 Clients live in the sky and drop queries through the roof; results stream back up.
 
@@ -25,7 +25,7 @@ Clients live in the sky and drop queries through the roof; results stream back u
 | `PARSER` → `PLANNER` → `EXECUTOR` orbs | parse tree, cost-based plan, volcano executor |
 | `SHARED BUFFERS · RAM` deck | `shared_buffers` — the RAM cache. It floats above the floor, because it is a cache, not storage. 8 kB pages: cyan = cached, amber = dirty, green = just served a hit |
 | the page field | orange blocks covering most of the floor, one block = one 8 kB page. They sit on a 0.5-unit lattice, so four blocks fit exactly inside one floor-grid cell |
-| the blue grid floor | not storage, just the ground the whole instance sits on |
+| the grid floor | not storage, just the ground. It is one global 2-unit grid at the instance's own level — there is no pedestal and no slab the instance sits on, so the same floor runs under the disk, under the air, and out to the horizon |
 | `TABLE: users` / `products` / `metrics` | selection marquees over contiguous runs of those pages. A table is only a name plus a run of pages — that is the whole trick |
 | magenta pulsing page | the page holds dead row versions. It is the page itself pulsing — no extra marker geometry |
 | block height & brightness | how full that page is. A flat dark slot is a page with nothing in it yet; a tall bright block is a packed page. Fill levels start random, as they do in a real heap |
@@ -50,7 +50,9 @@ Clients live in the sky and drop queries through the roof; results stream back u
 
 - **The page field is disk.** The orange blocks cover most of the floor on purpose: that is where most
   of the data lives. The plate beneath them is colourless — the blocks are the storage, not the slab.
-- **The blue grid is just a floor** — the thing the instance floats over, not storage.
+- **The grid is just a floor** — one global grid at the instance's level, not storage and not a
+  pedestal. Nothing is propped up on a slab: the plate under the blocks is the only local surface,
+  and it exists to mark the disk's footprint.
 - **Floating means "in RAM right now"**: the `shared_buffers` deck, the `wal_buffers` cubes and the four
   index structures hovering above the plate. A page that is lifted off the plate is a page that has just
   been read into memory.
@@ -169,7 +171,7 @@ regressions show up immediately. Open the page with `?debug` to have telemetry o
 
 - **fly · wasd** (checkbox in Simulate) — `W A S D` to move, `Q`/`E` down/up, `Shift` for 3× boost.
   **Hold the mouse button and drag to look around** (no pointer lock, no mode you cannot escape); release
-  and it stops. While flying, a drag rotates the view instead of orbiting the island. Flying suspends
+  and it stops. While flying, a drag rotates the view instead of orbiting the scene. Flying suspends
   auto-orbit.
 - **space** or `run query` — send a query: falls from the sky, through parser/planner/executor, into
   buffers (hit) or down to disk (miss), then rows rise back to the client.

@@ -466,40 +466,9 @@ export class PostgresInstance {
       meta: 'postmaster + backends + auxiliaries · shared memory',
     })
 
-    // city-block pad: the blue grid floor everything floats over
-    const pad = new THREE.Mesh(
-      new RoundedBoxGeometry(27.6, 0.06, 18.4, 2, 0.1),
-      new THREE.MeshStandardMaterial({
-        color: 0x081420,
-        emissive: 0x04141f,
-        emissiveIntensity: 0.9,
-        roughness: 0.85,
-        metalness: 0.2,
-      }),
-    )
-    pad.position.y = 0.05
-    pad.receiveShadow = true
-    this.group.add(pad)
-
-    const padLineMat = new THREE.LineBasicMaterial({
-      color: 0x1a5f78,
-      transparent: true,
-      opacity: 0.4,
-      depthWrite: false,
-    })
-    const padPts: number[] = []
-    for (let x = -13; x <= 13; x += 2) {
-      padPts.push(x, 0.09, -8.6, x, 0.09, 8.6)
-    }
-    for (let z = -8; z <= 8; z += 2) {
-      padPts.push(-13.5, 0.09, z, 13.5, 0.09, z)
-    }
-    const padGeo = new THREE.BufferGeometry()
-    padGeo.setAttribute('position', new THREE.Float32BufferAttribute(padPts, 3))
-    this.group.add(new THREE.LineSegments(padGeo, padLineMat))
-
-    const padEdge = new OutlineBox(27.6, 0.06, 18.4, 0x35e0ff, 0.45).fromFloor(0, 0.05, 0)
-    this.group.add(padEdge)
+    // There is deliberately no pedestal here: the instance stands on the same
+    // global floor grid as everything else, so the disk field is not sitting on
+    // a slab of its own. The plate under the blocks is the only local surface.
 
     /* -------------------------------------------------------------------- disk */
     // The disk is only the field of page blocks. This plate is deliberately
