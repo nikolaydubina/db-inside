@@ -1734,12 +1734,14 @@ export class PostgresInstance {
       sprite.scale.setScalar(2.0)
       g.add(sprite)
 
-      // invisible hover/selection box that hugs this connection
+      // invisible hover/selection box that hugs this connection — a CHILD of the
+      // pod, not a sibling of it: a pick that lives at the group's position but
+      // not in the group stays selectable when the connection is closed, which
+      // is a cage you can hover around nothing
       const pick = new THREE.Mesh(
         pickGeo,
         new THREE.MeshBasicMaterial({ visible: false }),
       )
-      pick.position.copy(g.position)
       pick.userData.info = {
         title: `Backend · connection ${i + 1}`,
         body: 'One live client connection, handled by its own backend process, forked by the postmaster when the client connected. It parses, plans and executes its own queries in its own address space, then returns the result through this same slot. That is why the boxes above it are that backend\u2019s private memory and die with it, and why the bill is per connection: a few megabytes each, capped by max_connections. The redis cage next door serves the same kind of socket from one thread and a kernel fd set, which is the whole reason it can hold two orders of magnitude more of them.',
@@ -1747,7 +1749,7 @@ export class PostgresInstance {
       }
 
       this.group.add(g)
-      this.group.add(pick)
+      g.add(pick)
 
       // The input buffer: requests stack upward from the oldest, and a cell
       // exists on screen only while it holds a statement. An empty slot is drawn
@@ -1817,7 +1819,8 @@ export class PostgresInstance {
     // a recycled slot must not inherit counters from its previous life
     free.inbuf = 0
     free.pending = 0
-    if (!this.pickables.includes(free.pick)) this.pickables.push(free.pick)
+    // no bookkeeping for the pointer: the pod's group is shown while the
+    // connection is open, and the pick is a child of it
     return free
   }
 
@@ -1831,8 +1834,6 @@ export class PostgresInstance {
     victim.busy = false
     victim.inbuf = 0
     victim.pending = 0
-    const idx = this.pickables.indexOf(victim.pick)
-    if (idx >= 0) this.pickables.splice(idx, 1)
     return true
   }
 

@@ -19,7 +19,6 @@ import { PLANNED_STORIES, STORIES } from './story'
 import type { StoryScene } from './story'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
 import type { ShareDb } from './share'
-import { initCredits } from './credits'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox } from './util'
 
@@ -51,8 +50,46 @@ const redis = new RedisInstance(ticker)
 scene.add(redis.group)
 const redisSim = new RedisSim(redis, ticker)
 
-/** Both instances answer the pointer the same way. */
-const pickables: THREE.Object3D[] = [...instance.pickables, ...redis.pickables]
+/**
+ * Is this object being drawn right now?
+ *
+ * `Object3D.visible` is the one bit in the scene that already means "this is not
+ * on screen", and it is set by whatever hides the thing: a closed connection's
+ * group, a log that has no blocks in it, a freed slot. Asking the ray about it
+ * keeps the answer truthful without a second list of what is supposed to exist.
+ *
+ * Walks the parents because hiding a group hides its children from the renderer
+ * and nothing copies that down to them.
+ */
+function shown(o: THREE.Object3D): boolean {
+  for (let n: THREE.Object3D | null = o; n; n = n.parent) if (!n.visible) return false
+  return true
+}
+
+/**
+ * Both instances answer the pointer the same way.
+ *
+ * Read live rather than copied: the moment one of these lists is a snapshot, a
+ * cage that registers or retires a pick volume is editing a list nobody is
+ * listening to, and the fix for a ghost cage becomes a second place to keep in
+ * step.
+ */
+const allPicks = () => [...instance.pickables, ...redis.pickables]
+
+/**
+ * What the pointer can hit: pick volumes, minus the ones the drawing is not
+ * showing.
+ *
+ * A pick outlives its subject by design — a connection goes away, the pick that
+ * described it stays in the scene, invisible to the eye. Left selectable, that is
+ * a cage you can hover around nothing: the highlight has no volume to hug, the
+ * card describes something that is not on screen, and a double-tap lands on an
+ * empty slot instead of the floor behind it.
+ */
+function cast(rc: THREE.Raycaster): THREE.Intersection[] {
+  // nearest first, preserved: filtering for visibility must not reorder the ray
+  return rc.intersectObjects(allPicks(), true).filter((h) => shown(h.object))
+}
 
 // measuring aid: __axes.on() / .off() / .toggle(), or open the page with ?axes
 const axes = createAxes(scene)
@@ -647,7 +684,7 @@ function pinShotSubject(db: ShareDb, view: ViewDef) {
   // where the camera used to be.
   camera.updateMatrixWorld()
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera)
-  for (const hit of raycaster.intersectObjects(pickables, true)) {
+  for (const hit of cast(raycaster)) {
     let picked: PickInfo | null = null
     const provider = infoForRoot(hit.object)
     if (provider) {
@@ -754,7 +791,6 @@ const story = createStory({
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlStory = story
-initCredits()
 
 // build the story list from the same registry the stories themselves come from.
 // One list at root level — a story may later span both cages — but grouped by
@@ -902,7 +938,7 @@ function infoForRoot(o: THREE.Object3D | null) {
 
 function pick(ndc: THREE.Vector2): PickInfo | null {
   raycaster.setFromCamera(ndc, camera)
-  const hits = raycaster.intersectObjects(pickables, true)
+  const hits = cast(raycaster)
   // Two passes on purpose. A block answers for one instance of one mesh and
   // declines when the camera is far away; the table-region boxes hover *above*
   // the blocks, so they are usually the nearer hit and would otherwise eat

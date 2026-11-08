@@ -420,6 +420,8 @@ export class RedisInstance {
     private rdbBlocks: number[][] = []
     /** the outline around the base file, regrown as the file's length changes */
     private rdbEdge!: OutlineBox
+    /** the volume you point at to read about the dump — gone while it is empty */
+    private rdbPick!: THREE.Mesh
     /** per-instance base tint, so the RDB keeps its own shade across relayouts */
     private rdbBase: number[] = []
     /** true while a save or a load is walking the file */
@@ -773,6 +775,7 @@ export class RedisInstance {
         )
         rdbPick.position.set(RDB_CENTRE.x, PAGE_Y + 0.5, RDB_CENTRE.z)
         this.group.add(rdbPick)
+        this.rdbPick = rdbPick
         this.register(
             rdbPick,
             {
@@ -2621,9 +2624,13 @@ export class RedisInstance {
         const rows = full + (rem > 0 ? 1 : 0)
         if (rows === 0) {
             this.rdbEdge.visible = false
+            // an empty dump is not a thing to point at: the cage shows the file's
+            // length, and with no blocks there is no file to describe
+            this.rdbPick.visible = false
             return
         }
         this.rdbEdge.visible = true
+        this.rdbPick.visible = true
         // the first row of the file always runs left to right, so a file shorter
         // than one row covers a prefix of that row
         let x0 = RDB.c0
