@@ -21,8 +21,8 @@ export interface HudHandlers {
   rewriteAof(): void
   setSpeed(v: number): void
   setRegime(r: Regime): void
-  setOrbit(on: boolean): void
-  setFly(on: boolean): void
+  /** grab-the-cage mode: drag a cage to slide it on the floor */
+  setMove(on: boolean): void
   unpin(): void
 }
 
@@ -41,9 +41,20 @@ export function initHud(handlers: HudHandlers) {
   const btnCompact = $<HTMLButtonElement>('#btn-compact')
   const speedIn = $<HTMLInputElement>('#speed')
   const speedVal = $<HTMLElement>('#speed-val')
-  const chkOrbit = $<HTMLInputElement>('#chk-orbit')
-  const chkFly = $<HTMLInputElement>('#chk-fly')
-  const flyHint = $<HTMLElement>('#fly-hint')
+  const moveBtn = $<HTMLButtonElement>('#btn-move')
+
+  /**
+   * The clock reads as a glyph and a slider. At 1× there is nothing to say, so the
+   * number is hidden and only the slider shows; once it differs, the number sits
+   * next to the glyph and the slider gives up that space.
+   */
+  const showSpeed = (v: number) => {
+    speedVal.textContent = `${v}×`
+    // Hidden at 1×: the readout sits AFTER the slider, so dropping it out of the
+    // layout shortens the row without moving anything the cursor is on.
+    speedVal.hidden = v === 1
+  }
+  showSpeed(Number(speedIn.value))
 
   const stQueries = $<HTMLElement>('#st-queries')
   const stRps = $<HTMLElement>('#st-rps')
@@ -80,6 +91,8 @@ export function initHud(handlers: HudHandlers) {
     db = next
     for (const name of Object.keys(panels) as DbName[]) panels[name].hidden = name !== next
     panelColumn.hidden = next === null
+    // the inspector lives over the same corner: it steps aside while a panel is open
+    document.body.classList.toggle('db-open', next !== null)
     for (const b of dbButtons) b.classList.toggle('active', b.dataset.db === next)
   }
   for (const b of dbButtons) {
@@ -196,13 +209,14 @@ export function initHud(handlers: HudHandlers) {
   btnRewrite.addEventListener('click', () => handlers.rewriteAof())
   speedIn.addEventListener('input', () => {
     const v = Number(speedIn.value)
-    speedVal.textContent = `${v}×`
+    showSpeed(v)
     handlers.setSpeed(v)
   })
-  chkOrbit.addEventListener('change', () => handlers.setOrbit(chkOrbit.checked))
-  chkFly.addEventListener('change', () => {
-    flyHint.hidden = !chkFly.checked
-    handlers.setFly(chkFly.checked)
+
+  // one toggle, lit when the scene is in grab-the-cage mode; the scene owns the
+  // lit state, so this only asks for the change
+  moveBtn.addEventListener('click', () => {
+    handlers.setMove(moveBtn.getAttribute('aria-pressed') !== 'true')
   })
 
   // workload chips: exclusive, and they only change what arrives
@@ -242,10 +256,33 @@ export function initHud(handlers: HudHandlers) {
     }
   })
 
+  // The two panels in the shelf open from the words in the bar below them. One
+  // at a time: two open panels stacked over the scene is a wall, and the point of
+  // the bar is that the scene has the room.
+  const panelsInShelf: { btn: HTMLButtonElement; card: HTMLElement }[] = [
+    { btn: $<HTMLButtonElement>('#btn-legend'), card: $<HTMLElement>('#legend-card') },
+    { btn: $<HTMLButtonElement>('#btn-stories'), card: $<HTMLElement>('#stories-card') },
+  ]
+  for (const p of panelsInShelf) {
+    p.btn.addEventListener('click', () => {
+      const open = p.card.hidden
+      for (const q of panelsInShelf) {
+        q.card.hidden = true
+        q.btn.classList.remove('on')
+        q.btn.setAttribute('aria-pressed', 'false')
+      }
+      p.card.hidden = !open
+      p.btn.classList.toggle('on', open === true)
+      p.btn.setAttribute('aria-pressed', String(open))
+    })
+  }
+
   const busy = (el: HTMLElement, on: boolean) => el.classList.toggle('busy', on)
 
   return {
     setDb,
+    /** one place that draws the clock speed, including from story mode */
+    showSpeed,
     get db() {
       return db
     },
@@ -319,69 +356,12 @@ export function initHud(handlers: HudHandlers) {
 
 let lastNote = ''
 
-const CARDS_KEY = 'psql.cards'
-const COMPACT = () =>
-  window.matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)').matches
-
 function setupCards() {
-  // the legend is a card too: same chevron, same click/keyboard toggle, same
-  // remembered state — it just draws a glossary instead of a paragraph
-  const cards = Array.from(
-    document.querySelectorAll<HTMLElement>('.card:not(#inspector), .legend'),
-  )
-  let saved: Record<string, boolean> = {}
-  try {
-    saved = JSON.parse(localStorage.getItem(CARDS_KEY) ?? '{}') as Record<string, boolean>
-  } catch {
-    saved = {}
-  }
-  const compact = COMPACT()
-
-  for (const card of cards) {
-    const head = card.querySelector<HTMLElement>('h2')
-    if (!head) continue
-
-    const key = head.textContent?.trim() ?? ''
-    const chev = document.createElement('span')
-    chev.className = 'chev'
-    head.appendChild(chev)
-    head.setAttribute('role', 'button')
-    head.setAttribute('tabindex', '0')
-
-    const startCollapsed = key in saved ? saved[key] : compact || card.hasAttribute('data-folded')
-    card.classList.toggle('collapsed', startCollapsed)
-    head.setAttribute('aria-expanded', String(!startCollapsed))
-
-    const toggle = () => {
-      const collapsed = card.classList.toggle('collapsed')
-      head.setAttribute('aria-expanded', String(!collapsed))
-      saved[key] = collapsed
-      try {
-        localStorage.setItem(CARDS_KEY, JSON.stringify(saved))
-      } catch {
-        /* private mode */
-      }
-    }
-
-    head.addEventListener('click', toggle)
-    head.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault()
-        toggle()
-      }
-    })
-  }
-
-  // going from desktop to a phone layout collapses the whole stack
-  window
-    .matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)')
-    .addEventListener('change', (e) => {
-      if (!e.matches) return
-      for (const card of cards) {
-        card.classList.add('collapsed')
-        card.querySelector('h2')?.setAttribute('aria-expanded', 'false')
-      }
-    })
+  // NO card folds any more. The legend and the story list are panels opened from
+  // the words in the shelf bar, the database cards are opened from the two
+  // switches, and the camera is a row in that bar — so a card is either on
+  // screen in full or not on screen at all. Kept as a no-op hook for the call
+  // site; there is nothing to wire.
 }
 
 function addNote(el: HTMLElement, note: string) {

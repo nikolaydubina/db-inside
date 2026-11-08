@@ -159,12 +159,17 @@ body {
   box-shadow: 0 0 14px -6px rgba(53, 224, 255, 0.7);
 }
 
-/* the shelf: legend, stories, camera — reading material, one row, bottom left */
+/*
+ * The shelf: one row of text at the bottom left, and the panels it opens above
+ * it. Nothing here is drawn as a button — the words are the controls, and the
+ * only chrome left in the bar is the clock's slider.
+ */
 .hud.bottom {
   left: 26px;
   bottom: 26px;
   display: flex;
-  align-items: flex-end;
+  flex-direction: column;
+  align-items: flex-start;
   gap: 10px;
   pointer-events: auto;
   /* an opened panel grows upward and never runs off the top of the screen */
@@ -173,7 +178,7 @@ body {
 }
 
 .hud.bottom>.card {
-  width: 232px;
+  width: 320px;
   flex: none;
   max-height: 100%;
   overflow: auto;
@@ -184,9 +189,138 @@ body {
   display: none;
 }
 
-/* folded, every one of them is just its title bar: a row of labels, not a wall */
-.hud.bottom>.card.collapsed {
-  width: auto;
+.shelfbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 4px 0 2px;
+}
+
+/* a word, not a button: same weight as a 3D label, lit while its panel is open */
+.tbtn {
+  appearance: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #5d7c90;
+  transition: color 0.16s;
+}
+
+.tbtn:hover {
+  color: #cdefff;
+}
+
+.tbtn.on {
+  color: var(--cyan);
+  text-shadow: 0 0 12px rgba(53, 224, 255, 0.45);
+}
+
+.tbtn:focus-visible {
+  outline: 1px solid rgba(53, 224, 255, 0.5);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* flight has no switch, so while it is on the row says how to leave it */
+.flyhint {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: #4e6a7e;
+  white-space: nowrap;
+}
+
+/*
+ * Clock, at rest: `⏱ ────` at 1× and `⏱ ──── 4×` otherwise. The glyph and the
+ * multiplier are the same grey as the words in the bar, and only light up with
+ * the rest of the row on hover.
+ */
+.clock {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: #5d7c90;
+  cursor: pointer;
+}
+
+.clock-glyph {
+  font-size: 11px;
+  line-height: 1;
+  color: inherit;
+}
+
+/*
+ * The clock: a glyph, a fixed-length slider, and the multiplier at the end.
+ *
+ * The multiplier sits AFTER the slider on purpose: the slider is the thing under
+ * the cursor while dragging, so nothing that changes width may come before it.
+ * Its slot is sized for the longest label (`0.25×`), so stepping 2× → 2.5× does
+ * not move the word after the clock; at 1× there is nothing to show and the row
+ * simply ends at the slider.
+ *
+ * Everything here is the row's own tone — this is a control you reach for when
+ * you want it, not a thing that announces itself in the corner of the screen.
+ */
+.clock b {
+  font-family: var(--mono);
+  font-size: 9px;
+  font-weight: 400;
+  letter-spacing: 0.06em;
+  font-variant-numeric: tabular-nums;
+  color: #5d7c90;
+  min-width: 30px;
+  text-align: left;
+}
+
+.clock:hover b {
+  color: #cdefff;
+}
+
+.clock input[type='range'] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 96px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, rgba(93, 124, 144, 0.5), rgba(93, 124, 144, 0.16));
+  outline: none;
+  cursor: pointer;
+}
+
+.clock input[type='range']::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #6f8b9e;
+  box-shadow: none;
+  border: none;
+  transition: background 0.16s;
+}
+
+.clock:hover input[type='range']::-webkit-slider-thumb {
+  background: #cdefff;
+}
+
+.clock input[type='range']::-moz-range-thumb {
+  width: 8px;
+  height: 8px;
+  border: none;
+  border-radius: 50%;
+  background: #6f8b9e;
+  box-shadow: none;
+  transition: background 0.16s;
+}
+
+.clock:hover input[type='range']::-moz-range-thumb {
+  background: #cdefff;
 }
 
 .brand {
@@ -368,61 +502,6 @@ h2::after {
   box-shadow: 0 0 10px rgba(53, 224, 255, 0.25);
 }
 
-.slider {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 11px;
-  font-family: var(--mono);
-  font-size: 8.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  color: #4f6b7e;
-}
-
-.slider-label {
-  flex: none;
-}
-
-.slider input[type='range'] {
-  appearance: none;
-  -webkit-appearance: none;
-  flex: 1;
-  height: 2px;
-  border-radius: 2px;
-  background: linear-gradient(90deg, rgba(53, 224, 255, 0.5), rgba(53, 224, 255, 0.12));
-  outline: none;
-  cursor: pointer;
-}
-
-.slider input[type='range']::-webkit-slider-thumb {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: #35e0ff;
-  box-shadow: 0 0 8px rgba(53, 224, 255, 0.9);
-  border: none;
-}
-
-.slider input[type='range']::-moz-range-thumb {
-  width: 9px;
-  height: 9px;
-  border: none;
-  border-radius: 50%;
-  background: #35e0ff;
-  box-shadow: 0 0 8px rgba(53, 224, 255, 0.9);
-}
-
-.slider b {
-  flex: none;
-  width: 26px;
-  text-align: right;
-  font-weight: 400;
-  color: #7fd7ee;
-}
-
 .btn {
   appearance: none;
   display: flex;
@@ -543,67 +622,6 @@ h2::after {
   color: #bfefff;
   border-color: rgba(53, 224, 255, 0.55);
   background: rgba(53, 224, 255, 0.07);
-}
-
-.switches {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  margin-top: 12px;
-  padding-top: 11px;
-  border-top: 1px solid rgba(110, 170, 210, 0.1);
-}
-
-.switch {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  cursor: pointer;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.08em;
-  color: #8ea9bd;
-  text-transform: lowercase;
-}
-
-.switch input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.switch .track {
-  position: relative;
-  width: 26px;
-  height: 13px;
-  border-radius: 8px;
-  background: rgba(70, 100, 122, 0.28);
-  border: 1px solid rgba(120, 190, 230, 0.16);
-  transition: background 0.2s, border-color 0.2s;
-  flex: none;
-}
-
-.switch .track::after {
-  content: '';
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #6f8798;
-  transition: transform 0.2s, background 0.2s, box-shadow 0.2s;
-}
-
-.switch input:checked+.track {
-  background: rgba(43, 180, 210, 0.3);
-  border-color: rgba(53, 224, 255, 0.45);
-}
-
-.switch input:checked+.track::after {
-  transform: translateX(13px);
-  background: var(--cyan);
-  box-shadow: 0 0 10px rgba(53, 224, 255, 0.9);
 }
 
 /* ---------- stats ---------- */
@@ -738,6 +756,25 @@ h2::after {
 
 /* ---------- inspector ---------- */
 
+/*
+ * Its own card, pinned bottom right above the credits. It used to live inside the
+ * database panel, which meant the panel's column and the thing you just clicked
+ * were competing for the same space.
+ */
+#inspector {
+  right: 26px;
+  bottom: 108px;
+  width: 330px;
+  max-height: calc(100% - 210px);
+  pointer-events: auto;
+  transition: right 0.18s ease;
+}
+
+/* a database panel owns the right edge while it is open; the inspector moves in */
+body.db-open #inspector {
+  right: 292px;
+}
+
 .inspector h3 {
   margin: 0 0 6px;
   font-size: 12px;
@@ -803,44 +840,13 @@ h2::after {
 /* ---------- legend ---------- */
 
 .legend {
-  left: 26px;
-  bottom: 26px;
-  width: 262px;
   flex: none;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: linear-gradient(155deg, rgba(11, 21, 33, 0.6), rgba(6, 12, 20, 0.45));
   backdrop-filter: blur(12px);
   padding: 11px 13px 12px;
-  /* the header is a toggle now, so the panel has to take the pointer */
   pointer-events: auto;
-}
-
-/* collapsed: only the title bar is left, the way the HUD cards fold */
-.legend.collapsed {
-  width: auto;
-}
-
-.legend.collapsed h2 {
-  margin-bottom: 0;
-}
-
-.legend.collapsed h2::after {
-  display: none;
-}
-
-.legend.collapsed table.gloss,
-.legend.collapsed .hint {
-  display: none;
-}
-
-.legend:hover .chev {
-  border-top-color: var(--cyan);
-}
-
-/* folded, the triangle points at the thing it would open */
-.legend.collapsed .chev {
-  transform: rotate(-90deg);
 }
 
 /* A two-column glossary: what you are looking at, then what it means. Columns

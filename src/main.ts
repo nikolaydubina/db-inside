@@ -98,8 +98,7 @@ const anchorOf = (c: CageName): [number, number] => {
   return [Math.round(p.x + CAGE.halfX), Math.round(p.z + CAGE.halfZ)]
 }
 
-const moveToggle = document.querySelector<HTMLInputElement>('#chk-move')!
-const moveHint = document.getElementById('move-hint')!
+const moveToggle = document.querySelector<HTMLButtonElement>('#btn-move')!
 let moveMode = false
 
 interface DragState {
@@ -125,12 +124,10 @@ const anchorOut = (c: CageName): AnchorOut => {
 
 const layoutNow = () => ({ postgres: anchorOut('postgres'), redis: anchorOut('redis') })
 
+/** The layout is an authoring tool: it prints where the cages are, every time. */
 function updateMoveHint() {
   const p = anchorOf('postgres')
   const r = anchorOf('redis')
-  const axis = drag?.axis ? ` · locked to ${drag.axis}` : ''
-  moveHint.textContent =
-    `postgres ${p[0]},${p[1]} · redis ${r[0]},${r[1]} · step ${MOVE_STEP} · arrows nudge · shift = free${axis}`
   console.info(
     `%clayout%c postgres anchor (${p[0]}, ${p[1]}) · redis anchor (${r[0]}, ${r[1]})`,
     'color:#ff6b6b',
@@ -202,22 +199,29 @@ try {
     },
   }
 
-moveToggle.addEventListener('change', () => {
-  moveMode = moveToggle.checked
-  moveHint.hidden = !moveMode
-  if (moveMode) {
+/**
+ * Grab-the-cage mode: the only camera control left in the HUD.
+ *
+ * It takes the same drag gesture as flying, so entering it ends a flight; the
+ * ruler only exists for this mode, so it goes away with it.
+ */
+function setMove(on: boolean) {
+  moveMode = on
+  moveToggle.classList.toggle('on', on)
+  moveToggle.setAttribute('aria-pressed', String(on))
+  if (on) {
     axes.on()
-    // flying and dragging want the same gesture; dragging wins
-    if (flyToggle.checked) {
-      flyToggle.checked = false
-      flyToggle.dispatchEvent(new Event('change'))
-    }
+    if (flyMode) setFly(false)
   } else {
-    // the ruler exists for this mode; leaving it on after a drag is clutter
     axes.off()
   }
   updateMoveHint()
-})
+}
+
+/** Leaving grab-mode from elsewhere (flight, Esc) without recursing back. */
+function leaveMove() {
+  if (moveMode) setMove(false)
+}
 
 const dragPlanePoint = new THREE.Vector3()
 /** The cage arrows nudge: whatever is under the pointer, else the last one dragged. */
@@ -333,7 +337,6 @@ window.addEventListener('keydown', (e) => {
   e.preventDefault()
 })
 
-let autoOrbit = true
 let flyMode = false
 const flyKeys = new Set<string>()
 const flyVel = new THREE.Vector3()
@@ -402,31 +405,7 @@ const hud = initHud({
     speed = v
   },
   setRegime: (r) => sim.setRegime(r),
-  setOrbit: (on) => {
-    autoOrbit = on
-    world.controls.autoRotate = on && !flyMode
-  },
-  setFly: (on) => {
-    flyMode = on
-    flyKeys.clear()
-    flyVel.set(0, 0, 0)
-    if (!on) looking = false
-    // flying is driving the camera by hand: it lets go of any selected view, and
-    // it means a delayed ?view= pose must not fire later
-    if (on) {
-      userTookCamera = true
-      rig.release()
-    }
-    // while flying, a drag looks around instead of orbiting the scene
-    world.controls.enableRotate = !on
-    // cursor stays visible; it is only swapped for the crosshair while dragging
-    crosshair.hidden = true
-    canvas.style.cursor = on ? 'crosshair' : 'grab'
-    // flying and drifting orbit fight each other; flying wins, and the drift
-    // only comes back after the same quiet spell any camera move gets
-    world.controls.autoRotate =
-      !on && autoOrbit && performance.now() - lastInteraction > ORBIT_COOLDOWN
-  },
+  setMove: (on) => setMove(on),
   unpin: () => {
     pinned = null
     hud.unpin()
@@ -461,7 +440,6 @@ function noteCameraMove() {
 ; (window as unknown as Record<string, unknown>).__orbit = {
   get state() {
     return {
-      autoOrbit,
       flyMode,
       autoRotate: world.controls.autoRotate,
       idleMs: Math.round(performance.now() - lastInteraction),
@@ -492,39 +470,32 @@ canvas.addEventListener('wheel', () => (userTookCamera = true), { passive: true 
 
 /* --------------------------------- views ---------------------------------- */
 
-const orbitCheckbox = document.querySelector<HTMLInputElement>('#chk-orbit')!
 const rig = createCameraRig({
   camera,
   controls: world.controls,
   ticker,
-  // Navigating stops auto-orbit first, otherwise the drift drags the camera off
-  // the pose. The checkbox is unticked with it, so the UI does not claim an
-  // orbit that is no longer happening.
+  // Navigating stops the drift first, otherwise it drags the camera off the
+  // pose. It comes back on its own after the cooldown, like after any camera move.
   beforeNavigate: () => {
-    autoOrbit = false
     world.controls.autoRotate = false
-    if (orbitCheckbox) orbitCheckbox.checked = false
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlViews = rig
 
 /* -------------------------------- story mode ------------------------------- */
 
-/** auto-orbit as it was before the story opened, so exiting restores it */
-let orbitBeforeStory = true
 /** clock speed as it was before the story opened */
 let speedBeforeStory = 1
 /** workload regime as it was before the story opened */
 let regimeBeforeStory: Regime = 'default'
 
 const speedInput = document.querySelector<HTMLInputElement>('#speed')
-const speedLabel = document.getElementById('speed-val')
 
 /** Move the clock and keep the slider honest about it. */
 function applySpeed(v: number) {
   speed = v
   if (speedInput) speedInput.value = String(v)
-  if (speedLabel) speedLabel.textContent = `${v}×`
+  hud.showSpeed(v)
 }
 
 /**
@@ -576,12 +547,9 @@ const story = createStory({
   onEnter: () => {
     // no camera drift during a story: the scene is already moving enough, and
     // a turning frame makes the captions hard to follow
-    orbitBeforeStory = autoOrbit
     speedBeforeStory = speed
     regimeBeforeStory = sim.regime
-    autoOrbit = false
     world.controls.autoRotate = false
-    if (orbitCheckbox) orbitCheckbox.checked = false
     sim.ambient = false
     // a story's captions assume the default mix: a write-heavy workload would
     // starve the read steps and a read-heavy one would never grow the WAL
@@ -594,10 +562,8 @@ const story = createStory({
     sim.ambient = true
     applySpeed(speedBeforeStory)
     hud.setRegime(regimeBeforeStory)
-    // hand the camera back the way we found it
-    autoOrbit = orbitBeforeStory
-    world.controls.autoRotate = orbitBeforeStory
-    if (orbitCheckbox) orbitCheckbox.checked = orbitBeforeStory
+    // the drift comes back on its own once the cooldown passes
+    noteCameraMove()
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlStory = story
@@ -781,9 +747,9 @@ canvas.addEventListener('pointerup', (e) => {
   if (moveMode) return
   const root = pick(pointer)
   if (root) {
-    // the click says which database you are looking at, so the panel follows it
-    const cage = ownerCage(root.root)
-    if (cage) hud.setDb(cage)
+    // A click inspects; it does not open the database's panel. The panel is
+    // something you ask for with the switch at the top, not a side effect of
+    // pointing at a block.
     if (pinned?.key === root.key) {
       pinned = null
       hud.unpin()
@@ -838,7 +804,36 @@ document.addEventListener('mousemove', (e) => {
 })
 
 const FLY_CODES = new Set(['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE'])
-const flyToggle = document.querySelector<HTMLInputElement>('#chk-fly')!
+/** the row tells you how to get out, but only while you are in */
+const flyHint = document.getElementById('fly-hint')
+
+/**
+ * Flight. There is no switch for it: pressing a movement key enters it, and Esc
+ * leaves it. It drives the camera by hand, so it releases any selected view.
+ */
+function setFly(on: boolean) {
+  flyMode = on
+  flyKeys.clear()
+  flyVel.set(0, 0, 0)
+  if (!on) looking = false
+  // flying is driving the camera by hand: it lets go of any selected view, and
+  // it means a delayed ?view= pose must not fire later
+  if (on) {
+    userTookCamera = true
+    rig.release()
+    // flight and grab-the-cage want the same drag: only one can be on
+    leaveMove()
+  }
+  // while flying, a drag looks around instead of orbiting the scene
+  world.controls.enableRotate = !on
+  // cursor stays visible; it is only swapped for the crosshair while dragging
+  crosshair.hidden = true
+  canvas.style.cursor = on ? 'crosshair' : 'grab'
+  if (flyHint) flyHint.hidden = !on
+  // flying and the drifting orbit fight each other; flight wins, and the drift
+  // only comes back after the same quiet spell any camera move gets
+  world.controls.autoRotate = !on && performance.now() - lastInteraction > ORBIT_COOLDOWN
+}
 
 /* ------------------------------ double click ------------------------------ */
 
@@ -860,19 +855,13 @@ canvas.addEventListener('dblclick', (e) => {
     hud.unpin()
   }
   // flying moves the camera and its target together, which fights a fixed orbit
-  if (flyMode) {
-    flyToggle.checked = false
-    flyToggle.dispatchEvent(new Event('change'))
-  }
+  if (flyMode) setFly(false)
   void rig.focus(
     root
       ? (root.box ?? root.root)
       : new THREE.Box3().setFromObject(instance.group).union(new THREE.Box3().setFromObject(redis.group)),
   ).then(() => {
-    // the fly-to is camera movement: keep the preference on, but leave the
-    // drift to the cooldown instead of starting it in the same breath
-    autoOrbit = true
-    if (orbitCheckbox) orbitCheckbox.checked = true
+    // the fly-to is camera movement: the drift stays off until the cooldown
     noteCameraMove()
   })
   noteCameraMove()
@@ -880,11 +869,16 @@ canvas.addEventListener('dblclick', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (isTyping(e.target)) return
+  // Esc is the way out: of flight, and of grab-the-cage. No switches, none needed
+  if (e.code === 'Escape') {
+    if (flyMode) setFly(false)
+    if (moveMode) setMove(false)
+    return
+  }
   // pressing a movement key is itself the request to enter fly mode
   if (!flyMode && FLY_CODES.has(e.code)) {
     userTookCamera = true
-    flyToggle.checked = true
-    flyToggle.dispatchEvent(new Event('change'))
+    setFly(true)
   }
   if (!flyMode || !FLY_CODES.has(e.code)) return
   flyKeys.add(e.code)
@@ -1069,7 +1063,6 @@ function frame() {
   // resume the slow orbit after the user stops interacting
   // resume the slow orbit after a quiet spell — every camera move pushes this out
   if (
-    autoOrbit &&
     !flyMode &&
     !drag &&
     !world.controls.autoRotate &&

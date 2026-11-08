@@ -198,12 +198,6 @@
         <h3 class="sub-head">Views</h3>
         <div class="views" id="views-redis"></div>
       </section>
-
-      <section class="card inspector" id="inspector" hidden>
-        <h2 id="ins-title">Inspector</h2>
-        <p id="ins-body"></p>
-        <p class="ins-meta" id="ins-meta"></p>
-      </section>
     </aside>
 
     <!--
@@ -216,8 +210,7 @@
       what you are looking at, and what it means.
     -->
     <div class="hud bottom" id="shelf">
-      <section class="card panel legend" id="legend-card" data-folded>
-        <h2>Legend</h2>
+      <section class="card panel legend" id="legend-card" hidden>
         <table class="gloss">
           <tbody>
             <tr>
@@ -274,45 +267,46 @@
             </tr>
           </tbody>
         </table>
-        <p class="hint">double-click anything to fly to it and drift around it</p>
       </section>
 
-      <section class="card" id="stories-card" data-folded>
-        <h2>Stories</h2>
+      <section class="card" id="stories-card" hidden>
         <div class="stories" id="stories"></div>
       </section>
 
-      <section class="card" id="card-camera" data-folded>
-        <h2>Camera &amp; clock</h2>
-        <label class="slider">
-          <span class="slider-label">speed</span>
+      <!--
+        One row of text, nothing else. The legend and the story list are panels
+        that appear above this row when their word is pressed; the clock is a
+        glyph, a slider and a speed that only shows when it is not 1×; and the
+        only mode left is grab-the-cage, which is a word that lights up.
+      -->
+      <div class="shelfbar" id="shelf-bar">
+        <button class="tbtn" id="btn-legend" aria-pressed="false">legend</button>
+        <button class="tbtn" id="btn-stories" aria-pressed="false">stories</button>
+        <button class="tbtn" id="btn-move" aria-pressed="false" title="drag a cage to move it on the floor">
+          move
+        </button>
+        <label class="clock" title="clock speed — 1x is the scene's own pace">
+          <span class="clock-glyph" aria-hidden="true">⏱</span>
           <input type="range" id="speed" min="0.25" max="4" step="0.25" value="1" />
-          <b id="speed-val">1×</b>
+          <b id="speed-val" hidden>1x</b>
         </label>
-        <div class="switches">
-          <label class="switch">
-            <input type="checkbox" id="chk-orbit" checked />
-            <span class="track"></span>
-            <span class="label">auto orbit</span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="chk-fly" />
-            <span class="track"></span>
-            <span class="label">fly · wasd</span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="chk-move" />
-            <span class="track"></span>
-            <span class="label">move · drag</span>
-          </label>
-        </div>
-        <p class="hint" id="fly-hint" hidden>hold mouse to look · w a s d + q e · shift</p>
-        <p class="hint" id="move-hint" hidden>drag a cage · snaps to the 2-unit floor grid</p>
-      </section>
+        <span class="flyhint" id="fly-hint" hidden>press esc to stop flying</span>
+      </div>
     </div>
 
     <div id="crosshair" class="crosshair" hidden></div>
     <div id="tooltip" class="tooltip"></div>
+
+    <!--
+      The inspector belongs to no database panel: it describes whatever is under
+      the cursor, which may belong to either cage, and it has to be readable with
+      both panels closed. Its own card, bottom right, above the credits.
+    -->
+    <section class="hud card inspector" id="inspector" hidden>
+      <h2 id="ins-title">Inspector</h2>
+      <p id="ins-body"></p>
+      <p class="ins-meta" id="ins-meta"></p>
+    </section>
 
     <div class="hud credits">
       <a class="gh" id="gh-star" href="https://github.com/nikolaydubina/postgresql-inside" target="_blank" rel="noopener" title="Star this project on GitHub" aria-label="Star nikolaydubina/postgresql-inside on GitHub">
