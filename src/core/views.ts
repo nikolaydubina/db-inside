@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { WORLD_ANCHOR as ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, POSTGRES_ORIGIN, pageX, pageZ } from '../postgresql/instance'
+import { WORLD_ANCHOR as ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, POSTGRES_ORIGIN, PROCESS, pageX, pageZ } from '../postgresql/instance'
 import { REDIS_ANCHOR, REDIS_ORIGIN } from '../redis/redis'
 import type { Ticker } from './util'
 import { easeInOutCubic } from './util'
@@ -257,9 +257,10 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'pipeline',
         label: 'pipeline',
-        entity: 'parser → executor',
-        hint: 'parse → plan → execute orbs and the query path between them',
-        pose: () => shot(V(0.2, 6.8, -2.2), [0.5, 4.5, 12], 36),
+        entity: 'process pipelines',
+        hint: 'one dashed lane per live backend: parser → planner → executor, running in parallel',
+        pose: () =>
+            shot(V(0, PROCESS.y, (PROCESS.zParse + PROCESS.zExec) / 2), [4.5, 4.2, 13], 38),
     },
     {
         id: 'indexes',

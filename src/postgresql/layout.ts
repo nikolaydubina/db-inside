@@ -213,11 +213,33 @@ export const TABLE_REGIONS: TableRegion[] = [
   },
 ]
 
+/**
+ * One backend's private pipeline: a dashed lane near the lid, elongated along Z.
+ * The parser sits nearest its connection, the executor nearest the shared
+ * memory it reads. Six slots mean six of these can run at once — that row IS
+ * the parallelism, while the buffer pool, WAL and disk below are shared.
+ */
+export const PROCESS = {
+  y: 8.45,
+  zParse: 4.85,
+  zPlan: 3.35,
+  zExec: 1.85,
+  /** dashed process boundary: long along z, snug around the orbs */
+  w: 1.8,
+  h: 1.5,
+  d: 5.0,
+  /** orb sizes: smaller than a cage ornament, because six lanes must coexist */
+  coreR: 0.3,
+  cageR: 0.58,
+  ringR: 0.72,
+  haloR: 1.9,
+}
+
 export const ANCHOR = {
   sky: V(-11.0, 27, 0.8),
-  parse: V(-9.4, 6.55, -2.0),
-  plan: V(-4.4, 6.85, -2.4),
-  exec: V(1.6, 6.85, -2.4),
+  parse: V(1.9, PROCESS.y, PROCESS.zParse),
+  plan: V(1.9, PROCESS.y, PROCESS.zPlan),
+  exec: V(1.9, PROCESS.y, PROCESS.zExec),
   bufferCenter: V(-1.0, 5.35, -2.125),
   wal: V(-4.0, 0.55, pageZ(WAL_ROW)),
   /**

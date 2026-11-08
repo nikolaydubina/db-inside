@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import { ANCHOR, INBUF_CELLS, PALETTE, PostgresInstance } from './instance'
+import { INBUF_CELLS, PALETTE, PostgresInstance } from './instance'
 import type { BackendPod } from './instance'
 import { QueryChain, pathCurve } from '../core/flow'
 import type { FlowSet, Paths } from '../core/flow'
@@ -222,11 +222,11 @@ export class EngineSim {
    * Executor → a page. The curve ends exactly on the centre of that block's
    * top face, so an arrow never stops at some point in mid-air.
    */
-  private execTo(target: THREE.Vector3) {
+  private execTo(from: THREE.Vector3, target: THREE.Vector3) {
     return pathCurve([
-      ANCHOR.exec.clone(),
-      new THREE.Vector3(1.2, 6.7, -1.6),
-      new THREE.Vector3(0.4, 6.4, -0.7),
+      from.clone(),
+      from.clone().add(new THREE.Vector3(0.55, -0.75, -0.9)),
+      new THREE.Vector3(from.x * 0.35, 6.6, 0.4),
       target.clone().add(new THREE.Vector3(0, 1.2, 0)),
       target,
     ])
@@ -406,44 +406,58 @@ export class EngineSim {
     // the bytes are already inside the backend, so the work starts at the
     // bottom of its input buffer — the shaft is what the flow passes through
     const bufferExit = this.inst.backendBufferExit(pod)
+    const pipe = pod.pipeline.nodes
+    const parse = pipe.parse.group.position.clone()
+    const plan = pipe.plan.group.position.clone()
+    const exec = pipe.exec.group.position.clone()
     const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
     packet.position.copy(bufferExit)
 
     try {
       // 1. backend hands the query to the parser — the line picks up at the
       // bottom of the input buffer, so the flow reads as one continuous route:
-      // client wire → port → buffer shaft → inside the engine
+      // client wire → port → buffer shaft → this process's own parser
       const toParse = pathCurve([
         bufferExit,
-        new THREE.Vector3(origin.x * 0.9, 8.2, 4.6),
-        new THREE.Vector3(ANCHOR.parse.x + 2.8, 7.5, 0.6),
-        ANCHOR.parse.clone(),
+        new THREE.Vector3(origin.x, 8.4, 5.3),
+        new THREE.Vector3(parse.x + 0.75, 8.62, 5.0),
+        parse.clone(),
       ])
       const fToParse = chain.addCurve(toParse, PALETTE.cyan, {
         speed: 0.55,
         opacity: 0.36,
       })
       await travel(this.ticker, packet, toParse, 0.5)
-      this.inst.pulseNode('parse', 0.8)
+      this.inst.pulseNode(pod, 'parse', 0.8)
       fToParse.flash(0.8)
 
-      // 3. parser → planner
-      const fParse = chain.addCurve(this.paths.parse, PALETTE.cyan, {
+      // 3. parser → planner, in the same process
+      const parseCurve = pathCurve([
+        parse,
+        parse.clone().lerp(plan, 0.5).add(new THREE.Vector3(0.45, 0.18, 0)),
+        plan,
+      ])
+      const fParse = chain.addCurve(parseCurve, PALETTE.cyan, {
         speed: 0.55,
         opacity: 0.4,
       })
-      await travel(this.ticker, packet, this.paths.parse, 0.4)
-      this.inst.pulseNode('plan', 0.9)
+      await travel(this.ticker, packet, parseCurve, 0.4)
+      this.inst.pulseNode(pod, 'plan', 0.9)
       fParse.flash(0.8)
       await this.ticker.wait(0.08)
 
-      // 4. planner → executor
-      const fPlan = chain.addCurve(this.paths.plan, PALETTE.cyan, {
+      // 4. planner → executor, still this backend's own lane
+      const planCurve = pathCurve([
+        plan,
+        plan.clone().lerp(exec, 0.5).add(new THREE.Vector3(0.45, 0.18, 0)),
+        exec,
+      ])
+      const fPlan = chain.addCurve(planCurve, PALETTE.cyan, {
         speed: 0.55,
         opacity: 0.4,
       })
-      await travel(this.ticker, packet, this.paths.plan, 0.4)
-      this.inst.pulseNode('exec', 1)
+      await travel(this.ticker, packet, planCurve, 0.4)
+      this.inst.pulseNode(pod, 'exec', 1)
       fPlan.flash(0.8)
 
       // WAL first — but only when something actually changes, and only into
@@ -453,9 +467,17 @@ export class EngineSim {
       const writes = kind === 'insert' || kind === 'delete'
       if (writes) {
         const walBytesFor = kind === 'insert' ? 384 : 320
+        const walTo = this.inst.pathEnd('walBuf')
+        const walFrom = exec.clone()
+        const walCurve = pathCurve([
+          walFrom,
+          walFrom.clone().add(new THREE.Vector3(0.35, -0.7, -0.9)),
+          walTo.clone().add(new THREE.Vector3(0, 1.0, 0)),
+          walTo,
+        ])
         const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
-        walPack.position.copy(this.paths.ambient.execToWal.points(1)[0])
-        void travel(this.ticker, walPack, this.paths.ambient.execToWal.curve(), 0.4).then(() => {
+        walPack.position.copy(walFrom)
+        void travel(this.ticker, walPack, walCurve, 0.4).then(() => {
           this.inst.appendWal(0.3)
           this.walBytes += walBytesFor
           this.bufferedBytes += walBytesFor
@@ -469,11 +491,12 @@ export class EngineSim {
       if (kind === 'insert' || kind === 'delete') {
         // a write never touches a disk block: the executor modifies the copy in
         // a shared buffer slot, which turns dirty and waits for the checkpointer
-        const fExec = chain.addCurve(this.paths.exec, PALETTE.teal, {
+        const execCurve = this.execTo(exec, this.paths.bufferTop.clone())
+        const fExec = chain.addCurve(execCurve, PALETTE.teal, {
           speed: 0.5,
           opacity: 0.4,
         })
-        await travel(this.ticker, packet, this.paths.exec, 0.4)
+        await travel(this.ticker, packet, execCurve, 0.4)
         fExec.flash(0.75)
 
         const slot = this.inst.writeIntoBuffer(kind)
@@ -507,7 +530,7 @@ export class EngineSim {
         // the arrow lands on the top face of the exact buffer page it will read
         const page = this.inst.pages[pageIdx]
         const toPage = this.inst.pageTop(page)
-        const execCurve = this.execTo(toPage)
+        const execCurve = this.execTo(exec, toPage)
         const fExec = chain.addCurve(execCurve, PALETTE.teal, {
           speed: 0.5,
           opacity: 0.44,
@@ -529,7 +552,7 @@ export class EngineSim {
         const page = this.inst.pages[pageIdx]
         const slotTop = this.inst.pageTop(page)
 
-        const execCurve = this.execTo(slotTop)
+        const execCurve = this.execTo(exec, slotTop)
         const fExec = chain.addCurve(execCurve, PALETTE.teal, {
           speed: 0.5,
           opacity: 0.4,
@@ -601,10 +624,9 @@ export class EngineSim {
       // to the wire protocol as they are produced, so they stream out of the
       // port the query arrived on.
       const rows = makePacket(PALETTE.teal, 0.3, this.scene)
-      rows.position.copy(this.paths.bufferTop)
+      rows.position.copy(exec)
       const toPort = pathCurve([
-        this.paths.bufferTop,
-        new THREE.Vector3(2.4, 6.6, 0.4),
+        exec,
         new THREE.Vector3(origin.x * 0.95, 9.2, origin.z - 2.0),
         outPort.clone(),
       ])

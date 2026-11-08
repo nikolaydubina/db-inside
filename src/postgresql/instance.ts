@@ -22,7 +22,7 @@ import {
 } from '../core/util'
 import type { PathEnd } from '../core/flow'
 import { freeAt as fragmentedFree } from '../disk/fragmentation'
-import { PALETTE, ANCHOR, BLOCK_FREE, BUFFER_COLS, BUFFER_ROWS, BUFFER_TOP_Y, BUFFER_Y, BUF_DARK, BUF_FILL_BRIGHT, BUF_FILL_DARK, DISK_FIELD, DISK_LABEL_PAD, FILL_BRIGHT, FILL_DARK, FLOOR_LABEL_Y, PAGE_CELL, PAGE_GRID, PAGE_TOP_Y, PAGE_Y, POSTGRES_ORIGIN, RAM_LIFT, SYSTEM_GREY, SYSTEM_RUNS, TABLE_REGIONS, WAL_BUF_LEN, WAL_C0, WAL_LEN, WAL_ROW, WORLD_ANCHOR, bufferSlotX, bufferSlotZ, pageX, pageZ, rebaseAnchors } from './layout'
+import { PALETTE, ANCHOR, BLOCK_FREE, BUFFER_COLS, BUFFER_ROWS, BUFFER_TOP_Y, BUFFER_Y, BUF_DARK, BUF_FILL_BRIGHT, BUF_FILL_DARK, DISK_FIELD, DISK_LABEL_PAD, FILL_BRIGHT, FILL_DARK, FLOOR_LABEL_Y, PAGE_CELL, PAGE_GRID, PAGE_TOP_Y, PAGE_Y, POSTGRES_ORIGIN, PROCESS, RAM_LIFT, SYSTEM_GREY, SYSTEM_RUNS, TABLE_REGIONS, WAL_BUF_LEN, WAL_C0, WAL_LEN, WAL_ROW, WORLD_ANCHOR, bufferSlotX, bufferSlotZ, pageX, pageZ, rebaseAnchors } from './layout'
 import type { SystemArea } from './layout'
 export * from './layout'
 
@@ -153,6 +153,8 @@ export interface BackendPod {
   pending: number
   /** the drawn cells of the input buffer */
   cells: THREE.Mesh[]
+  /** this process's own parser → planner → executor lane */
+  pipeline: ProcessPipeline
 }
 
 export interface PipelineNode {
@@ -163,6 +165,13 @@ export interface PipelineNode {
   baseScale: number
   home: THREE.Vector3
   pulse: number
+}
+
+/** One live backend's private parse → plan → execute lane. */
+export interface ProcessPipeline {
+  group: THREE.Group
+  cage: OutlineBox
+  nodes: Record<NodeName, PipelineNode>
 }
 
 const glowMat = (
@@ -188,7 +197,6 @@ export class PostgresInstance {
   /** The blocks that belong to a table, i.e. the ones VACUUM can touch. */
   readonly tableBlocks: Page8K[] = []
   readonly pickables: THREE.Object3D[] = []
-  readonly nodes: Record<NodeName, PipelineNode>
   readonly walBufferMats: THREE.MeshStandardMaterial[] = []
   /** The page blocks that belong to the WAL run, in write order. */
   readonly walBlocks: Page8K[] = []
@@ -242,7 +250,6 @@ export class PostgresInstance {
     this.buildHash()
     this.buildLocks()
     this.buildBackends()
-    this.nodes = this.buildPipeline()
     this.scanner = this.makeScanner()
     this.vacuumDrone = this.makeVacuumDrone()
 
@@ -1624,6 +1631,7 @@ export class PostgresInstance {
         inbuf: 0,
         pending: 0,
         cells,
+        pipeline: this.buildProcessPipeline(i, x),
       })
     })
   }
@@ -1642,6 +1650,7 @@ export class PostgresInstance {
     // a recycled slot must not inherit counters from its previous life
     free.inbuf = 0
     free.pending = 0
+    free.pipeline.group.visible = true
     // no bookkeeping for the pointer: the pod's group is shown while the
     // connection is open, and the pick is a child of it
     return free
@@ -1657,6 +1666,7 @@ export class PostgresInstance {
     victim.busy = false
     victim.inbuf = 0
     victim.pending = 0
+    victim.pipeline.group.visible = false
     return true
   }
 
@@ -1758,11 +1768,23 @@ export class PostgresInstance {
     return this.backends.length
   }
 
-  private buildPipeline(): Record<NodeName, PipelineNode> {
-    const defs: { name: NodeName; pos: THREE.Vector3; color: number; text: string; info: Info }[] = [
+  /**
+   * One backend's own parser → planner → executor lane.
+   *
+   * Six of these slots exist; only the active processes are drawn. The dashed
+   * cage is the process boundary: everything inside belongs to that backend,
+   * while the buffer pool, WAL and disk below are shared. Seeing several lanes
+   * at once is the point — two statements can be in different stages at the
+   * same time because each backend owns its own pipeline.
+   */
+  private buildProcessPipeline(index: number, x: number): ProcessPipeline {
+    const group = new THREE.Group()
+    this.group.add(group)
+
+    const defs: { name: NodeName; z: number; color: number; text: string; info: Info }[] = [
       {
         name: 'parse',
-        pos: ANCHOR.parse,
+        z: PROCESS.zParse,
         color: PALETTE.cyan,
         text: 'PARSER',
         info: {
@@ -1773,7 +1795,7 @@ export class PostgresInstance {
       },
       {
         name: 'plan',
-        pos: ANCHOR.plan,
+        z: PROCESS.zPlan,
         color: PALETTE.violet,
         text: 'PLANNER',
         info: {
@@ -1784,7 +1806,7 @@ export class PostgresInstance {
       },
       {
         name: 'exec',
-        pos: ANCHOR.exec,
+        z: PROCESS.zExec,
         color: PALETTE.teal,
         text: 'EXECUTOR',
         info: {
@@ -1795,34 +1817,35 @@ export class PostgresInstance {
       },
     ]
 
-    const out = {} as Record<NodeName, PipelineNode>
+    const nodes = {} as Record<NodeName, PipelineNode>
     for (const def of defs) {
-      const group = new THREE.Group()
-      group.position.copy(def.pos)
+      const pos = new THREE.Vector3(x, PROCESS.y, def.z)
+      const node = new THREE.Group()
+      node.position.copy(pos)
 
       const coreMat = new THREE.MeshStandardMaterial({
         color: 0x08131c,
         emissive: def.color,
-        emissiveIntensity: 1.0,
+        emissiveIntensity: 0.45,
         roughness: 0.25,
         metalness: 0.5,
       })
-      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(0.42, 1), coreMat)
-      group.add(core)
+      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(PROCESS.coreR, 1), coreMat)
+      node.add(core)
 
       const cageMat = new THREE.MeshStandardMaterial({
         color: 0x0d2431,
         emissive: def.color,
-        emissiveIntensity: 0.4,
+        emissiveIntensity: 0.3,
         wireframe: true,
         transparent: true,
         opacity: 0.55,
       })
-      const cage = new THREE.Mesh(new THREE.IcosahedronGeometry(0.82, 1), cageMat)
-      group.add(cage)
+      const cage = new THREE.Mesh(new THREE.IcosahedronGeometry(PROCESS.cageR, 1), cageMat)
+      node.add(cage)
 
       const ring = new THREE.Mesh(
-        new THREE.TorusGeometry(1.02, 0.016, 6, 64),
+        new THREE.TorusGeometry(PROCESS.ringR, 0.014, 6, 48),
         new THREE.MeshBasicMaterial({
           color: def.color,
           transparent: true,
@@ -1831,27 +1854,52 @@ export class PostgresInstance {
         }),
       )
       ring.rotation.x = Math.PI / 2
-      group.add(ring)
+      node.add(ring)
 
-      group.add(halo(def.color, 2.6, 0.2))
+      node.add(halo(def.color, PROCESS.haloR, 0.18))
 
       const lab = label(def.text)
-      lab.position.set(0.95, 0.05, 0)
-      group.add(lab)
+      lab.position.set(PROCESS.ringR + 0.16, 0.05, 0)
+      node.add(lab)
 
-      this.register(group, def.info)
-      this.group.add(group)
-      out[def.name] = {
-        group,
+      this.register(node, {
+        ...def.info,
+        title: `${def.info.title} · process ${index + 1}`,
+      })
+      group.add(node)
+      nodes[def.name] = {
+        group: node,
         core: coreMat,
         cage: cageMat,
         ring,
         baseScale: 1,
-        home: def.pos.clone(),
+        home: pos.clone(),
         pulse: 0,
       }
     }
-    return out
+
+    const cage = new OutlineBox(
+      PROCESS.w,
+      PROCESS.h,
+      PROCESS.d,
+      PALETTE.cyan,
+      0.45,
+      { dashed: true },
+    ).centre(x, PROCESS.y, (PROCESS.zParse + PROCESS.zExec) / 2)
+    group.add(cage)
+    this.register(cage, {
+      title: `Process ${index + 1} — parser → planner → executor`,
+      body:
+        'Each live backend owns its own parser, planner and executor, running in its own process. A statement arrives on this connection, becomes a parse tree, is costed into a plan and is executed here — and while this process is executing, another backend can be parsing or planning its own statement. That is the parallelism this lane makes visible. What the processes share is below the dashed box: one buffer pool, one WAL, one disk.',
+      meta: 'backend process · private pipeline · one statement at a time',
+    })
+
+    const lab = label(`PROCESS ${index + 1}`)
+    lab.position.set(x, PROCESS.y + PROCESS.h / 2 + 0.35, PROCESS.zParse + 0.35)
+    group.add(lab)
+
+    group.visible = false
+    return { group, cage, nodes }
   }
 
   private makeScanner() {
@@ -1997,14 +2045,22 @@ export class PostgresInstance {
    * which is exactly how the executor→wal_buffers arrow ended up outside the
    * cage. Attach the path to the part, and let the part say where it is.
    */
+  /**
+   * The node of the process that is doing the work right now: a busy backend
+   * first, then any open one, then the first slot as a safe fallback.
+   */
+  private busiestPipeline(name: NodeName): PipelineNode {
+    const open = this.backends.filter((b) => b.active)
+    const pod = open.find((b) => b.busy) ?? open[0] ?? this.backends[0]
+    return pod.pipeline.nodes[name]
+  }
+
   pathEnd(name: PathEnd): THREE.Vector3 {
     switch (name) {
       case 'parse':
-        return this.nodes.parse.group.position.clone()
       case 'plan':
-        return this.nodes.plan.group.position.clone()
       case 'exec':
-        return this.nodes.exec.group.position.clone()
+        return this.busiestPipeline(name).group.position.clone()
       case 'walBuf':
         return this.walBufferTop()
       case 'walHead':
@@ -2143,8 +2199,8 @@ export class PostgresInstance {
     }
   }
 
-  pulseNode(name: NodeName, strength = 1) {
-    const n = this.nodes[name]
+  pulseNode(pod: BackendPod, name: NodeName, strength = 1) {
+    const n = pod.pipeline.nodes[name]
     if (n) n.pulse = Math.max(n.pulse, strength)
   }
 
@@ -2322,24 +2378,7 @@ export class PostgresInstance {
       })
     }
 
-    // pipeline nodes drift like slow satellites and breathe when they work
-    for (const key of Object.keys(this.nodes) as NodeName[]) {
-      const n = this.nodes[key]
-      const phase = n.home.x * 0.7 + n.home.z
-      n.pulse = Math.max(0, n.pulse - dt * 1.9)
-      n.ring.rotation.z += dt * (key === 'exec' ? 1.5 : 0.7)
-      n.group.position.set(
-        n.home.x + Math.sin(time * 0.42 + phase) * 0.1,
-        n.home.y +
-        Math.sin(time * 0.75 + phase * 1.3) * 0.16 +
-        Math.sin(time * 1.9 + phase) * 0.04 +
-        n.pulse * 0.12,
-        n.home.z + Math.cos(time * 0.5 + phase) * 0.1,
-      )
-      n.group.rotation.y += dt * 0.12
-      n.core.emissiveIntensity = 1.0 + n.pulse * 1.6
-      n.group.scale.setScalar(1 + Math.sin(time * 1.2 + phase) * 0.035 + n.pulse * 0.12)
-    }
+    // pipeline nodes drift and breathe with their owning backend, below
 
     // index highlight when index scan is on
     this.btreeMats.forEach((m, i) => {
@@ -2358,6 +2397,28 @@ export class PostgresInstance {
     for (const b of this.backends) {
       b.pulse = Math.max(0, b.pulse - dt * 2.2)
       b.group.visible = b.active
+      b.pipeline.group.visible = b.active
+
+      if (b.active) {
+        for (const key of ['parse', 'plan', 'exec'] as NodeName[]) {
+          const n = b.pipeline.nodes[key]
+          const phase = n.home.x * 0.7 + n.home.z
+          n.pulse = Math.max(0, n.pulse - dt * 1.9)
+          n.ring.rotation.z += dt * (key === 'exec' ? 1.5 : 0.7)
+          n.group.position.set(
+            n.home.x + Math.sin(time * 0.42 + phase) * 0.05,
+            n.home.y +
+              Math.sin(time * 0.75 + phase * 1.3) * 0.09 +
+              Math.sin(time * 1.9 + phase) * 0.03 +
+              n.pulse * 0.12,
+            n.home.z + Math.cos(time * 0.5 + phase) * 0.05,
+          )
+          n.group.rotation.y += dt * 0.12
+          n.core.emissiveIntensity = (b.busy ? 1.0 : 0.35) + n.pulse * 1.6
+          n.cage.emissiveIntensity = 0.3 + n.pulse * 0.5
+          n.group.scale.setScalar(1 + Math.sin(time * 1.2 + phase) * 0.035 + n.pulse * 0.12)
+        }
+      }
 
       if (b.busy) {
         b.ring.emissiveIntensity = 2.6 + b.pulse * 2
