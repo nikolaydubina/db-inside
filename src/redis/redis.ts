@@ -23,7 +23,7 @@ import {
     randInt,
     slotLattice,
 } from '../core/util'
-import { CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, keyX, keyZ, xAt, zAt, } from './layout'
+import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, keyX, keyZ, xAt, zAt, } from './layout'
 export * from './layout'
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
@@ -177,10 +177,12 @@ export class RedisInstance {
     readonly keys: RedisKey[] = []
     readonly ports: RedisPort[] = []
 
-    /** The 8 kB lattice. Same geometry and spacing as the postgres disk. */
+    /**
+     * The 4 kB block every file on this floor is made of: half the depth of the
+     * 8 kB page next door, so two of them fill one cell of the shared lattice.
+     */
     readonly blockGeo = new RoundedBoxGeometry(BLOCK.w, BLOCK.h, BLOCK.d, 1, 0.02)
-    /** One key. Deliberately much smaller than a block — see KEY above. */
-    readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
+    /** One key. Deliberately much smaller than a block — see KEY above. */    readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
 
     private disk!: THREE.InstancedMesh
     private dictMesh!: THREE.InstancedMesh
@@ -484,11 +486,11 @@ export class RedisInstance {
         }
         if (field.instanceColor) field.instanceColor.needsUpdate = true
 
-        // Where the log grows: a snake across the free floor, starting at the
-        // front edge and running one block per append. This is the answer to
-        // "what happens when it reaches the end" — it does not wrap and it does
-        // not drop: an append-only file gets LONGER, and this is the order it
-        // takes the empty blocks in. Only a rewrite ever makes it shorter.
+        // Where the log grows: cell row by cell row from the front edge. Within a
+        // row it fills one 4 kB cell per column, and because an 8 kB page is two
+        // cells wide, x-first also fills a page before moving on. This is the
+        // order it takes the empty cells in; it never wraps and never drops, and
+        // only a rewrite makes it shorter.
         this.aofOrder = []
         this.aofIndex.clear()
         let leftToRight = true
@@ -514,15 +516,16 @@ export class RedisInstance {
         // runs once the log's outline exists — fitAofEdge() is what sizes it.
         this.aofHead = AOF_SEED
 
-        // The base file is one sequential write, so its blocks are laid out in the
-        // order the encoder emits them — left to right, then right to left. A file
-        // is a stream: it does not jump back to the left edge at every row.
+        // The base file is one sequential write, so it takes its cells row by
+        // row, left to right and then right to left. A file is a stream, so the
+        // columns snake rather than jumping back to the left edge at every row.
         this.rdbOrder = []
         for (let r = RDB.r0; r <= RDB.r1; r++) {
-            const row: number[] = []
-            for (let c = RDB.c0; c <= RDB.c1; c++) row.push(r * COLS + c)
-            if ((r - RDB.r0) % 2 === 1) row.reverse()
-            for (const id of row) {
+            const cols: number[] = []
+            for (let c = RDB.c0; c <= RDB.c1; c++) cols.push(c)
+            if ((r - RDB.r0) % 2 === 1) cols.reverse()
+            for (const c of cols) {
+                const id = r * COLS + c
                 this.rdbIndex.set(id, this.rdbOrder.length)
                 this.rdbOrder.push(id)
             }
@@ -535,22 +538,24 @@ export class RedisInstance {
         // rewrite takes it back down. The cage is fitted to the blocks the file
         // has actually reached (see fitAofEdge), so "where the file ends" and
         // "where the outline ends" are the same fact.
-        const ax0 = xAt(AOF_C0) - PITCH / 2
-        const ax1 = xAt(AOF_C0 + AOF_SEED) + PITCH / 2
-        const az0 = zAt(AOF_ROW) - PITCH / 2
-        const az1 = zAt(AOF_ROW) + PITCH / 2
+        const ax0 = xAt(AOF_C0) - CELL / 2
+        const ax1 = xAt(AOF_C0 + AOF_SEED) + CELL / 2
+        const az0 = zAt(AOF_ROW) - CELL / 2
+        const az1 = zAt(AOF_ROW) + CELL / 2
         const aofEdge = new OutlineBox(
             ax1 - ax0,
-            0.5,
+            CELL,
             az1 - az0,
             PALETTE.amber,
             0.75,
-        ).centre((ax0 + ax1) / 2, PAGE_Y + 0.1, (az0 + az1) / 2)
+        ).centre((ax0 + ax1) / 2, PAGE_Y, (az0 + az1) / 2)
         this.group.add(aofEdge)
         this.aofEdge = aofEdge
 
         const aofPick = new THREE.Mesh(
-            new THREE.BoxGeometry(ax1 - ax0, 1.4, az1 - az0),
+            // unit box, scaled to the file's extent by fitAofEdge(): a real-size
+            // geometry scaled again would make the pick far larger than the file
+            new THREE.BoxGeometry(1, 1.4, 1),
             new THREE.MeshBasicMaterial({ visible: false }),
         )
         aofPick.position.set((ax0 + ax1) / 2, PAGE_Y + 0.5, (az0 + az1) / 2)
@@ -586,11 +591,11 @@ export class RedisInstance {
         // length IS a property of the data — it is rewritten from scratch by every
         // save — so the cage is regrown to hug whatever the file currently covers
         // (see fitRdbEdge).
-        const rdbW = (RDB.c1 - RDB.c0 + 1) * PITCH
-        const rdbD = (RDB.r1 - RDB.r0 + 1) * PITCH
-        const rdbEdge = new OutlineBox(rdbW, 0.5, rdbD, PALETTE.teal, 0.7).centre(
+        const rdbW = (RDB.c1 - RDB.c0 + 1) * CELL
+        const rdbD = (RDB.r1 - RDB.r0 + 1) * CELL
+        const rdbEdge = new OutlineBox(rdbW, CELL, rdbD, PALETTE.teal, 0.7).centre(
             RDB_CENTRE.x,
-            PAGE_Y + 0.1,
+            PAGE_Y,
             RDB_CENTRE.z,
         )
         this.group.add(rdbEdge)
@@ -614,15 +619,17 @@ export class RedisInstance {
         )
 
         // The slot lattice, over the whole field and from the same builder the
-        // postgres disk uses: one grid for both disks, at one pitch, covering
-        // every place a block can be — not only the part with no blocks in it.
+        // postgres disk uses: one square 4 kB address lattice for both disks,
+        // covering every place a block can be. An 8 kB page next door covers
+        // two cells along x; a redis file block covers one.
         this.group.add(
             slotLattice(
-                xAt(0) - PITCH / 2,
-                xAt(COLS - 1) + PITCH / 2,
-                zAt(0) - PITCH / 2,
-                zAt(ROWS - 1) + PITCH / 2,
-                PITCH,
+                xAt(0) - CELL / 2,
+                xAt(COLS - 1) + CELL / 2,
+                zAt(0) - CELL / 2,
+                zAt(ROWS - 1) + CELL / 2,
+                CELL,
+                CELL,
             ),
         )
 
@@ -659,7 +666,7 @@ export class RedisInstance {
             color: 'rgba(120, 170, 190, 0.75)',
             opacity: 0.8,
         })
-        freeLab.position.set(xAt(28), FLOOR_LABEL_Y, zAt(6))
+        freeLab.position.set(xAt(56), FLOOR_LABEL_Y, zAt(12))
         this.group.add(freeLab)
 
         this.register(
@@ -907,14 +914,14 @@ export class RedisInstance {
                 opacity: 0.94,
             })
             const cube = new THREE.Mesh(this.blockGeo, mat)
-            cube.position.set((n - (AOF_BUF_CELLS - 1) / 2) * PITCH, 0, 0)
+            cube.position.set((n - (AOF_BUF_CELLS - 1) / 2) * CELL, 0, 0)
             cube.add(neonEdges(this.blockGeo, 0x8fe6ff, 0.55))
             bufGroup.add(cube)
             this.aofBufCells.push(cube)
             this.aofBufMats.push(mat)
         }
         const bufPick = new THREE.Mesh(
-            new THREE.BoxGeometry(AOF_BUF_CELLS * PITCH, 0.6, BLOCK.d * 1.3),
+            new THREE.BoxGeometry(AOF_BUF_CELLS * CELL, 0.6, BLOCK.d * 1.3),
             new THREE.MeshBasicMaterial({ visible: false }),
         )
         bufPick.position.set(0, 0.1, 0)
@@ -2354,14 +2361,14 @@ export class RedisInstance {
             this.aofPick.visible = false
             return
         }
-        const x0 = xAt(minC) - PITCH / 2
-        const x1 = xAt(maxC) + PITCH / 2
-        const z0 = zAt(minR) - PITCH / 2
-        const z1 = zAt(maxR) + PITCH / 2
+        const x0 = xAt(minC) - CELL / 2
+        const x1 = xAt(maxC) + CELL / 2
+        const z0 = zAt(minR) - CELL / 2
+        const z1 = zAt(maxR) + CELL / 2
         this.aofEdge.visible = true
         this.aofEdge
-            .resize(x1 - x0, 0.5, z1 - z0)
-            .centre((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
+            .resize(x1 - x0, CELL, z1 - z0)
+            .centre((x0 + x1) / 2, PAGE_Y, (z0 + z1) / 2)
         this.aofPick.visible = true
         this.aofPick.scale.set(x1 - x0, 1, z1 - z0)
         this.aofPick.position.set((x0 + x1) / 2, PAGE_Y + 0.5, (z0 + z1) / 2)
@@ -2547,18 +2554,12 @@ export class RedisInstance {
     /**
      * Regrow the cage around the base file to exactly the blocks it covers now.
      *
-     * The file is written in whole rows of ten (see rdbOrder), so the used blocks
-     * are the first `len` of that order: whole rows plus a partial last one. The
-     * cage is fitted to the blocks that are actually in the file and grows and
-     * shrinks with it — a cage over the whole region would claim space the file
-     * does not occupy, which is the one thing a dump's length is not free to do.
+     * The file fills row by row, so a partial row can be a single cell. The
+     * cage is computed from the blocks actually in the file rather than from
+     * "whole rows": a row of the file may end in the middle of an 8 kB page.
      */
     private fitRdbEdge() {
-        const cols = RDB.c1 - RDB.c0 + 1
-        const full = Math.floor(this.rdbLen / cols)
-        const rem = this.rdbLen % cols
-        const rows = full + (rem > 0 ? 1 : 0)
-        if (rows === 0) {
+        if (this.rdbLen === 0) {
             this.rdbEdge.visible = false
             // an empty dump is not a thing to point at: the cage shows the file's
             // length, and with no blocks there is no file to describe
@@ -2567,18 +2568,26 @@ export class RedisInstance {
         }
         this.rdbEdge.visible = true
         this.rdbPick.visible = true
-        // the first row of the file always runs left to right, so a file shorter
-        // than one row covers a prefix of that row
-        let x0 = RDB.c0
-        let x1 = RDB.c1
-        if (full === 0) x1 = RDB.c0 + rem - 1
-        const bx0 = xAt(x0) - PITCH / 2
-        const bx1 = xAt(x1) + PITCH / 2
-        const bz0 = zAt(RDB.r0) - PITCH / 2
-        const bz1 = zAt(RDB.r0 + rows - 1) + PITCH / 2
+        let minC = COLS
+        let maxC = -1
+        let minR = ROWS
+        let maxR = -1
+        for (let k = 0; k < this.rdbLen; k++) {
+            const id = this.rdbOrder[k]
+            const c = id % COLS
+            const r = Math.floor(id / COLS)
+            minC = Math.min(minC, c)
+            maxC = Math.max(maxC, c)
+            minR = Math.min(minR, r)
+            maxR = Math.max(maxR, r)
+        }
+        const bx0 = xAt(minC) - CELL / 2
+        const bx1 = xAt(maxC) + CELL / 2
+        const bz0 = zAt(minR) - CELL / 2
+        const bz1 = zAt(maxR) + CELL / 2
         this.rdbEdge
-            .resize(bx1 - bx0, 0.5, bz1 - bz0)
-            .centre((bx0 + bx1) / 2, PAGE_Y + 0.1, (bz0 + bz1) / 2)
+            .resize(bx1 - bx0, CELL, bz1 - bz0)
+            .centre((bx0 + bx1) / 2, PAGE_Y, (bz0 + bz1) / 2)
     }
 
     /** How many blocks the base file occupies right now — the panel shows it. */
@@ -2989,8 +2998,8 @@ export class RedisInstance {
                 minR = Math.min(minR, r)
                 maxR = Math.max(maxR, r)
             }
-            const wantW = (maxC - minC + 1) * PITCH
-            const wantD = (maxR - minR + 1) * PITCH
+            const wantW = (maxC - minC + 1) * CELL
+            const wantD = (maxR - minR + 1) * CELL
             if (Math.abs(this.aofEdge.w - wantW) > 1e-3) {
                 bad.push(`log cage width ${this.aofEdge.w.toFixed(2)} ≠ the file's ${wantW.toFixed(2)}`)
             }

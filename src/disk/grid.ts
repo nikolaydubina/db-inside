@@ -2,17 +2,26 @@ import * as THREE from 'three'
 import { FLOOR_Y } from '../core/util'
 
 /**
- * The disk lattice, drawn once for every block field in the scene.
+ * The address lattice, drawn once for every block field in the scene.
  *
- * A slot is a place a block can stand whether or not one is standing there — that
- * is what makes a hole in a table legible as free space rather than as bare
- * ground. Both disks (a postgres heap, the redis dump/AOF area) are tiled by this
- * same lattice at the same pitch, so the two are comparable by eye.
+ * Its cell is the filesystem allocation unit — 4 kB — not either database's
+ * page. A postgres 8 kB page spans two cells along z; a redis 4 kB block
+ * stands in one. A slot is a place a block can stand whether or not one is
+ * standing there, which is what makes a hole in a table legible as free space
+ * rather than as bare ground. Both floors use the same lattice, so the two are
+ * comparable by eye.
  */
-export function slotLattice(x0: number, x1: number, z0: number, z1: number, pitch: number) {
+export function slotLattice(
+  x0: number,
+  x1: number,
+  z0: number,
+  z1: number,
+  stepX: number,
+  stepZ: number = stepX,
+) {
   const pts: number[] = []
-  for (let x = x0; x <= x1 + 1e-3; x += pitch) pts.push(x, FLOOR_Y, z0, x, FLOOR_Y, z1)
-  for (let z = z0; z <= z1 + 1e-3; z += pitch) pts.push(x0, FLOOR_Y, z, x1, FLOOR_Y, z)
+  for (let x = x0; x <= x1 + 1e-3; x += stepX) pts.push(x, FLOOR_Y, z0, x, FLOOR_Y, z1)
+  for (let z = z0; z <= z1 + 1e-3; z += stepZ) pts.push(x0, FLOOR_Y, z, x1, FLOOR_Y, z)
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
   return new THREE.LineSegments(

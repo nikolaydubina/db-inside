@@ -287,7 +287,7 @@ export const VIEWS: ViewDef[] = [
         slug: 'free-space',
         entity: 'unallocated tail',
         hint: 'the empty tail of the disk: slot lattice, no pages',
-        pose: () => shot(L(pageX(4), 0, pageZ(8)), [-6.0, 5.5, 11.0], 34),
+        pose: () => shot(L(pageX(4), 0, pageZ(16)), [-6.0, 5.5, 11.0], 34),
     },
     {
         id: 'clients',
@@ -310,7 +310,7 @@ export const VIEWS: ViewDef[] = [
         entity: 'page blocks',
         hint: 'down at block level: individual 8 kB pages of a table run',
         pose: () =>
-            shot(L(pageX(24), 0.25, pageZ(7)), [1.6, 1.1, 2.4], 30, [0, 0.1, 0]),
+            shot(L(pageX(24), 0.25, pageZ(14)), [1.6, 1.1, 2.4], 30, [0, 0.1, 0]),
     },
 ]
 

@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { BLOCK_LIFT, FLOOR_Y } from '../core/util'
+import { CELL_PITCH, PAGE_8K, PAGE_PITCH } from '../disk/page'
 import type { Info } from './instance'
 
 /** The four accents the whole scene is painted with. One place, both cages. */
@@ -25,11 +26,23 @@ export const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 export const RAM_LIFT = 1.15
 
 /**
- * The disk is tiled edge to edge with page blocks. Spacing is 0.5 and the floor
- * grid is drawn every 2 units, so four blocks fit exactly in one grid cell and
- * every fourth block edge lands on a grid line.
+ * The disk is tiled edge to edge with 8 kB page blocks. The shared address
+ * lattice underneath is square 4 kB cells: an 8 kB page is TWO cells wide and
+ * one cell deep, so the page is the composite and the cell is the unit.
+ * X cell pitch and z cell pitch are both CELL_PITCH; the page is two of them.
  */
-export const PAGE_GRID = { cols: 48, rows: 17, gx: 0.5, gz: 0.5, bw: 0.46, bh: 0.28, bd: 0.46 }
+export const PAGE_GRID = {
+  cols: 48,
+  rows: 34,
+  gx: PAGE_PITCH,
+  gz: CELL_PITCH,
+  bw: PAGE_8K.w,
+  bh: PAGE_8K.h,
+  bd: PAGE_8K.d,
+}
+
+/** Side of one square 4 kB address cell, in world units. */
+export const PAGE_CELL = CELL_PITCH
 
 /** Grey tint used for everything postgres owns rather than the user. */
 export const SYSTEM_GREY = 0x93a1ae
@@ -57,7 +70,7 @@ export const SYSTEM_RUNS: {
       label: 'CATALOGS',
       c0: 24,
       c1: 29,
-      rows: [12, 13],
+      rows: [24, 27],
       files: ['pg_class', 'pg_attribute', 'pg_index', 'pg_type', 'pg_proc', 'pg_depend'],
       what: 'The catalog relations every database carries a copy of: what each table is, which columns it has, which indexes exist, and what depends on what. Same 8 kB page as a heap — they are small because there are few of them, not because the pages are smaller: a fresh cluster keeps the whole set in a few megabytes. Queries read them too — the planner asks pg_class and pg_statistic what it is planning over.',
     },
@@ -66,7 +79,7 @@ export const SYSTEM_RUNS: {
       label: 'FSM · VM',
       c0: 30,
       c1: 31,
-      rows: [12, 13],
+      rows: [24, 27],
       files: ['_fsm', '_vm'],
       what: 'Two thin side files per relation, in 8 kB pages like everything else. One byte of free space map per heap page covers 64 MB of relation; two bits of visibility map per page cover 256 MB. The free space map says which pages have room for a new tuple, so an insert need not read every page; the visibility map says which pages are all-visible, which is what lets VACUUM and index-only scans skip work.',
     },
@@ -75,7 +88,7 @@ export const SYSTEM_RUNS: {
       label: 'CLOG',
       c0: 32,
       c1: 33,
-      rows: [12, 13],
+      rows: [24, 27],
       files: ['pg_xact', 'pg_multixact'],
       what: 'Two bits per transaction, and nothing else: committed, aborted, in progress, or not yet assigned. One 8 kB page therefore covers 32,768 transactions, which is why the commit log stays tiny even on a busy server. Every visibility check starts here.',
     },
@@ -86,10 +99,10 @@ export const SYSTEM_RUNS: {
  * in the page lattice, at the front edge of the disk next to the free space it
  * grows into. Segments are appended left to right and recycled in place.
  */
-export const WAL_ROW = 16
+export const WAL_ROW = 33
 export const WAL_BUF_LEN = 4
 
-/* shared_buffers sits on the same 0.5 lattice as the disk, floating above it */
+/* shared_buffers floats on the same address lattice as the disk */
 export const BUFFER_COLS = 12
 export const BUFFER_ROWS = 6
 export const BUFFER_Y = 5.35
@@ -99,9 +112,9 @@ export const bufferSlotZ = (r: number) => -2.75 + r * PAGE_GRID.gz
 export const WAL_C0 = 10
 export const WAL_LEN = 12
 /** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
-export const PAGE_Y = FLOOR_Y + BLOCK_LIFT + PAGE_GRID.bh / 2
+export const PAGE_Y = PAGE_8K.centreY(FLOOR_Y, BLOCK_LIFT)
 export const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
-export const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
+export const pageZ = (row: number) => -0.875 + row * PAGE_GRID.gz
 export const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
 export const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
 /** Outer edge of the block field — the blocks are the only thing in the plate. */
@@ -118,7 +131,7 @@ export const DISK_FIELD = { w: PAGE_W, d: PAGE_D, cz: PAGE_Z0 + PAGE_D / 2 }
  * World Y of the top face of a resting block, on disk and in RAM. Every arrow
  * that lands on a page aims at one of these planes, never at thin air.
  */
-export const PAGE_TOP_Y = PAGE_Y + PAGE_GRID.bh / 2
+export const PAGE_TOP_Y = PAGE_8K.topY(FLOOR_Y, BLOCK_LIFT)
 export const BUFFER_TOP_Y = BUFFER_Y + PAGE_GRID.bh / 2
 
 /**
@@ -161,8 +174,8 @@ export const TABLE_REGIONS: TableRegion[] = [
     label: 'users',
     c0: 19,
     c1: 28,
-    r0: 3,
-    r1: 10,
+    r0: 6,
+    r1: 21,
     color: PALETTE.teal,
     info: {
       title: 'TABLE: users — contiguous 8 kB pages',
@@ -175,8 +188,8 @@ export const TABLE_REGIONS: TableRegion[] = [
     label: 'products',
     c0: 30,
     c1: 39,
-    r0: 3,
-    r1: 10,
+    r0: 6,
+    r1: 21,
     color: PALETTE.amber,
     info: {
       title: 'TABLE: products — 32 contiguous pages',
@@ -189,8 +202,8 @@ export const TABLE_REGIONS: TableRegion[] = [
     label: 'metrics',
     c0: 41,
     c1: 46,
-    r0: 11,
-    r1: 16,
+    r0: 22,
+    r1: 33,
     color: 0x5a7bff,
     info: {
       title: 'TABLE: metrics — 21 contiguous pages',
@@ -205,8 +218,8 @@ export const ANCHOR = {
   parse: V(-9.4, 6.55, -2.0),
   plan: V(-4.4, 6.85, -2.4),
   exec: V(1.6, 6.85, -2.4),
-  bufferCenter: V(-1.0, 5.35, -1.5),
-  wal: V(-4.0, 0.55, 7.25),
+  bufferCenter: V(-1.0, 5.35, -2.125),
+  wal: V(-4.0, 0.55, pageZ(WAL_ROW)),
   /**
    * The wal_buffers strip. It drifts along the run with the write head, so
    * PostgresInstance.update() rewrites this one live, every frame — a view that

@@ -1,14 +1,16 @@
 import * as THREE from 'three'
 
 import { BLOCK_LIFT, FLOOR_Y } from '../core/util'
+import { CELL_PITCH, PAGE_4K, PAGE_PITCH } from '../disk/page'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
 
 /* ------------------------------- layout -------------------------------- */
 /**
  * The second database. Same species as the postgres cage next door — same
- * outline cage, same 8 kB-block lattice on the same plate, same ports on the
- * top rim, same painted floor labels — but a different machine underneath:
- * one thread, no planner, and the data itself living in RAM.
+ * outline cage, same 4 kB address lattice (an 8 kB page spans two cells) on
+ * the same plate, same ports on the top rim, same painted floor labels — but a
+ * different machine underneath: one thread, no planner, and the data itself
+ * living in RAM.
  *
  * Where postgres has pages on the floor and a small cache floating above them,
  * redis has almost nothing on the floor and the dataset itself in the air.
@@ -27,9 +29,19 @@ export const SHELL = { w: 26.0, h: 9.8, d: 16.0 }
  */
 export const FIELD = { w: 24, d: 8.5, cz: 3.25 }
 
-export const PITCH = 0.5
-/** One filesystem block: 4 kB. The only unit a file has. */
-export const BLOCK = { w: 0.46, h: 0.28, d: 0.46 }
+/**
+ * Spacing of the in-memory planes (dict, keyspace, buffers). The disk grid is
+ * finer; see CELL below. Keeping them separate is what lets the 4 kB address
+ * cell be square without shrinking the keyspace.
+ */
+export const PITCH = PAGE_PITCH
+/** Side of one square address cell on the disk grid. */
+export const CELL = CELL_PITCH
+/**
+ * One filesystem block: 4 kB, exactly one square cell. The only unit a file
+ * has. An 8 kB page next door is two of these along x.
+ */
+export const BLOCK = PAGE_4K
 /**
  * One key: a dictEntry, its sds key and its value object. A few hundred bytes at
  * most — twenty times smaller than the 4 kB block it is stored in, which is why a
@@ -39,37 +51,45 @@ export const BLOCK = { w: 0.46, h: 0.28, d: 0.46 }
  */
 export const KEY = { w: 0.16, h: 0.1, d: 0.16 }
 /** What a filesystem stores a byte stream in — the only unit a file has. */
-export const BLOCK_BYTES = 4096
+export const BLOCK_BYTES = PAGE_4K.bytes
 /** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
-export const PAGE_Y = FLOOR_Y + BLOCK_LIFT + BLOCK.h / 2
-export const BLOCK_TOP = PAGE_Y + BLOCK.h / 2
+export const PAGE_Y = PAGE_4K.centreY(FLOOR_Y, BLOCK_LIFT)
+export const BLOCK_TOP = PAGE_4K.topY(FLOOR_Y, BLOCK_LIFT)
 /** Labels are painted on the floor: the same plane as the grid, +3 mm for the glyphs. */
 export const FLOOR_LABEL_Y = FLOOR_Y + 0.003
 /** Gap between the block field's edge and the first glyph of the DISK label. */
 export const DISK_LABEL_PAD = 0.21
 
-export const COLS = 48
-export const ROWS = 17
-export const xAt = (c: number) => -11.75 + c * PITCH
-export const zAt = (r: number) => -0.75 + r * PITCH
+/** 4 kB cells across the 24-unit field. */
+export const COLS = 96
+/** 4 kB cells deep in the 8.5-unit field. */
+export const ROWS = 34
+export const xAt = (c: number) => -11.875 + c * CELL
+export const zAt = (r: number) => -0.875 + r * CELL
 
 /**
  * Persistence, and only persistence, is on the disk: the incremental AOF run
  * at the front edge and the base RDB blob off to one side. Everything else is
  * free space, because the dataset is not here.
  */
-export const AOF_ROW = 16
-export const AOF_C0 = 22
+export const AOF_ROW = ROWS - 1
+/** First cell of the log, chosen so it still begins where the page-level run did. */
+export const AOF_C0 = 44
 /** Blocks the log occupies at boot — it has been running and has not been rewritten yet. */
 export const AOF_SEED = 13
 /**
- * Where a rewrite builds its new file: the row in front of the log, opposite the
- * blocks those writes will end up in. Close enough that the swap is a one-row
- * move you can follow, and far enough that the log's own growth never lands on
- * it (row 14 is 74 blocks away in the growth order).
+ * Where a rewrite builds its new file: four cells (one unit) in front of the
+ * log, opposite the blocks those writes will end up in. Close enough that the
+ * swap is a short move you can follow, and far enough that the log's own growth
+ * never lands on it for a long time.
  */
-export const STAGING_ROW = AOF_ROW - 2
-export const RDB = { c0: 4, c1: 13, r0: 2, r1: 8 }
+export const STAGING_ROW = AOF_ROW - 4
+/**
+ * The base file's area in 4 kB cells: 10 pages wide and 7 pages deep, the same
+ * rectangle as before. Each 8 kB page is two cells along x, so the page count
+ * is unchanged while every cell is square.
+ */
+export const RDB = { c0: 8, c1: 27, r0: 4, r1: 17 }
 
 /**
  * How long one block takes to read or write during a load or a save, in

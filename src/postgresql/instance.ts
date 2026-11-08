@@ -1,8 +1,6 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import {
-  BLOCK_LIFT,
-  FLOOR_Y,
   Ticker,
   OutlineBox,
   PULSE_GAIN,
@@ -22,7 +20,8 @@ import {
   slotLattice,
 } from '../core/util'
 import type { PathEnd } from '../core/flow'
-import { PALETTE, ANCHOR, BLOCK_FREE, BUFFER_COLS, BUFFER_ROWS, BUFFER_TOP_Y, BUFFER_Y, BUF_DARK, BUF_FILL_BRIGHT, BUF_FILL_DARK, DISK_FIELD, DISK_LABEL_PAD, FILL_BRIGHT, FILL_DARK, FLOOR_LABEL_Y, PAGE_GRID, PAGE_TOP_Y, PAGE_Y, POSTGRES_ORIGIN, RAM_LIFT, SYSTEM_GREY, SYSTEM_RUNS, TABLE_REGIONS, WAL_BUF_LEN, WAL_C0, WAL_LEN, WAL_ROW, WORLD_ANCHOR, bufferSlotX, bufferSlotZ, pageX, pageZ, rebaseAnchors } from './layout'
+import { freeAt as fragmentedFree } from '../disk/fragmentation'
+import { PALETTE, ANCHOR, BLOCK_FREE, BUFFER_COLS, BUFFER_ROWS, BUFFER_TOP_Y, BUFFER_Y, BUF_DARK, BUF_FILL_BRIGHT, BUF_FILL_DARK, DISK_FIELD, DISK_LABEL_PAD, FILL_BRIGHT, FILL_DARK, FLOOR_LABEL_Y, PAGE_CELL, PAGE_GRID, PAGE_TOP_Y, PAGE_Y, POSTGRES_ORIGIN, RAM_LIFT, SYSTEM_GREY, SYSTEM_RUNS, TABLE_REGIONS, WAL_BUF_LEN, WAL_C0, WAL_LEN, WAL_ROW, WORLD_ANCHOR, bufferSlotX, bufferSlotZ, pageX, pageZ, rebaseAnchors } from './layout'
 import type { SystemArea } from './layout'
 export * from './layout'
 
@@ -294,7 +293,7 @@ export class PostgresInstance {
     this.group.add(diskFloorPick)
     this.register(diskFloorPick, {
       title: 'Disk — a field of 8 kB pages',
-      body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
+      body: 'Every block is one 8 kB page; brighter and taller means fuller. The grid under the blocks is the 4 kB filesystem cell — two cells make one page — so a page covers two squares and the address lattice stays the unit the OS allocates in. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
       meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
     })
 
@@ -502,11 +501,11 @@ export class PostgresInstance {
     const z1 = pageZ(WAL_ROW) + PAGE_GRID.gz / 2
     const runEdge = new OutlineBox(
       x1 - x0,
-      0.5,
+      PAGE_CELL,
       z1 - z0,
       0xffb03a,
       0.75,
-    ).centre((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
+    ).centre((x0 + x1) / 2, PAGE_Y, (z0 + z1) / 2)
     this.group.add(runEdge)
 
     const pick = new THREE.Mesh(
@@ -652,15 +651,12 @@ export class PostgresInstance {
     const inTable = (r: number, c: number) =>
       TABLE_REGIONS.some((t) => r >= t.r0 && r <= t.r1 && c >= t.c0 && c <= t.c1)
 
-    // Fragmentation grows as you move away from the WAL: packed solid next to
-    // it, thinning out past 60%, and the outer 20% of the disk is untouched
-    // space with no pages in it at all.
-    const freeAt = (c: number) => {
-      const t = 1 - c / (cols - 1)
-      if (t > 0.8) return true
-      if (t > 0.6) return Math.random() < ((t - 0.6) / 0.2) * 0.9
-      return false
-    }
+    // Fragmentation grows along the address axis: packed solid next to the WAL,
+    // thinning out past 60%, and the outer 20% of the disk is untouched space
+    // with no pages in it at all. The law lives in disk/fragmentation.ts — it
+    // describes any used range, not this particular table.
+    const freeAt = (c: number) =>
+      fragmentedFree(c, cols, { packed: 0.6, allFree: 0.8, maxFree: 0.9 })
 
     const dummy = new THREE.Object3D()
     const hints = [PALETTE.teal, PALETTE.violet, 0x5a7bff, PALETTE.amber]
@@ -712,16 +708,18 @@ export class PostgresInstance {
     this.markSystemAreas()
 
     // The slot lattice, over the WHOLE field — every hole left by a fragmented
-    // table is a slot a page can be written into, so it has to be drawn on the
-    // same grid as the packed part and as the untouched tail. Under a block the
-    // lines are simply hidden by it.
+    // table is a cell a page can be written into, so it has to be drawn on the
+    // same grid as the packed part and as the untouched tail. The cell is the
+    // 4 kB allocation unit; an 8 kB page is two cells wide, so the line between
+    // them is hidden under the page it crosses.
     this.group.add(
       slotLattice(
         pageX(0) - PAGE_GRID.gx / 2,
         pageX(cols - 1) + PAGE_GRID.gx / 2,
         pageZ(0) - PAGE_GRID.gz / 2,
         pageZ(rows - 1) + PAGE_GRID.gz / 2,
-        PAGE_GRID.gx,
+        PAGE_CELL,
+        PAGE_CELL,
       ),
     )
 
@@ -999,7 +997,7 @@ export class PostgresInstance {
     const cx = (x0 + x1) / 2
     const cz = (z0 + z1) / 2
 
-    const cage = new OutlineBox(x1 - x0, 0.55, z1 - z0, SYSTEM_GREY, 0.5).centre(
+    const cage = new OutlineBox(x1 - x0, PAGE_CELL, z1 - z0, SYSTEM_GREY, 0.5).centre(
       cx,
       PAGE_Y,
       cz,
@@ -1103,11 +1101,11 @@ export class PostgresInstance {
       const d = z1 - z0
       const cx = (x0 + x1) / 2
       const cz = (z0 + z1) / 2
-      const h = 0.46
+      const h = PAGE_CELL
 
       const edges = new OutlineBox(w, h, d, region.color, 0.85).centre(
         cx,
-        FLOOR_Y + BLOCK_LIFT + h / 2,
+        PAGE_Y,
         cz,
       )
       this.group.add(edges)
@@ -1140,7 +1138,7 @@ export class PostgresInstance {
       weight: 400,
     })
     freeLab.rotation.z = Math.PI / 2
-    freeLab.position.set(pageX(5), FLOOR_LABEL_Y, pageZ(7))
+    freeLab.position.set(pageX(5), FLOOR_LABEL_Y, pageZ(14))
     this.group.add(freeLab)
 
     // tappable: the hole needs somewhere to send its explanation, now that the
@@ -1149,7 +1147,7 @@ export class PostgresInstance {
       new THREE.BoxGeometry(3.2, 0.7, 4.6),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    freePick.position.set(pageX(5), PAGE_Y, pageZ(7))
+    freePick.position.set(pageX(5), PAGE_Y, pageZ(14))
     this.group.add(freePick)
     // nothing to outline: the pick volume is a box of empty air, so hovering it
     // would draw a cage around nothing. The floor label is the marker.
