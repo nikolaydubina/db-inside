@@ -781,6 +781,9 @@ const story = createStory({
     // start from a clean pool: leave one connection, so "one request, one
     // connection" describes what is actually on screen
     instance.closeIdleBackendsTo(1)
+    // and two listeners on the redis floor, so a story about pub/sub starts from
+    // the state its first step claims rather than from whatever was left behind
+    redisSim.resetPubSub()
   },
   onExit: () => {
     sim.ambient = true

@@ -118,6 +118,10 @@ export type StoryFacts = Pick<
     rdRps: number
     bigKeys: number
     hotKeys: number
+    /** sockets in subscriber mode */
+    rdSubs: number
+    /** PUBLISH commands run so far */
+    rdFanouts: number
 }
 
 /**
@@ -171,6 +175,19 @@ export interface StoryStep {
     send?: number
     /** the taps go to the redis cage instead of the postgres one */
     tap?: 'postgres' | 'redis'
+    /**
+     * Keep publishing to the channel while this step is open.
+     *
+     * A publish is over in about a second, and a caption about a fan-out that has
+     * already faded is a caption about nothing — so the step asks for the command
+     * rather than hoping the 7 % of the mix that publishes comes round.
+     */
+    publish?: boolean
+    /**
+     * Have a client send SUBSCRIBE, so the step can show how a socket becomes a
+     * listener. Once per step: a socket cannot subscribe twice.
+     */
+    subscribe?: boolean
     /** wait before firing, so the caption lands before the motion */
     delay?: number
     /** something to trigger, e.g. a checkpoint */
@@ -387,6 +404,62 @@ export const REDIS_SKEW_STORY: StoryStep[] = [
     },
 ]
 
+/**
+ * Pub/sub. Two questions this answers: "where is it?" and "where is the sub?"
+ *
+ * A published message exists for the length of one walk down a list of sockets,
+ * so the story is about a ROUTE, not a structure: it starts at a socket like every
+ * other command, passes the channel — a name, not a key — and ends at other
+ * sockets. And the list it walks has to be BUILT by somebody: the second step is
+ * the SUBSCRIBE that puts a socket on it, which is the only way a socket turns
+ * violet.
+ */
+export const REDIS_PUBSUB_STORY: StoryStep[] = [
+    {
+        title: 'the sockets that are listening',
+        body: 'Two of these connections are violet. They did not connect to run GET — they connected to listen, and while a connection holds a subscription it may only SUBSCRIBE, UNSUBSCRIBE and PING. That is why they are drawn differently: they are a different kind of client, not an ordinary socket with a flag on it. Nothing in the keyspace belongs to them, and nothing about them is on the floor.',
+        view: 'redis-pubsub',
+        expect: (c) => c.rdSubs >= 2,
+        waitFor: 'two sockets in subscriber mode',
+    },
+    {
+        title: 'and this is the sub',
+        body: 'A cyan socket is about to turn violet. SUBSCRIBE arrives like any command — into the queue, then the one thread — and what it does is small and total: the thread writes that fd into the channel\u2019s list. The colour changes at that moment and not at connect time, because until the list has it, this connection is not a listener. The reply it gets back leaves the frame on the same socket, and everything it hears from now on arrives there.',
+        view: 'redis-pubsub',
+        subscribe: true,
+        delay: 600,
+        expect: (c) => c.rdSubs >= 3,
+        waitFor: 'a socket joining the channel',
+    },
+    {
+        title: 'one message, every listener',
+        body: 'This is a PUBLISH. It arrives like any other command and then does something nobody else does: the thread looks up the CHANNEL — the ring beside the loop, a name in its own dict — and walks the list of sockets hanging off it, copying the message into each one. Compare a GET: that hashes a key, lands on a bucket, follows a chain to an entry, and may come back empty. Here there is no bucket and no entry, because a message is not addressed to a key and has no value to find.',
+        view: 'redis-pubsub',
+        publish: true,
+        delay: 700,
+        expect: (c) => c.rdFanouts >= 1,
+        waitFor: 'a publish fanning out to the listening sockets',
+    },
+    {
+        title: 'out of the socket, to the client',
+        body: 'The arc does not stop on the rim. A socket is not where a message ends up — the client behind it is — so each copy carries on out of the frame, the way a request comes in from above. And every channel a connection holds arrives on that same socket: one fd, one connection, many names, all of them delivered by the same thread, one write at a time. Nothing here is a lookup the client has to repeat.',
+        view: 'redis-pubsub',
+        publish: true,
+        delay: 700,
+        expect: (c) => c.rdFanouts >= 3,
+        waitFor: 'the copies leaving the frame',
+    },
+    {
+        title: 'a name, not a key',
+        body: 'None of this touched the log or the dump. The channel is a name with a list of sockets on it — no value, no type, no TTL, and no bytes on the floor. That is why the fan starts at the ring beside the loop and not at a block: if it had a block, it would be storage. And it is why a subscriber that was disconnected while the message went out never learns it existed — there is no backlog to catch up from, and the reply to the publisher is only a count.',
+        view: 'redis-pubsub',
+        publish: true,
+        delay: 700,
+        expect: (c) => c.rdFanouts >= 5 && c.rdSubs >= 3,
+        waitFor: 'the fan running with nothing behind it',
+    },
+]
+
 export interface StoryDef {
     id: string
     label: string
@@ -434,11 +507,6 @@ export const PLANNED_STORIES: { label: string; hint: string; db?: 'postgres' | '
         db: 'redis',
     },
     {
-        label: 'pub/sub',
-        hint: 'no keys, no storage, pure fan-out to N sockets: a path that never touches the keyspace or the log',
-        db: 'redis',
-    },
-    {
         label: 'eviction policy',
         hint: 'LRU/LFU sampling: maxmemory-samples keys, the least recently used of the sample, and whether keys with a TTL go first',
         db: 'redis',
@@ -470,6 +538,13 @@ export const STORIES: StoryDef[] = [
         hint: 'what a large list, hash or sorted set looks like — and why the one thread makes it hurt',
         steps: REDIS_SKEW_STORY,
     },
+    {
+        id: 'pubsub',
+        label: 'pub/sub',
+        db: 'redis',
+        hint: 'no keys, no storage, pure fan-out to N sockets: a path that never touches the keyspace or the log',
+        steps: REDIS_PUBSUB_STORY,
+    },
 ]
 
 export interface StoryOptions {
@@ -483,7 +558,21 @@ export interface StoryOptions {
      */
     redis?: {
         runCommand(): void
-        stats: { keys: number; ops: number; opsPerSec: number; bigKeys: number; hotKeys: number }
+        /** one PUBLISH, now — the pub/sub story's cue */
+        publish(): void
+        /** the next ordinary socket sends SUBSCRIBE */
+        subscribeNext(): boolean
+        /** back to the two listeners a fresh instance has */
+        resetPubSub(): void
+        stats: {
+            keys: number
+            ops: number
+            opsPerSec: number
+            bigKeys: number
+            hotKeys: number
+            subscribers: number
+            fanouts: number
+        }
     }
     stories?: StoryDef[]
     /** set the clock speed for steps that ask for one */
@@ -555,6 +644,8 @@ export function createStory({
             rdRps: r?.opsPerSec ?? 0,
             bigKeys: r?.bigKeys ?? 0,
             hotKeys: r?.hotKeys ?? 0,
+            rdSubs: r?.subscribers ?? 0,
+            rdFanouts: r?.fanouts ?? 0,
         }
     }
 
@@ -664,8 +755,28 @@ export function createStory({
         } else if (step.view) {
             subjectId = step.view
             rig.go(step.view)
+            // a step with no live subject never reaches lockOn, and its cue is
+            // the only motion it has
+            if (step.publish) window.setTimeout(() => keepPublishing(mine), step.delay ?? 600)
+            if (step.subscribe) {
+                window.setTimeout(() => {
+                    if (mine !== token || !running) return
+                    redis?.subscribeNext()
+                }, step.delay ?? 600)
+            }
         }
         if (step.speed) setSpeed?.(step.speed)
+    }
+
+    /**
+     * Keep a publish on screen for as long as the step is open. Stops with the
+     * step: the token changes on every step change and on exit, so a timer that
+     * outlives its caption cannot fire into the next one.
+     */
+    const keepPublishing = (mine: number) => {
+        if (mine !== token || !running) return
+        redis?.publish()
+        window.setTimeout(() => keepPublishing(mine), 1600)
     }
 
     /**

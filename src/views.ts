@@ -202,6 +202,18 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(REDIS_ANCHOR.aofBuf, [-5.4, 5.4, 7.7], 36, [0, -1.2, 0]),
     },
     {
+        id: 'redis-pubsub',
+        label: 'redis pub/sub',
+        db: 'redis',
+        entity: 'the fan-out',
+        hint: 'the command loop and the sockets listening to it: a publish touches no key and no file',
+        // Framed from the loop UPWARDS, because that is where this route goes: the
+        // thread sits a little below the rim, and the sockets it writes to are at
+        // the top. Aiming at the loop alone would cut the listeners out of the
+        // frame, which is the entire point of the shot.
+        pose: () => shot(REDIS_ANCHOR.loop.clone().add(V(0.6, 1.35, 2.4)), [1.2, 2.6, 12.4], 37),
+    },
+    {
         id: 'disk',
         label: 'disk',
         entity: 'disk plate',

@@ -21,7 +21,7 @@ PostgreSQL subjects: `disk`, `tables`, `wal`, `wal-buffers`, `buffers`,
 `pipeline`, `indexes`, `free-space`, `clients`, `pages`, `autovacuum`,
 `table-users`, `table-products`, `table-metrics`, `backend-1` … `backend-6`.
 
-Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`.
+Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`, `pubsub`.
 
 ## What is in it
 
@@ -36,8 +36,9 @@ Redis: one command thread with a command queue and the epoll fd set under it; th
 keyspace over the bucket array, including an incremental rehash; three deliberately
 large values (a 1.4 M-member sorted set, a 5.3 M-field hash, a 2.1 M-element list)
 and the handful of hot keys taking the traffic; encodings and when they convert;
-the AOF being appended, the RDB base file, and the forked BGSAVE and AOF-rewrite
-children.
+pub/sub, where a subscribed socket is violet and PUBLISH stops at the loop and fans
+out to those sockets without touching a key or the log; the AOF being appended, the
+RDB base file, and the forked BGSAVE and AOF-rewrite children.
 
 ## Source
 

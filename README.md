@@ -149,8 +149,6 @@ it still cannot show.
 - [ ] **replication** — replica, `PSYNC`, and the **repl backlog: a fixed-size ring buffer** — the one
       structure here whose policy is the opposite of the AOF that only ever grows. Full resync is an
       RDB transfer followed by a stream.
-- [ ] **pub/sub** — no keys, no storage, pure fan-out to N sockets: a path that never touches the
-      keyspace or the log.
 - [ ] **LRU/LFU eviction** — eviction picks a random key today. Redis samples `maxmemory-samples`
       keys and evicts the least recently used of the sample, and `allkeys-*` vs `volatile-*` decides
       whether keys with a TTL are preferred victims.

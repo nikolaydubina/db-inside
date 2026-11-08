@@ -135,6 +135,16 @@ const keyZ = (r: number) => KEYS.cz + (r - (KEYS.rows - 1) / 2) * PITCH
 const LOOP = new THREE.Vector3(0, 7.6, 1.4)
 const QUEUE = { cells: 10, y: 8.95, z: BACKEND_ORIGIN.z }
 /**
+ * The channel a publish is addressed to, and the whole of what pub/sub owns.
+ *
+ * A channel is a NAME, and what the server keeps is a dict from name to the list
+ * of sockets on it. It is not a key: no value, no type, no TTL, nothing written to
+ * the AOF or the dump. Which is why it is drawn up here beside the loop, off the
+ * keyspace plane and off the floor — it belongs to the thread's own bookkeeping,
+ * not to the dataset.
+ */
+const CHANNEL = { name: 'news', at: LOOP.clone().add(new THREE.Vector3(0, 1.35, 0)) }
+/**
  * The kernel's readiness set — epoll's registered fds, drawn as one tile per
  * connection on a plate hanging under the loop that consults it. This is the
  * structure that makes "ten thousand connections, one thread" true, and it
@@ -305,6 +315,15 @@ export interface RedisPort {
     busy: boolean
     active: boolean
     pulse: number
+    /**
+     * True while this connection is in subscriber mode.
+     *
+     * A subscribed Redis connection is not a key-space client at all: while it
+     * holds subscriptions it may only issue SUBSCRIBE, UNSUBSCRIBE and PING. So
+     * this is not a decoration on an ordinary socket — it is a different kind of
+     * client, drawn differently and never handed a GET.
+     */
+    subs: boolean
 }
 
 /**
@@ -455,6 +474,9 @@ export class RedisInstance {
     private fdPulse: number[] = []
     private loopCore!: THREE.MeshStandardMaterial
     private loopRing!: THREE.Mesh
+    /** the channel's ring, and how hard it was just hit by a publish */
+    private channelRing!: THREE.Mesh
+    private channelPulse = 0
     private bgsaveDrone!: THREE.Group
     private rewriteDrone!: THREE.Group
     /**
@@ -503,6 +525,7 @@ export class RedisInstance {
         this.buildDisk()
         this.buildMemory()
         this.buildPorts()
+        this.buildPubSub()
         this.buildPipeline()
         this.buildReadiness()
         this.buildBigKeys()
@@ -1140,7 +1163,7 @@ export class RedisInstance {
             g.add(pick)
             this.register(pick, {
                 title: `Connection ${n + 1} — a socket on one thread`,
-                body: 'A connection is a file descriptor, not a process. Every connected client registers one entry in the readiness set just below and lands in the same command queue, and the commands are executed one at a time by the same thread. There is no per-connection stack and no per-connection heap worth speaking of — a client struct, a querybuf, a reply buffer, on the order of tens of kilobytes — so the limit here is fds (maxclients, 10000 by default), not processes. Compare the postgres cage next door, where the same socket is a forked process with megabytes of its own address space: 100 connections there, 10000 here, and the difference is exactly that.',
+                body: 'A connection is a file descriptor, not a process. Every connected client registers one entry in the readiness set just below and lands in the same command queue, and the commands are executed one at a time by the same thread. There is no per-connection stack and no per-connection heap worth speaking of — a client struct, a querybuf, a reply buffer, on the order of tens of kilobytes — so the limit here is fds (maxclients, 10000 by default), not processes. Compare the postgres cage next door, where the same socket is a forked process with megabytes of its own address space: 100 connections there, 10000 here, and the difference is exactly that. A violet socket is in subscriber mode instead: while it holds a subscription it may only SUBSCRIBE, UNSUBSCRIBE and PING, so it is never handed an ordinary command — published messages are copied into it and forgotten by the server.',
                 meta: 'fd · ~30 kB · maxclients 10000 · shares the single thread',
             })
 
@@ -1153,9 +1176,80 @@ export class RedisInstance {
                 busy: false,
                 active: false,
                 pulse: 0,
+                subs: false,
             })
             g.visible = false
         }
+    }
+
+    /**
+     * The channel. One ring, floating in the thread's own air.
+     *
+     * Everything pub/sub owns is here: a name, and the list of sockets on it. No
+     * block on the floor, no page, no record — a publish looks the name up, walks
+     * the list and writes to both directions of each socket. Nothing about the
+     * message survives the moment.
+     */
+    private buildPubSub() {
+        const ring = new THREE.Mesh(
+            new THREE.TorusGeometry(0.46, 0.014, 6, 56),
+            new THREE.MeshBasicMaterial({
+                color: PALETTE.violet,
+                transparent: true,
+                opacity: 0.5,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+            }),
+        )
+        ring.rotation.x = Math.PI / 2
+        ring.position.copy(CHANNEL.at)
+        this.group.add(ring)
+        this.channelRing = ring
+
+        const glow = halo(PALETTE.violet, 1.5, 0.14)
+        glow.position.copy(CHANNEL.at)
+        this.group.add(glow)
+
+        const lab = label(`CHANNEL · ${CHANNEL.name}`)
+        lab.position.copy(CHANNEL.at).add(new THREE.Vector3(0.58, 0.24, 0))
+        this.group.add(lab)
+
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(1.0, 0.5, 1.0),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.copy(CHANNEL.at)
+        this.group.add(pick)
+        // dashed, like every cage that marks a drawing rather than a volume of
+        // bytes: there is no such box in the server, there is a dict entry
+        const cage = new OutlineBox(1.02, 0.46, 1.02, PALETTE.violet, 0.28, {
+            dashed: true,
+        }).centre(CHANNEL.at.x, CHANNEL.at.y, CHANNEL.at.z)
+        this.group.add(cage)
+        this.register(
+            pick,
+            {
+                title: `Channel "${CHANNEL.name}" — a name, not a key`,
+                body: 'This is all a channel is: a name, and the list of sockets subscribed to it. It lives in its own dict (pubsub_channels), which is looked up exactly like a key would be but shares nothing with the keyspace — no value, no type, no TTL, and no bytes of it are ever written to the AOF or the dump. SUBSCRIBE adds a socket to this list; a message is copied into each socket on it, and that is the whole operation. A subscriber that is not on the list when the message goes out never gets it: there is no queue, no backlog and no acknowledgement.',
+                meta: 'pubsub_channels · name → sockets · in memory, nothing on disk',
+            },
+            cage,
+        )
+    }
+
+    /** Where a publish is addressed, in cage-local units: the channel. */
+    channelPoint(): THREE.Vector3 {
+        return CHANNEL.at.clone()
+    }
+
+    /** The channel's name, for the status line and for a story's caption. */
+    get channelName() {
+        return CHANNEL.name
+    }
+
+    /** A fan just left the channel. */
+    pulseChannel() {
+        this.channelPulse = 1
     }
 
     private buildPipeline() {
@@ -1739,6 +1833,9 @@ export class RedisInstance {
         if (!pod) return null
         pod.active = true
         pod.group.visible = true
+        // a new connection starts as an ordinary client: nothing is subscribed
+        // until it says SUBSCRIBE
+        this.setSubscribed(pod, false)
         return pod
     }
 
@@ -1749,13 +1846,46 @@ export class RedisInstance {
         pod.active = false
         pod.busy = false
         pod.group.visible = false
+        // closing a socket ends its subscriptions: the channel no longer has it
+        this.setSubscribed(pod, false)
         return true
+    }
+
+    /**
+     * Put a socket into subscriber mode, or take it out.
+     *
+     * Violet, because that is the colour the queue and the loop already speak:
+     * a published message is handed around by the thread and never becomes a
+     * value, a key or a record in a file. What changes on the socket is only its
+     * colour — the connection itself is the same coupling to the same fd set.
+     */
+    setSubscribed(pod: RedisPort, on: boolean) {
+        if (pod.subs === on) return
+        pod.subs = on
+        const hex = on ? PALETTE.violet : PALETTE.cyan
+        pod.ring.emissive.setHex(hex)
+        pod.glow.color.setHex(hex)
+    }
+
+    /** The sockets a PUBLISH has to reach: every open connection in subscriber mode. */
+    subscribers(): RedisPort[] {
+        return this.ports.filter((p) => p.active && p.subs)
     }
 
     pulsePort(pod: RedisPort) {
         pod.pulse = 1
         pod.busy = true
         // the loop read this fd: one entry of the readiness set fired
+        this.fdPulse[pod.id] = 1
+    }
+
+    /**
+     * Bytes were written TO this fd — the other direction of the same readiness
+     * entry. A subscriber's socket only ever receives, so it must not be marked
+     * busy: nothing is being read from it and the command thread is not in it.
+     */
+    pulseSend(pod: RedisPort) {
+        pod.pulse = 1
         this.fdPulse[pod.id] = 1
     }
 
@@ -1770,6 +1900,8 @@ export class RedisInstance {
             pod.busy = false
             pod.pulse = 0
             pod.group.visible = false
+            // subscriptions die with the listener: nothing is left to deliver to
+            this.setSubscribed(pod, false)
         }
     }
 
@@ -3120,6 +3252,13 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity +=
             (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) * Math.min(1, dt * 6)
         this.loopRing.rotation.z += dt * 0.5
+
+        // the channel breathes like everything else in the thread's air, and
+        // answers a publish with one ring of light
+        this.channelPulse = Math.max(0, this.channelPulse - dt * 1.5)
+        const ringMat = this.channelRing.material as THREE.MeshBasicMaterial
+        ringMat.opacity = 0.3 + 0.12 * breathe(time, 1.1) + this.channelPulse * 0.5
+        this.channelRing.scale.setScalar(1 + this.channelPulse * 0.16)
 
         // and the air moves, exactly as it does in the other cage
         driftDust(this.motes, dt, time)
