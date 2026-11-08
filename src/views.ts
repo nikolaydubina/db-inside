@@ -65,6 +65,25 @@ const shot = (
 
 const TABLE_ANCHOR = { users: ANCHOR.heap, products: ANCHOR.events, metrics: ANCHOR.metrics }
 
+/**
+ * The house shot — where a cage-level view stands, relative to the cage's own
+ * origin. One set of numbers for every machine on the floor, and it is the same
+ * numbers a `?cam=` override prints, so a shot can be copied straight out of the
+ * address bar into here.
+ *
+ * It is shared on purpose: a reader stepping from one cage to the next should be
+ * in the same place looking at the same thing, and a new cage then only has to
+ * say where its origin is. From the front-right and high enough to read a RAM deck
+ * as a deck, with the aim point out in front of the cage so the machine sits above
+ * the caption strip rather than behind it.
+ */
+const HOUSE: { offset: [number, number, number]; look: [number, number, number]; fov: number } = {
+    offset: [29.29, 14.65, 15.15],
+    look: [-5.58, 0.06, -5.55],
+    fov: 40,
+}
+const houseShot = (origin: THREE.Vector3) => shot(origin, HOUSE.offset, HOUSE.fov, HOUSE.look)
+
 export const VIEWS: ViewDef[] = [
     {
         id: 'overview',
@@ -88,12 +107,7 @@ export const VIEWS: ViewDef[] = [
         whole: true,
         entity: 'instance',
         hint: 'the whole postgres instance: disk plate, RAM deck, pipeline',
-        // The house shot, and the one `/postgresql` opens on: from the front-right
-        // and high enough to read the RAM deck as a deck, with the aim point out in
-        // front of the cage so the machine sits above the caption strip instead of
-        // behind it. cage-relative: corner at the origin, so these are the numbers a
-        // ?cam= override prints.
-        pose: () => shot(POSTGRES_ORIGIN.clone(), [29.29, 14.65, 15.15], 40, [-5.58, 0.06, -5.55]),
+        pose: () => houseShot(POSTGRES_ORIGIN.clone()),
     },
     {
         id: 'redis',
@@ -102,7 +116,7 @@ export const VIEWS: ViewDef[] = [
         whole: true,
         entity: 'redis cage',
         hint: 'the redis instance: almost nothing on the disk, everything in the air',
-        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 1)), [-19, 11, 23], 38, [0, 5.2, 0]),
+        pose: () => houseShot(REDIS_ORIGIN.clone()),
     },
     {
         id: 'redis-keys',
