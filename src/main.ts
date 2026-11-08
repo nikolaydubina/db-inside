@@ -100,7 +100,7 @@ const hud = initHud({
     flyKeys.clear()
     flyVel.set(0, 0, 0)
     if (!on) looking = false
-    // while flying, a drag looks around instead of orbiting the island
+    // while flying, a drag looks around instead of orbiting the scene
     world.controls.enableRotate = !on
     // cursor stays visible; it is only swapped for the crosshair while dragging
     crosshair.hidden = true
@@ -126,6 +126,9 @@ const rig = createCameraRig({
   camera,
   controls: world.controls,
   ticker,
+  // Navigating stops auto-orbit first, otherwise the drift drags the camera off
+  // the pose. The checkbox is unticked with it, so the UI does not claim an
+  // orbit that is no longer happening.
   beforeNavigate: () => {
     autoOrbit = false
     world.controls.autoRotate = false
