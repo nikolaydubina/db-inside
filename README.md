@@ -1,4 +1,4 @@
-# postgresql-inside
+# db-inside
 
 An interactive 3D visualisation of how PostgreSQL actually works — one query's journey through
 processes, memory, WAL and disks.
