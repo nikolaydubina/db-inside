@@ -727,7 +727,30 @@ h2::after {
   background: linear-gradient(155deg, rgba(11, 21, 33, 0.6), rgba(6, 12, 20, 0.45));
   backdrop-filter: blur(12px);
   padding: 11px 13px 12px;
-  pointer-events: none;
+  /* the header is a toggle now, so the panel has to take the pointer */
+  pointer-events: auto;
+}
+
+/* collapsed: only the title bar is left, the way the HUD cards fold */
+.legend.collapsed {
+  width: auto;
+}
+
+.legend.collapsed h2 {
+  margin-bottom: 0;
+}
+
+.legend.collapsed h2::after {
+  display: none;
+}
+
+.legend.collapsed table.gloss,
+.legend.collapsed .hint {
+  display: none;
+}
+
+.legend:hover .chev {
+  border-top-color: var(--cyan);
 }
 
 /* A two-column glossary: what you are looking at, then what it means. Columns

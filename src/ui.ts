@@ -212,7 +212,11 @@ const COMPACT = () =>
   window.matchMedia('(max-width: 760px), (orientation: portrait) and (max-width: 900px)').matches
 
 function setupCards() {
-  const cards = Array.from(document.querySelectorAll<HTMLElement>('.card:not(#inspector)'))
+  // the legend is a card too: same chevron, same click/keyboard toggle, same
+  // remembered state — it just draws a glossary instead of a paragraph
+  const cards = Array.from(
+    document.querySelectorAll<HTMLElement>('.card:not(#inspector), .legend'),
+  )
   let saved: Record<string, boolean> = {}
   try {
     saved = JSON.parse(localStorage.getItem(CARDS_KEY) ?? '{}') as Record<string, boolean>
