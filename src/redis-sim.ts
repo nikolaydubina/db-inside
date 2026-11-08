@@ -94,6 +94,8 @@ const OPS_WINDOW = 2
 
 export class RedisSim {
     ops = 0
+    /** Writes refused because the log could not grow — MISCONF, not data loss. */
+    refused = 0
     private hits = 0
     private misses = 0
     private latencies: number[] = []
@@ -273,7 +275,17 @@ export class RedisSim {
 
         if (key) {
             this.redis.pulseBucket(key)
-            if (cmd.write) {
+            if (cmd.write && !this.redis.aofCanGrow) {
+                // A write that cannot be appended is a write redis will not serve:
+                // the client gets an error and memory is not touched, because the
+                // alternative is acknowledging something that will not survive a
+                // restart. Nothing is ever dropped to make room — the log has to
+                // be rewritten to get shorter.
+                this.redis.aofFull = true
+                this.refused++
+                this.redis.markKey(key, PALETTE.magenta)
+                this.note = `${cmd.name} · MISCONF errors writing to the AOF file — refused, reads still served`
+            } else if (cmd.write) {
                 if (!key.live) this.redis.setKeyLive(key, true)
                 this.redis.flashKey(key, PALETTE.teal, 0.6)
                 // Durability is a separate step from the write, and the two legs
@@ -294,19 +306,21 @@ export class RedisSim {
                 )
                 await this.ticker.wait(0.14)
                 const head = this.redis.appendAof(bytes)
-                const toFile = new QueryChain(cage)
-                toFile.addCurve(
-                    pathCurve([
-                        bufTop.clone(),
-                        bufTop.clone().add(new THREE.Vector3(0.4, -0.5, 0.6)),
-                        head.clone(),
-                    ]),
-                    PALETTE.amber,
-                    { speed: 1.1, opacity: 0.55 },
-                )
-                toFile.fadeOut(this.ticker, 0.6)
+                if (head) {
+                    const toFile = new QueryChain(cage)
+                    toFile.addCurve(
+                        pathCurve([
+                            bufTop.clone(),
+                            bufTop.clone().add(new THREE.Vector3(0.4, -0.5, 0.6)),
+                            head.clone(),
+                        ]),
+                        PALETTE.amber,
+                        { speed: 1.1, opacity: 0.55 },
+                    )
+                    toFile.fadeOut(this.ticker, 0.6)
+                    this.note = `${cmd.name} · ${bytes} B appended in block ${this.redis.aofUsed}`
+                }
                 toBuf.fadeOut(this.ticker, 0.6)
-                this.note = `${cmd.name} · ${bytes} B appended in block ${this.redis.aofUsed}`
             } else {
                 this.redis.markKey(key, PALETTE.ice)
                 this.redis.flashKey(key, PALETTE.ice, 0.45)

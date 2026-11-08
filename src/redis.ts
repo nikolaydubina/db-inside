@@ -64,7 +64,14 @@ const zAt = (r: number) => -0.75 + r * PITCH
  */
 const AOF_ROW = 16
 const AOF_C0 = 22
-const AOF_LEN = 22
+/** Blocks the log occupies at boot — it has been running and has not been rewritten yet. */
+const AOF_SEED = 13
+/**
+ * Where a rewrite builds its new file: free floor immediately in front of where
+ * the log starts, so the two files are visibly side by side and the swap is a
+ * change of which one is the log.
+ */
+const STAGING_C0 = AOF_C0 - 10
 const RDB = { c0: 4, c1: 13, r0: 2, r1: 8 }
 
 /**
@@ -196,7 +203,7 @@ function rebaseAnchors() {
     REDIS_ANCHOR.dict.set(0, DICT.y, DICT.cz).add(o)
     REDIS_ANCHOR.loop.copy(LOOP).add(o)
     REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
-    REDIS_ANCHOR.aof.set(xAt(AOF_C0 + AOF_LEN / 2), BLOCK_TOP, zAt(AOF_ROW)).add(o)
+    REDIS_ANCHOR.aof.set(xAt(AOF_C0), BLOCK_TOP, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.aofBuf.set(xAt(AOF_C0), AOF_BUF_Y, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.rdb.copy(RDB_CENTRE).add(o)
 }
@@ -225,7 +232,15 @@ export class RedisInstance {
 
     /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
+    /** instance id → position in the log */
+    private aofIndex = new Map<number, number>()
+    /** AOF blocks the file has reached, and blocks currently drawn */
     private aofHead = 0
+    private aofDrawn = 0
+    /** The floor is full: the file cannot grow, so appends have nowhere to go. */
+    aofFull = false
+    private aofEdge!: OutlineBox
+    private aofPick!: THREE.Mesh
 
     /** The base file's blocks in the order the encoder writes them. */
     private rdbOrder: number[] = []
@@ -281,7 +296,7 @@ export class RedisInstance {
      * both happen over the same file.
      */
     private readonly rewriteHome = new THREE.Vector3(
-        xAt(AOF_C0 + AOF_LEN / 2),
+        xAt(AOF_C0 + 4),
         AOF_BUF_Y + 0.9,
         zAt(AOF_ROW),
     )
@@ -402,45 +417,61 @@ export class RedisInstance {
         for (let r = 0; r < ROWS; r++) {
             for (let c = 0; c < COLS; c++) {
                 const home = new THREE.Vector3(xAt(c), PAGE_Y, zAt(r))
-                const onAof = r === AOF_ROW && c >= AOF_C0 && c < AOF_C0 + AOF_LEN
                 const onRdb = r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1
 
                 this.tmpObj.position.copy(home)
-                if (onAof) {
-                    // One shape for every block in this scene, the same one the page
-                    // field uses. A file is written in whole filesystem blocks, so
-                    // nothing here is a short plate or a half-height block.
-                    this.tmpObj.scale.set(1, 1, 1)
-                } else {
-                    // nothing is here: collapse it on ALL three axes, so the plate
-                    // and the slot lattice show and no flattened sliver is left
-                    this.tmpObj.scale.setScalar(0.001)
-                }
+                // Every file block starts absent: a block is drawn when the file
+                // reaches it, and the log reaches a new one on every append. A
+                // block that is not part of a file is collapsed on ALL three axes,
+                // so the plate and the slot lattice show and no flattened sliver
+                // is left.
+                this.tmpObj.scale.setScalar(0.001)
                 this.tmpObj.updateMatrix()
                 field.setMatrixAt(i, this.tmpObj.matrix)
 
-                // The RDB blocks get their colour from layoutRdb() once the keys
-                // are known — the file's length is a function of the data. A
-                // block that is in the file is a FULL block: 4 kB is the whole
-                // unit here, so it sits at the bright end of the ramp. Small
-                // shade variation only, because the records in a block are not
-                // all the same size.
-                const hex = onAof ? mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1) : 0x000000
-                this.diskBase[i] = hex
-                if (onAof) field.setColorAt(i, this.tmpColor.setHex(hex))
+                // The file blocks get their colour from layoutAof()/layoutRdb(),
+                // which know which of them the file has reached. A block that is
+                // IN a file is a FULL block: 4 kB is the whole unit here, so it
+                // sits at the bright end of the ramp. Small shade variation only,
+                // because the records in a block are not all the same size.
+                this.diskBase[i] = 0x000000
                 if (onRdb) {
                     this.rdbBase[i] = mixHex(RDB_FILL_DARK, RDB_FILL_BRIGHT, rand(0.94, 1.04))
                 }
-                if (onAof) this.aofOrder.push(i)
                 i++
             }
         }
         if (field.instanceColor) field.instanceColor.needsUpdate = true
 
-        // The log starts part-written: the file has only reached the first N of
-        // these blocks, and the rest are not drawn at all (see layoutAof).
-        this.aofHead = Math.round(AOF_LEN * 0.6)
-        this.layoutAof()
+        // Where the log grows: a snake across the free floor, starting at the
+        // front edge and running one block per append. This is the answer to
+        // "what happens when it reaches the end" — it does not wrap and it does
+        // not drop: an append-only file gets LONGER, and this is the order it
+        // takes the empty blocks in. Only a rewrite ever makes it shorter.
+        this.aofOrder = []
+        this.aofIndex.clear()
+        let leftToRight = true
+        for (let r = AOF_ROW; r >= 0; r--) {
+            const cols: number[] = []
+            for (let c = 0; c < COLS; c++) {
+                if (r === AOF_ROW && c < AOF_C0) continue
+                // the base file lives on this floor too: the log grows around it
+                if (r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1) continue
+                cols.push(c)
+            }
+            if (!leftToRight) cols.reverse()
+            leftToRight = !leftToRight
+            for (const c of cols) {
+                const id = r * COLS + c
+                this.aofIndex.set(id, this.aofOrder.length)
+                this.aofOrder.push(id)
+            }
+        }
+
+        // The log starts part-written: the file has reached the first N of these
+        // blocks, and the rest are not drawn at all (see layoutAof). The layout
+        // runs once the log's outline exists — fitAofEdge() is what sizes it.
+        this.aofHead = AOF_SEED
 
         // The base file is one sequential write, so its blocks are laid out in the
         // order the encoder emits them — left to right, then right to left. A file
@@ -456,12 +487,15 @@ export class RedisInstance {
             }
         }
 
-        // The AOF run gets an extent outline, exactly the way the WAL run does
-        // next door: a cage marks where the file LIVES on the floor, not what
-        // happens to be written in it. It therefore never grows or shrinks with
-        // the head — the file has a footprint, and this is it.
+        // The log gets an extent outline: a file should be a thing you can point
+        // at and read about, not a patch of blocks you have to guess the meaning
+        // of. Unlike the base file, its length is not the size of the data — it
+        // is the size of the HISTORY, so it grows with every append and only a
+        // rewrite takes it back down. The cage is fitted to the blocks the file
+        // has actually reached (see fitAofEdge), so "where the file ends" and
+        // "where the outline ends" are the same fact.
         const ax0 = xAt(AOF_C0) - PITCH / 2
-        const ax1 = xAt(AOF_C0 + AOF_LEN - 1) + PITCH / 2
+        const ax1 = xAt(AOF_C0 + AOF_SEED) + PITCH / 2
         const az0 = zAt(AOF_ROW) - PITCH / 2
         const az1 = zAt(AOF_ROW) + PITCH / 2
         const aofEdge = new OutlineBox(
@@ -472,6 +506,7 @@ export class RedisInstance {
             0.75,
         ).centre((ax0 + ax1) / 2, PAGE_Y + 0.1, (az0 + az1) / 2)
         this.group.add(aofEdge)
+        this.aofEdge = aofEdge
 
         const aofPick = new THREE.Mesh(
             new THREE.BoxGeometry(ax1 - ax0, 1.4, az1 - az0),
@@ -479,15 +514,20 @@ export class RedisInstance {
         )
         aofPick.position.set((ax0 + ax1) / 2, PAGE_Y + 0.5, (az0 + az1) / 2)
         this.group.add(aofPick)
+        this.aofPick = aofPick
         this.register(
             aofPick,
             {
                 title: 'AOF — the append-only file, on disk',
-                body: 'This run is one file. It is not page-structured: Redis appends the bytes of each write command after the last byte of the file, so the only unit here is the 4 kB block a filesystem stores it in. Only the blocks the file has reached are drawn; the rest of the run is room it will grow into. The block being appended pulses once and is an ordinary block again — nothing is selected, nothing is rewritten in place. The newest bytes are still in aof_buf, the floating cyan strip above, until fsync: with appendfsync everysec they can be up to a second behind, which is the whole trade. A rewrite writes a new, shorter file and swaps it in, which is why the end of this run can move backwards.',
-                meta: 'appendonlydir · byte stream on a filesystem · fsync per appendfsync',
+                body: 'This is a log of commands, not a copy of the data: every write appends its bytes after the last byte of the file, so the only unit here is the 4 kB block a filesystem stores it in. The file therefore GROWS — the blocks in front of the head are empty floor it takes as it needs them, and it keeps taking them for as long as writes arrive. It never wraps and never drops: wrapping over old data is what the WAL does next door, with a checkpoint deciding when a segment is free, and there is no such decision here. The only thing that makes this file shorter is a rewrite, which writes a new file containing the minimum commands that reproduce the current dataset and swaps it in. If nothing rewrites it and the floor fills, the disk is full and the appends start failing: redis then rejects the writes and keeps serving reads — the opposite of throwing bytes away quietly.',
+                meta: 'appendonlydir · one growing file · shortened only by bgrewriteaof',
             },
             aofEdge,
         )
+
+        // Now that the outline and the pick volume exist, draw the blocks the
+        // file has reached: layoutAof() fits both to the file.
+        this.layoutAof()
 
         // The base file gets the same treatment as the log: an extent outline, so
         // the file is a thing you can point at and read about rather than a patch
@@ -1002,7 +1042,8 @@ export class RedisInstance {
         if (i === null) return null
         const r = Math.floor(i / COLS)
         const c = i % COLS
-        const onAof = r === AOF_ROW && c >= AOF_C0 && c < AOF_C0 + AOF_LEN
+        const aofSeq = this.aofIndex.get(i)
+        const onAof = aofSeq !== undefined && aofSeq <= this.aofHead
         const rdbSeq = this.rdbIndex.get(i)
         const onRdb = rdbSeq !== undefined && rdbSeq < this.rdbLen
         if (!onAof && !onRdb) return null
@@ -1014,8 +1055,8 @@ export class RedisInstance {
         )
         const info: Info = onAof
             ? {
-                title: `AOF — record ${c - AOF_C0 + 1} of ${AOF_LEN}`,
-                body: 'One command, appended in order. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged.',
+                title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
+                body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
                 meta: 'appendonly.aof · replayed in order on start',
             }
             : {
@@ -1267,8 +1308,19 @@ export class RedisInstance {
         return this.aofHead + 1
     }
 
+    /** Is there an empty block in front of the file for the next record? */
+    get aofCanGrow() {
+        return this.aofHead < this.aofOrder.length - 1
+    }
+
+    /** Where a block of the log sits, by its position in the file. */
+    private aofBlockPos(k: number): THREE.Vector3 {
+        const id = this.aofOrder[Math.max(0, Math.min(this.aofOrder.length - 1, k))]
+        return new THREE.Vector3(xAt(id % COLS), PAGE_Y, zAt(Math.floor(id / COLS)))
+    }
+
     private aofHeadX(): number {
-        return xAt(AOF_C0 + Math.min(this.aofHead, this.aofOrder.length - 1))
+        return this.aofBlockPos(this.aofHead).x
     }
 
     /**
@@ -1278,13 +1330,23 @@ export class RedisInstance {
      * plate — it does not exist yet, so it is collapsed to nothing on all three
      * axes. Flattening only the height was the bug: it left a full-footprint
      * sliver behind, which reads as a block that is there but switched off.
+     *
+     * The range drawn is `0..aofHead`, and anything drawn beyond it is erased:
+     * that is what a rewrite looks like from the floor's point of view.
      */
     private layoutAof() {
         const hex = mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1)
-        this.aofOrder.forEach((i, k) => {
-            const on = k <= this.aofHead
-            this.disk.getMatrixAt(i, this.tmpObj.matrix)
-            this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix)
+        const drawTo = this.aofHead
+        const eraseTo = Math.max(this.aofDrawn, drawTo)
+        for (let k = 0; k <= eraseTo; k++) {
+            const i = this.aofOrder[k]
+            if (i === undefined) break
+            const on = k <= drawTo
+            this.tmpObj.position.set(
+                xAt(i % COLS),
+                on ? PAGE_Y : PAGE_Y,
+                zAt(Math.floor(i / COLS)),
+            )
             const s = on ? 1 : 0.001
             this.tmpObj.scale.set(s, s, s)
             this.tmpObj.updateMatrix()
@@ -1292,22 +1354,33 @@ export class RedisInstance {
             const base = on ? hex : 0x000000
             this.diskBase[i] = base
             this.disk.setColorAt(i, this.tmpColor.setHex(base))
-        })
+        }
+        this.aofDrawn = drawTo
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+        this.fitAofEdge()
     }
 
-    /** Append one write: the log gains a block, and that block pulses once. */
-    appendAof(bytes: number): THREE.Vector3 {
-        this.aofBytes += bytes
+    /**
+     * Append one write: the log gains a block, and that block pulses once.
+     *
+     * Returns where the record landed, or null when the floor is full — a log
+     * that cannot grow has nowhere to put the bytes, and that is a write error,
+     * not a silent loss.
+     */
+    appendAof(bytes: number): THREE.Vector3 | null {
         // the record goes after the last byte of the file, so at most it starts a
         // new block; it never rewrites one that is already there
-        this.aofHead = Math.min(this.aofHead + 1, this.aofOrder.length - 1)
+        if (this.aofHead >= this.aofOrder.length - 1) {
+            this.aofFull = true
+            return null
+        }
+        this.aofBytes += bytes
+        this.aofHead += 1
         this.layoutAof()
 
         const i = this.aofOrder[this.aofHead]
-        this.disk.getMatrixAt(i, this.tmpObj.matrix)
-        const block = new THREE.Vector3().setFromMatrixPosition(this.tmpObj.matrix)
+        const block = this.aofBlockPos(this.aofHead)
 
         // One pulse per append, on the one block that changed — the same pulse an
         // edited page gets on the postgres disk. No frame, no standing second
@@ -1327,6 +1400,54 @@ export class RedisInstance {
         }
 
         return block.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
+    }
+
+    /**
+     * Fit the outline and the pick volume to the blocks the file has reached.
+     *
+     * The log snakes across the floor, so its footprint is the bounding box of
+     * everything drawn so far — one row at first, more as it grows, and smaller
+     * again after a rewrite. The cage is the file's length, drawn.
+     */
+    private fitAofEdge() {
+        const drawTo = this.aofHead
+        if (drawTo < 0 || this.aofOrder.length === 0) {
+            this.aofEdge.visible = false
+            this.aofPick.visible = false
+            return
+        }
+        let minC = COLS
+        let maxC = -1
+        let minR = ROWS
+        let maxR = -1
+        for (let k = 0; k <= drawTo; k++) {
+            const id = this.aofOrder[k]
+            if (id === undefined) break
+            const c = id % COLS
+            const r = Math.floor(id / COLS)
+            minC = Math.min(minC, c)
+            maxC = Math.max(maxC, c)
+            minR = Math.min(minR, r)
+            maxR = Math.max(maxR, r)
+        }
+        if (maxC < 0) {
+            this.aofEdge.visible = false
+            this.aofPick.visible = false
+            return
+        }
+        const x0 = xAt(minC) - PITCH / 2
+        const x1 = xAt(maxC) + PITCH / 2
+        const z0 = zAt(minR) - PITCH / 2
+        const z1 = zAt(maxR) + PITCH / 2
+        this.aofEdge.visible = true
+        this.aofEdge
+            .resize(x1 - x0, 0.5, z1 - z0)
+            .centre((x0 + x1) / 2, PAGE_Y + 0.1, (z0 + z1) / 2)
+        this.aofPick.visible = true
+        this.aofPick.scale.set(x1 - x0, 1, z1 - z0)
+        this.aofPick.position.set((x0 + x1) / 2, PAGE_Y + 0.5, (z0 + z1) / 2)
+        // keep the anchor on the middle of the file: views frame it
+        REDIS_ANCHOR.aof.set((x0 + x1) / 2, BLOCK_TOP, (z0 + z1) / 2).add(REDIS_ORIGIN)
     }
 
     /** Expanding ring over one block: "this is the block the record went into". */
@@ -1350,9 +1471,7 @@ export class RedisInstance {
     }
 
     aofHeadTop(): THREE.Vector3 {
-        const i = this.aofOrder[Math.min(this.aofHead, this.aofOrder.length - 1)]
-        this.disk.getMatrixAt(i, this.tmpObj.matrix)
-        const p = new THREE.Vector3().setFromMatrixPosition(this.tmpObj.matrix)
+        const p = this.aofBlockPos(this.aofHead)
         return p.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
     }
 
@@ -1636,10 +1755,7 @@ export class RedisInstance {
             await this.ticker.add(Math.max(0.35, m * AOF_RECORD_TIME), (k) => {
                 const upto = Math.max(1, Math.min(m, Math.ceil(k * m)))
                 for (let r = replayed; r < upto; r++) {
-                    this.markBlockTop(
-                        new THREE.Vector3(xAt(AOF_C0 + r), PAGE_Y, zAt(AOF_ROW)),
-                        PALETTE.amber,
-                    )
+                    this.markBlockTop(this.aofBlockPos(r), PALETTE.amber)
                     if (restored < tail.length) this.reviveKey(tail[restored++])
                 }
                 replayed = Math.max(replayed, upto)
@@ -1682,14 +1798,21 @@ export class RedisInstance {
     }
 
     /**
-     * bgrewriteaof, in the three steps it actually performs:
+     * bgrewriteaof, in the three steps it actually performs.
+     *
+     * The direction of data matters here, because it is the thing people get
+     * wrong: nothing is read out of the old file and nothing moves into memory.
+     * The child reads the KEYSPACE — the data in RAM — and writes a new file
+     * containing the minimum set of commands that reproduces that state. Then it
+     * renames the new file over the old one and unlinks the old.
      *
      *   1. fork — the child gets a copy-on-write view and WALKS the keyspace
      *      column by column; nothing is locked, the parent keeps serving
-     *   2. it writes a NEW file holding the minimum command set that reproduces
-     *      that state, which is shorter than the log it replaces — so the end of
-     *      the log walks backwards and the records past it are simply not there
-     *   3. swap — the old file is unlinked and the new one takes over
+     *   2. write — the new file lands on free floor beside the log, because it is
+     *      a different file: the old one is still there and still being appended
+     *      to while this happens
+     *   3. swap — rename(2). The new file takes the log's place, and it is
+     *      shorter, so the end of the log moves back to its length
      *
      * Writes that land while this runs are not lost: they go to the rewrite
      * buffer and are replayed into the new file before the swap, so the head can
@@ -1702,6 +1825,7 @@ export class RedisInstance {
         this.pulseAgent(this.rewriteDrone)
 
         const oldHead = this.aofHead
+        // the new file is as long as the STATE is, not as long as the history
         const target = Math.max(2, Math.round(oldHead * 0.25))
 
         // 1. it flies to the keyspace, then sweeps it: the wave is the scan, not
@@ -1717,41 +1841,59 @@ export class RedisInstance {
             this.rewriteAim.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
         })
 
-        // 2. it drops onto the log it is rewriting before it starts walking it back
-        this.rewriteAim.set(xAt(AOF_C0 + oldHead), 1.4, zAt(AOF_ROW))
-        await this.ticker.wait(0.5)
-
-        // 3. the new file is written: the agent walks the log back, and every
-        //    record it passes is one the new file does not need
-        await this.ticker.add(0.95, (k) => {
-            const idx = Math.round(oldHead - (oldHead - target) * k)
-            this.rewriteAim.set(xAt(AOF_C0 + idx), 1.4, zAt(AOF_ROW))
-            for (let j = idx + 1; j <= oldHead; j++) this.hideAofBlock(j)
+        // 2. it drops to the staging area — free floor in front of the log, not
+        //    the log itself — and writes the new file there, block by block
+        this.rewriteAim.copy(this.stagingSlot(0)).setY(1.4)
+        await this.ticker.wait(0.45)
+        let staged = 0
+        await this.ticker.add(Math.max(0.9, target * 0.16), (k) => {
+            const upto = Math.max(1, Math.min(target, Math.round(k * target)))
+            for (let j = staged; j < upto; j++) {
+                this.setStaged(j, true)
+                this.markBlockTop(this.stagingSlot(j), PALETTE.amber)
+            }
+            staged = Math.max(staged, upto)
+            this.rewriteAim.copy(this.stagingSlot(upto - 1)).setY(1.4)
         })
 
-        // 3. swap: the shorter file takes over, minus nothing for writes that
-        //    arrived during the rewrite — those survive in the buffer merge
+        // 3. swap: the new file takes the log's place and the old one is unlinked.
+        //    Nothing was read back out of the old file to do this, and nothing
+        //    moved into memory: the data came from RAM and went to disk.
+        for (let j = 0; j < staged; j++) this.setStaged(j, false)
         this.rewrites++
         this.aofHead = Math.max(target, this.aofHead - (oldHead - target))
         this.aofBytes = Math.round(this.aofBytes * 0.25)
+        this.aofFull = false
         this.layoutAof()
-        this.disk.getMatrixAt(this.aofOrder[this.aofHead], this.tmpObj.matrix)
-        this.markBlockTop(this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix))
+        this.markBlockTop(this.aofBlockPos(this.aofHead))
         this.pulseAgent(this.rewriteDrone)
         this.rewriting = false
     }
 
-    /** One block the rewrite dropped: it is not in the new file at all. */
-    private hideAofBlock(k: number) {
-        const i = this.aofOrder[k]
-        if (i === undefined) return
-        this.disk.getMatrixAt(i, this.tmpObj.matrix)
-        this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix)
-        this.tmpObj.scale.setScalar(0.001)
+    /**
+     * Free floor in front of the log, where a rewrite builds its new file.
+     *
+     * It is a *different* file, so it does not go on top of the one it replaces:
+     * the child needs somewhere to write that the parent is not appending to, and
+     * only the rename at the end makes the two the same file.
+     */
+    private stagingSlot(k: number): THREE.Vector3 {
+        return new THREE.Vector3(xAt(STAGING_C0 + k), PAGE_Y, zAt(AOF_ROW))
+    }
+
+    /** Draw or erase one block of the file being staged. */
+    private setStaged(k: number, on: boolean) {
+        const col = STAGING_C0 + k
+        const id = AOF_ROW * COLS + col
+        this.tmpObj.position.set(xAt(col), PAGE_Y, zAt(AOF_ROW))
+        const s = on ? 1 : 0.001
+        this.tmpObj.scale.set(s, s, s)
         this.tmpObj.updateMatrix()
-        this.disk.setMatrixAt(i, this.tmpObj.matrix)
-        this.diskBase[i] = 0x000000
-        this.disk.setColorAt(i, this.tmpColor.setHex(0x000000))
+        this.disk.setMatrixAt(id, this.tmpObj.matrix)
+        this.disk.setColorAt(
+            id,
+            this.tmpColor.setHex(on ? mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1) : 0x000000),
+        )
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
     }
@@ -1831,9 +1973,12 @@ export class RedisInstance {
         // as wal_buffers, and it drifts along as the file grows.
         if (this.aofBufGroup) {
             const g = this.aofBufGroup
-            g.position.x += (this.aofHeadX() - g.position.x) * Math.min(1, dt * 2.4)
+            // the append point moves along the row and then wraps into the next
+            // one, so the strip follows the head on both axes, not just x
+            const head = this.aofBlockPos(this.aofHead)
+            g.position.x += (head.x - g.position.x) * Math.min(1, dt * 2.4)
             g.position.y = AOF_BUF_Y + Math.sin(time * 1.3) * 0.08
-            g.position.z = zAt(AOF_ROW)
+            g.position.z += (head.z - g.position.z) * Math.min(1, dt * 2.4)
             this.aofBufCells.forEach((m, i) => {
                 const ph = i * 1.15
                 m.position.y = Math.sin(time * 1.9 + ph) * 0.09
