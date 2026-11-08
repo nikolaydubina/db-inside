@@ -411,7 +411,6 @@ export class PostgresInstance {
   readonly scanner: THREE.Mesh
   readonly vacuumDrone: THREE.Group
   motes!: THREE.Points
-  haloRing!: THREE.Mesh
 
   indexScan = false
   private deadCount = 0
@@ -584,21 +583,6 @@ export class PostgresInstance {
     )
     this.group.add(motes)
     this.motes = motes
-
-    const haloRing = new THREE.Mesh(
-      new THREE.TorusGeometry(14.6, 0.02, 4, 160),
-      new THREE.MeshBasicMaterial({
-        color: 0x2f9fbf,
-        transparent: true,
-        opacity: 0.3,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      }),
-    )
-    haloRing.rotation.x = Math.PI / 2
-    haloRing.position.y = 9.15
-    this.group.add(haloRing)
-    this.haloRing = haloRing
   }
 
   /**
@@ -2515,7 +2499,6 @@ export class PostgresInstance {
       attr.setZ(i, attr.getZ(i) + Math.cos(time * 1.3 + i * 1.3) * dt * 0.18)
     }
     attr.needsUpdate = true
-    this.haloRing.rotation.z += dt * 0.12
 
     // dead pages breathe magenta until VACUUM reclaims the space inside them
     if (this.deadCount > 0) {
