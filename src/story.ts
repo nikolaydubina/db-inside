@@ -285,7 +285,7 @@ export const QUEUE_STORY: StoryStep[] = [
     },
     {
         title: 'and it drains',
-        body: 'As each statement finishes, that backend pulls the next bytes out of its buffer — the shaft empties from the bottom up. Nothing was ever lost, it was only delayed.',
+        body: 'As each statement finishes, that backend pulls the next bytes out of its buffer — the stack empties from the bottom up. Nothing was ever lost, it was only delayed.',
         subject: (s) => ({ id: 'all ports', box: s.ports() }),
         dir: [0, 0.3, 1],
         fov: 36,

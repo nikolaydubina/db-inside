@@ -1713,48 +1713,42 @@ export class PostgresInstance {
 
   private buildBackends() {
     const slots = BACKEND_SLOTS
-    const baseGeo = new THREE.CylinderGeometry(0.46, 0.54, 0.3, 20)
-    const ringGeo = new THREE.TorusGeometry(0.56, 0.042, 6, 32)
-    const LEDGeo = new THREE.SphereGeometry(0.16, 12, 10)
-    const baseMat = glowMat(0x07131c, 0x1a4d63, 0.45, { metalness: 0.6, roughness: 0.3 })
-    const pickGeo = new THREE.BoxGeometry(1.36, 0.62, 1.36)
-    const cellGeo = new THREE.BoxGeometry(0.36, 0.36, 0.36)
+    // Same notation as a redis connection: a doughnut and a halo, nothing else.
+    // A connection is a slot, not a machine — it has no body to draw, and the
+    // two engines should not need two vocabularies for one idea.
+    const ringGeo = new THREE.TorusGeometry(0.34, 0.05, 8, 28)
+    const pickGeo = new THREE.BoxGeometry(0.9, 0.5, 0.9)
+    // one buffered request: small, because it stands for a queued statement, not
+    // for 8 kB of buffer that may or may not be in use
+    const cellGeo = new THREE.BoxGeometry(0.22, 0.16, 0.22)
 
     slots.forEach((x, i) => {
       const g = new THREE.Group()
-      g.position.set(x, 9.88, 5.8)
+      g.position.set(x, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z)
       g.visible = false
-      g.scale.setScalar(0.001)
-
-      const base = new THREE.Mesh(baseGeo, baseMat)
-      base.castShadow = true
-      g.add(base)
 
       const ring = new THREE.MeshStandardMaterial({
-        color: 0x0a1018,
+        color: 0x0b1a24,
         emissive: PALETTE.cyan,
-        emissiveIntensity: 0.7,
+        emissiveIntensity: 0.9,
         roughness: 0.3,
-        metalness: 0.4,
+        metalness: 0.5,
       })
       const ringMesh = new THREE.Mesh(ringGeo, ring)
       ringMesh.rotation.x = Math.PI / 2
-      ringMesh.position.y = 0.16
       g.add(ringMesh)
 
-      const ledMat = new THREE.MeshStandardMaterial({
-        color: 0x0a1018,
-        emissive: PALETTE.cyan,
-        emissiveIntensity: 0.9,
-        roughness: 0.4,
+      const glow = new THREE.SpriteMaterial({
+        map: radialTexture(),
+        color: PALETTE.cyan,
+        transparent: true,
+        opacity: 0,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
       })
-      const led = new THREE.Mesh(LEDGeo, ledMat)
-      led.position.y = 0.24
-      g.add(led)
-
-      const gl = halo(PALETTE.cyan, 2.4, 0)
-      gl.position.y = 0.3
-      g.add(gl)
+      const sprite = new THREE.Sprite(glow)
+      sprite.scale.setScalar(2.0)
+      g.add(sprite)
 
       // invisible hover/selection box that hugs this connection
       const pick = new THREE.Mesh(
@@ -1764,45 +1758,32 @@ export class PostgresInstance {
       pick.position.copy(g.position)
       pick.userData.info = {
         title: `Backend · connection ${i + 1}`,
-        body: 'One live client connection, handled by its own backend process. It parses, plans and executes its own queries, then returns the result through this same slot. Ports appear and disappear as clients connect and disconnect.',
-        meta: 'process · one per connection · not a thread',
+        body: 'One live client connection, handled by its own backend process, forked by the postmaster when the client connected. It parses, plans and executes its own queries in its own address space, then returns the result through this same slot. That is why the boxes above it are that backend\u2019s private memory and die with it, and why the bill is per connection: a few megabytes each, capped by max_connections. The redis cage next door serves the same kind of socket from one thread and a kernel fd set, which is the whole reason it can hold two orders of magnitude more of them.',
+        meta: 'process · ~5 MB private heap · MaxConnections 100',
       }
 
       this.group.add(g)
       this.group.add(pick)
 
-      // The input buffer as a shaft, not a row of boxes: the client's wire comes
-      // down into the port, the bytes stack up in a vertical queue in this
-      // backend's own memory, and the work leaves from the bottom of it. The
-      // internal line into the pipeline picks up exactly where it ends.
-      const shaftTop = -0.3
-      const shaftBottom = INBUF_BOTTOM - 0.42
-      const rail = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.035, 0.035, shaftTop - shaftBottom, 8),
-        new THREE.MeshStandardMaterial({
-          color: 0x0a1118,
-          emissive: PALETTE.cyan,
-          emissiveIntensity: 0.7,
-          roughness: 0.5,
-        }),
-      )
-      rail.position.y = (shaftTop + shaftBottom) / 2
-      g.add(rail)
-
+      // The input buffer: requests stack upward from the oldest, and a cell
+      // exists on screen only while it holds a statement. An empty slot is drawn
+      // as nothing at all — the buffer is a capacity, not an object, and a column
+      // of switched-off placeholders says more about our drawing than about it.
       const cells: THREE.Mesh[] = []
       for (let c = 0; c < INBUF_CELLS; c++) {
         const cell = new THREE.Mesh(
           cellGeo,
           new THREE.MeshStandardMaterial({
             color: 0x0a1118,
-            emissive: 0xb46bff,
-            emissiveIntensity: 0.04,
+            emissive: PALETTE.cyan,
+            emissiveIntensity: 1,
             roughness: 0.4,
           }),
         )
         // 0 is the oldest and sits at the bottom, closest to execution; later
         // arrivals stack upward toward the incoming wire
         cell.position.set(0, INBUF_BOTTOM + c * INBUF_PITCH, 0)
+        cell.visible = false
         g.add(cell)
         cells.push(cell)
       }
@@ -1810,14 +1791,14 @@ export class PostgresInstance {
       // tappable: this is the one place in the drawing that is a backend's own
       // memory rather than the shared pool, and it is worth being able to ask
       const bufPick = new THREE.Mesh(
-        new THREE.BoxGeometry(0.9, 2.5, 0.9),
+        new THREE.BoxGeometry(0.7, 2.0, 0.7),
         new THREE.MeshBasicMaterial({ visible: false }),
       )
       bufPick.position.set(0, INBUF_BOTTOM + (INBUF_CELLS - 1) * INBUF_PITCH * 0.5, 0)
       g.add(bufPick)
       this.register(bufPick, {
         title: 'Backend input buffer',
-        body: 'Each backend reads its connection into a private buffer in its own process memory — 8 kB to start, grown as needed. This is per-process heap, not shared_buffers: no other backend can see it. The wire from the client comes down into the port, requests stack up in the shaft, and the one at the bottom is what the backend is executing right now. Cyan is executing, violet is already received and waiting. A connection runs one statement at a time, in order.',
+        body: 'Each backend reads its connection into a private buffer in its own process memory — 8 kB to start, grown as needed. This is per-process heap, not shared_buffers: no other backend can see it. The wire from the client comes down into the port, requests stack up above it, and the one at the bottom is what the backend is executing right now. Cyan is executing, violet is already received and waiting. A connection runs one statement at a time, in order — this is where pipelining waits.',
         meta: 'per-connection RAM · private heap · pipelining waits here',
       })
 
@@ -1825,7 +1806,7 @@ export class PostgresInstance {
         id: i,
         group: g,
         ring,
-        glow: gl.material,
+        glow,
         pick,
         active: false,
         busy: false,
@@ -1921,7 +1902,7 @@ export class PostgresInstance {
   }
 
   /**
-   * Where a backend's work leaves its input buffer: the bottom of the shaft.
+   * Where a backend's work leaves its input buffer: below the last cell.
    * The internal pipeline line starts here, so the flow is continuous — client
    * wire, port, buffer, then into the machine.
    */
@@ -2545,33 +2526,30 @@ export class PostgresInstance {
       m.emissiveIntensity = 0.25 + 0.3 * breathe(time, 1.7, i)
     })
 
-    // backend connection ports: scale in/out, glow while busy
+    // backend connection ports: a doughnut that breathes when idle and burns when
+    // serving. No scale-in, no lift, no ball inside: a slot appears, pulses, and
+    // that is the whole notation — the same one the redis cage uses.
     for (const b of this.backends) {
       b.pulse = Math.max(0, b.pulse - dt * 2.2)
-      const target = b.active ? 1 : 0
-      const s = b.group.scale.x + (target - b.group.scale.x) * Math.min(1, dt * 7)
-      b.group.scale.setScalar(Math.max(0.001, s + b.pulse * 0.07))
-      b.group.visible = s > 0.02
+      b.group.visible = b.active
 
       if (b.busy) {
-        b.ring.emissiveIntensity = 2.2 + 0.5 * Math.sin(time * 7 + b.id) + b.pulse * 2
-        b.glow.opacity = 0.45
+        b.ring.emissiveIntensity = 2.6 + b.pulse * 2
       } else {
         b.ring.emissiveIntensity =
-          (b.active ? 0.75 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
-        b.glow.opacity = b.active ? 0.08 : 0
+          (b.active ? 0.9 + 0.2 * breathe(time, 1.1, b.id) : 0.1) + b.pulse * 2
       }
+      // same halo as the redis ports, so the two cages share one lamp
+      b.glow.opacity = b.active ? 0.16 + 0.34 * (b.ring.emissiveIntensity / 2.6) : 0
 
       // input buffer: cell 0 is the statement being executed, the others are
-      // pipelined requests parked in this backend's own memory. A dim cell is
-      // an empty slot — 8 kB of buffer with nothing in it.
+      // pipelined requests parked in this backend's own memory. A cell that holds
+      // nothing is not drawn at all — the buffer is a capacity, not an object.
       const held = b.busy ? 1 + b.inbuf : 0
       b.cells.forEach((cell, i) => {
+        cell.visible = i < held
+        if (!cell.visible) return
         const mat = cell.material as THREE.MeshStandardMaterial
-        if (i >= held) {
-          mat.emissiveIntensity = 0.04
-          return
-        }
         if (i === 0) {
           mat.emissive.setHex(PALETTE.cyan)
           mat.emissiveIntensity = 1.6 + 0.5 * Math.sin(time * 9 + b.id)

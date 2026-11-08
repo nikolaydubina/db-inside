@@ -134,11 +134,10 @@ Things the scene does not show yet. The first block is already listed in the Sto
 
 The redis cage has one thread, a shared command queue, a dict, five value types, TTL expiry,
 eviction, the AOF (growth, `appendfsync`, rewrite, start-up load) and the RDB (`bgsave`, `save`,
-load). These are the structure-level things it still cannot show.
+load). The connection path is drawn down to the kernel: a socket is a doughnut on the top rim, and
+`epoll`'s registered fds are a dashed plate of tiles under the queue that light on connect and flash
+when the loop actually reads from that fd. These are the structure-level things it still cannot show.
 
-- [ ] **dict rehash** — the bucket array is frozen at 32×7. A real dict doubles at load factor 1 and
-      rehashes *incrementally*: two tables live at once, one bucket migrated per operation. This is
-      the picture that makes "O(1) while the table grows" believable.
 - [ ] **encoding conversion** — every key is drawn alike. Hash, list and zset stay a listpack until
       128 entries; a set is an intset until it holds a non-integer or passes 512; then it becomes a
       hashtable or a skiplist. One `SADD` can convert a whole key, and that conversion is a real

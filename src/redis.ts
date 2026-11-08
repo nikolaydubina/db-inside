@@ -131,6 +131,20 @@ const keyZ = (r: number) => KEYS.cz + (r - (KEYS.rows - 1) / 2) * PITCH
 /** The single command loop, and the queue it drains. */
 const LOOP = new THREE.Vector3(0, 7.6, 1.4)
 const QUEUE = { cells: 10, y: 8.95, z: BACKEND_ORIGIN.z }
+/**
+ * The kernel's readiness set — epoll's registered fds, drawn as one tile per
+ * connection on a plate hanging under the loop that consults it. This is the
+ * structure that makes "ten thousand connections, one thread" true, and it
+ * belongs to the kernel, not to the redis heap, which is why its cage is dashed.
+ */
+const EPOLL = {
+    y: LOOP.y - 1.15,
+    z: LOOP.z,
+    pitch: 0.34,
+    w: 0.24,
+    h: 0.06,
+    d: 0.2,
+}
 
 /** AOF buffer: the bytes not yet written to the file, in memory. */
 const AOF_BUF_CELLS = 5
@@ -335,6 +349,9 @@ export class RedisInstance {
     private queueMats: THREE.MeshStandardMaterial[] = []
     /** How many commands are waiting right now. 0 = the queue is empty. */
     private queueDepth = 0
+    /** epoll's fd tiles, one per connection, and the flash of a completed read */
+    private fdMats: THREE.MeshStandardMaterial[] = []
+    private fdPulse: number[] = []
     private loopCore!: THREE.MeshStandardMaterial
     private loopRing!: THREE.Mesh
     private bgsaveDrone!: THREE.Group
@@ -384,6 +401,7 @@ export class RedisInstance {
         this.buildMemory()
         this.buildPorts()
         this.buildPipeline()
+        this.buildReadiness()
         this.buildAgents()
 
         // the base file is whatever the keyspace encodes to: its length comes
@@ -909,8 +927,8 @@ export class RedisInstance {
             g.add(pick)
             this.register(pick, {
                 title: `Connection ${n + 1} — a socket on one thread`,
-                body: 'A connection is a file descriptor, not a process. Every connected client lands in the same event loop and the same command queue below, and the commands are executed one at a time. Postgres forks a backend per connection; redis serves them all from one thread. That is the whole scaling story, and the reason the I/O threads exist only for read and write syscalls.',
-                meta: 'socket · multiplexed · shares the single command thread',
+                body: 'A connection is a file descriptor, not a process. Every connected client registers one entry in the readiness set just below and lands in the same command queue, and the commands are executed one at a time by the same thread. There is no per-connection stack and no per-connection heap worth speaking of — a client struct, a querybuf, a reply buffer, on the order of tens of kilobytes — so the limit here is fds (maxclients, 10000 by default), not processes. Compare the postgres cage next door, where the same socket is a forked process with megabytes of its own address space: 100 connections there, 10000 here, and the difference is exactly that.',
+                meta: 'fd · ~30 kB · maxclients 10000 · shares the single thread',
             })
 
             this.group.add(g)
@@ -1026,6 +1044,64 @@ export class RedisInstance {
         const loopLab = label('COMMAND LOOP')
         loopLab.position.set(LOOP.x + 1.2, LOOP.y + 0.1, LOOP.z)
         this.group.add(loopLab)
+    }
+
+    /**
+     * The kernel's readiness set: one tile per fd the loop has registered.
+     *
+     * A connection in this cage is not a worker, and the missing part of that
+     * claim was this set — the loop does not wait on any one socket, it asks the
+     * kernel which fds are readable and only then reads. That is why a lit tile
+     * can sit there doing nothing for hours, and why the count of tiles is not
+     * the count of threads. Dashed cage: the tiles are real fds, the theatre of
+     * laying them in a row is ours — inside the kernel they are an array.
+     */
+    private buildReadiness() {
+        const n = BACKEND_SLOTS.length
+        const tileGeo = new THREE.BoxGeometry(EPOLL.w, EPOLL.h, EPOLL.d)
+        for (let i = 0; i < n; i++) {
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0x081018,
+                emissive: PALETTE.cyan,
+                emissiveIntensity: 0.03,
+                roughness: 0.4,
+                metalness: 0.4,
+            })
+            const tile = new THREE.Mesh(tileGeo, mat)
+            tile.position.set((i - (n - 1) / 2) * EPOLL.pitch, EPOLL.y, EPOLL.z)
+            this.group.add(tile)
+            this.fdMats.push(mat)
+            this.fdPulse.push(0)
+        }
+
+        const setW = n * EPOLL.pitch + 0.12
+        const setD = EPOLL.d + 0.16
+        const setCage = new OutlineBox(setW, 0.4, setD, PALETTE.cyan, 0.2, {
+            dashed: true,
+        }).centre(0, EPOLL.y, EPOLL.z)
+        this.group.add(setCage)
+
+        const setPick = new THREE.Mesh(
+            new THREE.BoxGeometry(setW, 0.4, setD),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        setPick.position.set(0, EPOLL.y, EPOLL.z)
+        this.group.add(setPick)
+        this.register(
+            setPick,
+            {
+                title: 'epoll — the kernel\u2019s readiness set',
+                body: 'Every open connection is one fd registered here with a mask of interest, usually just "readable". The single thread does not poll each socket and does not own a thread per client: it calls epoll_wait, the kernel hands back only the fds that have bytes, and each of those is read and parsed in turn. A tile stays lit for as long as its connection exists, whether or not anything is happening on it — a million idle connections cost a million entries and no CPU. The flash is a read that actually happened. This is the reason a connection here is cheap: no process, no stack, no per-connection heap to speak of, just an fd, an entry in this set, and a small querybuf.',
+                meta: 'kernel-side · one entry per fd · the loop reads only what is ready',
+            },
+            setCage,
+        )
+
+        // under the plate, not beside the loop: the two labels land in the same
+        // screen spot from the wide shots otherwise
+        const lab = label('EPOLL · FDS')
+        lab.position.set(-setW / 2 - 0.25, EPOLL.y - 0.3, EPOLL.z + 0.45)
+        this.group.add(lab)
     }
 
     private buildAgents() {
@@ -1188,6 +1264,8 @@ export class RedisInstance {
     pulsePort(pod: RedisPort) {
         pod.pulse = 1
         pod.busy = true
+        // the loop read this fd: one entry of the readiness set fired
+        this.fdPulse[pod.id] = 1
     }
 
     /**
@@ -2354,10 +2432,20 @@ export class RedisInstance {
             pod.glow.opacity = 0.16 + 0.34 * (pod.ring.emissiveIntensity / 2.6)
             if (pod.pulse > 0) {
                 pod.pulse = Math.max(0, pod.pulse - dt * 1.6)
-                pod.group.position.y = BACKEND_ORIGIN.y + pod.pulse * 0.12
                 if (pod.pulse === 0) pod.busy = false
             }
         }
+
+        // the readiness set: a tile is lit while its connection is registered,
+        // and flashes on the frame the loop actually read from that socket. An
+        // unlit tile is not a closed connection in general — it is a slot this
+        // floor has, which is where the analogy is ours and not the kernel's.
+        this.fdMats.forEach((mat, i) => {
+            this.fdPulse[i] = Math.max(0, this.fdPulse[i] - dt * 2.2)
+            const pod = this.ports[i]
+            const base = pod && pod.active ? 0.55 + 0.18 * breathe(time, 1.3, i) : 0.03
+            mat.emissiveIntensity = base + this.fdPulse[i] * 2.4
+        })
 
         // the loop is the one thing that is always visibly working
         this.loopCore.emissiveIntensity +=

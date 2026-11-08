@@ -199,14 +199,14 @@ export const tableView = (name: keyof typeof TABLE_ANCHOR): ViewDef => ({
 })
 
 /**
- * One connection on its own: the port, the input-buffer shaft under it, and
+ * One connection on its own: the port, the input-buffer stack under it, and
  * nothing else of the pool in frame. This is what the story's buffer steps look
  * at, because "the buffer" is a per-backend thing and a wide shot of six ports
  * does not show any one of them.
  */
 export const backendView = (i: number): ViewDef => {
     const x = BACKEND_SLOTS[i] ?? 0
-    // aim a little below the middle of port + shaft so the subject sits above
+    // aim a little below the middle of port + stack so the subject sits above
     // centre, clear of the caption panel along the bottom
     const mid = L(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
     return {
