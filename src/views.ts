@@ -467,6 +467,21 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         /** What the camera is currently holding on to, if anything. */
         following: () => followName,
         /**
+         * Let go of the subject.
+         *
+         * The follow exists so a view keeps describing a thing that moves while
+         * you watch it — a cage being dragged, a buffer strip drifting along the
+         * log. It is NOT a lock: the moment the camera is driven by hand —
+         * orbiting, zooming, flying — the user owns the camera and this gets
+         * released, so `?view=` only decides where you START. Navigating to a
+         * view again re-arms it.
+         */
+        release() {
+            if (!followPoint && !followName) return
+            followPoint = null
+            followName = null
+        },
+        /**
          * Frame a world-space box from a direction. This is how the story aims
          * the camera: it knows *what* it wants to look at and hands over a box,
          * so a step never hardcodes a camera position or a pod index. Returns

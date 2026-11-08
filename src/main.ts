@@ -389,6 +389,8 @@ const hud = initHud({
     flyKeys.clear()
     flyVel.set(0, 0, 0)
     if (!on) looking = false
+    // flying is driving the camera by hand: it lets go of any selected view
+    if (on) rig.release()
     // while flying, a drag looks around instead of orbiting the scene
     world.controls.enableRotate = !on
     // cursor stays visible; it is only swapped for the crosshair while dragging
@@ -436,7 +438,12 @@ function noteCameraMove() {
   },
 }
 
-world.controls.addEventListener('start', noteCameraMove)
+world.controls.addEventListener('start', () => {
+  noteCameraMove()
+  // A hand-driven camera takes over from whatever view was selected: ?view= sets
+  // where you start, it is not a lock. Re-navigating to a view re-arms it.
+  rig.release()
+})
 
 /* --------------------------------- views ---------------------------------- */
 

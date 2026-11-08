@@ -508,17 +508,23 @@ export class RedisInstance {
         // drifting along with the end of the file. Deliberately not a box with
         // cubes inside it — these bytes are in RAM only, so they should read as
         // only half in this world.
+        //
+        // CYAN, not amber. In this scene amber means one thing: these bytes are in
+        // the file. aof_buf is the opposite of that, and painting it amber made
+        // the same colour claim both states at once. Cyan is the memory tint it
+        // shares with wal_buffers, because it IS the same thing: a log tail that
+        // has not reached the disk.
         const bufGroup = new THREE.Group()
         this.aofBufGroup = bufGroup
         bufGroup.position.set(this.aofHeadX(), AOF_BUF_Y, zAt(AOF_ROW))
         this.group.add(bufGroup)
         for (let n = 0; n < AOF_BUF_CELLS; n++) {
             const mat = new THREE.MeshStandardMaterial({
-                color: 0x2a1a06,
-                emissive: PALETTE.amber,
+                color: 0x0b2a36,
+                emissive: PALETTE.cyan,
                 // dim at rest: adjacent emissive cubes at full strength bloom
                 // into one white slab and stop reading as separate pages
-                emissiveIntensity: 0.28,
+                emissiveIntensity: 0.5,
                 roughness: 0.35,
                 metalness: 0.45,
                 transparent: true,
@@ -526,7 +532,7 @@ export class RedisInstance {
             })
             const cube = new THREE.Mesh(this.blockGeo, mat)
             cube.position.set((n - (AOF_BUF_CELLS - 1) / 2) * PITCH, 0, 0)
-            cube.add(neonEdges(this.blockGeo, 0xe8a961, 0.35))
+            cube.add(neonEdges(this.blockGeo, 0x8fe6ff, 0.55))
             bufGroup.add(cube)
             this.aofBufCells.push(cube)
             this.aofBufMats.push(mat)
@@ -539,8 +545,8 @@ export class RedisInstance {
         bufGroup.add(bufPick)
         this.register(bufPick, {
             title: 'AOF buffer — bytes not yet on disk',
-            body: 'Write commands are appended here first, in memory, and fsynced to the AOF file according to appendfsync: everysec (the default) loses up to a second, always loses nothing but pays a flush per write, no quietly hands durability to the kernel. The handover is a copy, not a move: write(2) hands these bytes to the kernel page cache and the buffer is reused. Same idea as wal_buffers in postgres, one fsync policy instead of a WAL writer.',
-            meta: 'aof_buf · appendfsync everysec by default',
+            body: 'Write commands are appended here first, in the process heap, and fsynced to the AOF file according to appendfsync: everysec (the default) loses up to a second, always loses nothing but pays a flush per write, no quietly hands durability to the kernel. Cyan is the point: this is memory, the bytes are not in the file yet, and they only turn amber when they are copied into the blocks below. The handover is a copy, not a move: write(2) hands the bytes to the kernel page cache and the buffer is reused. Compared with wal_buffers the difference is the contract, not the idea: postgres flushes at commit, redis flushes per appendfsync policy.',
+            meta: 'aof_buf · in memory · appendfsync everysec by default',
         })
         // the label hangs UNDER the strip: the space above it belongs to the
         // AOF REWRITE agent, which works directly above the end of the log
@@ -1207,7 +1213,7 @@ export class RedisInstance {
             this.aofBufMats.forEach((mat, i) => {
                 const live = i <= this.bufferCubeIndex() ? this.aofBuffered : 0
                 mat.emissiveIntensity +=
-                    (0.28 + live * 0.5 - mat.emissiveIntensity) * Math.min(1, dt * 5)
+                    (0.5 + live * 0.6 - mat.emissiveIntensity) * Math.min(1, dt * 5)
             })
             // keep the world anchor on the strip: views and the camera aim at it
             REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)

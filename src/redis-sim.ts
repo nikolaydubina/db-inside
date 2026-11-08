@@ -211,22 +211,37 @@ export class RedisSim {
             if (cmd.write) {
                 if (!key.live) this.redis.setKeyLive(key, true)
                 this.redis.flashKey(key, PALETTE.teal, 0.6)
-                // durability is a separate step: the record goes to the AOF buffer,
-                // then to the file. A read never touches the disk at all.
-                const head = this.redis.appendAof(randInt(40, 220))
-                const toAof = new QueryChain(cage)
-                toAof.addCurve(
+                // Durability is a separate step from the write, and the two legs
+                // are coloured by where the bytes ARE, not by what they will
+                // become: cyan into the buffer (memory to memory), amber only on
+                // the leg that puts them in the file.
+                const bytes = randInt(40, 220)
+                const bufTop = this.redis.aofBufferTop()
+                const toBuf = new QueryChain(cage)
+                toBuf.addCurve(
                     pathCurve([
                         loop.clone(),
                         loop.clone().add(new THREE.Vector3(3.4, -2.4, 3.4)),
-                        this.redis.aofBufferTop(),
-                        head,
+                        bufTop.clone(),
+                    ]),
+                    PALETTE.cyan,
+                    { speed: 0.9, opacity: 0.4 },
+                )
+                await this.ticker.wait(0.14)
+                const head = this.redis.appendAof(bytes)
+                const toFile = new QueryChain(cage)
+                toFile.addCurve(
+                    pathCurve([
+                        bufTop.clone(),
+                        bufTop.clone().add(new THREE.Vector3(0.4, -0.5, 0.6)),
+                        head.clone(),
                     ]),
                     PALETTE.amber,
-                    { speed: 0.8, opacity: 0.4 },
+                    { speed: 1.1, opacity: 0.55 },
                 )
-                toAof.fadeOut(this.ticker, 0.9)
-                this.note = `${cmd.name} · appended to the aof`
+                toFile.fadeOut(this.ticker, 0.6)
+                toBuf.fadeOut(this.ticker, 0.6)
+                this.note = `${cmd.name} · ${bytes} B appended in block ${this.redis.aofUsed}`
             } else {
                 this.redis.markKey(key, PALETTE.ice)
                 this.redis.flashKey(key, PALETTE.ice, 0.45)

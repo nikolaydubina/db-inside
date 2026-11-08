@@ -198,18 +198,62 @@
       </section>
     </aside>
 
+    <!--
+      The legend describes the GRAMMAR of the scene, not one database's parts, so
+      it stays true for postgres, redis and anything added next. Two columns:
+      what you are looking at, and what it means.
+    -->
     <div class="hud panel legend">
       <h2>Legend</h2>
-      <ul>
-        <li><i style="--c: #35e0ff"></i>shared buffers <span>RAM</span></li>
-        <li><i style="--c: #2bffc3"></i>table pages <span>disk</span></li>
-        <li><i style="--c: #ffb03a"></i>wal &amp; page i/o <span>disk</span></li>
-        <li><i style="--c: #ff3ea5"></i>query packets <span>client</span></li>
-        <li><i style="--c: #8a7bff"></i>index structures <span>RAM</span></li>
-        <li><i style="--c: #b46bff"></i>input buffer <span>backend RAM</span></li>
-        <li><i style="--c: #93a1ae"></i>system pages <span>postgres-owned</span></li>
-      </ul>
-      <p class="hint">orange blocks = disk pages · floating = in RAM · grid = floor<br />double-click anything to fly to it and drift around it</p>
+      <table class="gloss">
+        <tbody>
+          <tr>
+            <th><span class="sw" style="--c: #35e0ff"></span>in memory</th>
+            <td>cache, buffer, dataset</td>
+          </tr>
+          <tr>
+            <th><span class="sw" style="--c: #ffb03a"></span>to a file</th>
+            <td>pages and log records</td>
+          </tr>
+          <tr>
+            <th><span class="sw" style="--c: #8a7bff"></span>structures</th>
+            <td>in-memory index or dict</td>
+          </tr>
+          <tr>
+            <th><span class="sw" style="--c: #ff3ea5"></span>traffic</th>
+            <td>client ↔ server bytes</td>
+          </tr>
+          <tr>
+            <th><span class="sw" style="--c: #93a1ae"></span>system</th>
+            <td>other files, unlabelled</td>
+          </tr>
+          <tr>
+            <th>floating</th>
+            <td>not on disk yet</td>
+          </tr>
+          <tr>
+            <th>on the grid</th>
+            <td>a file, or bytes in one</td>
+          </tr>
+          <tr>
+            <th>height</th>
+            <td>how full it is</td>
+          </tr>
+          <tr>
+            <th>pulse</th>
+            <td>just read or written</td>
+          </tr>
+          <tr>
+            <th>outline</th>
+            <td>a run, not a selection</td>
+          </tr>
+          <tr>
+            <th>grid</th>
+            <td>2 units, one floor</td>
+          </tr>
+        </tbody>
+      </table>
+      <p class="hint">double-click anything to fly to it and drift around it</p>
     </div>
 
     <div id="crosshair" class="crosshair" hidden></div>

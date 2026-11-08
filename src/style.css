@@ -721,7 +721,7 @@ h2::after {
 .legend {
   left: 26px;
   bottom: 26px;
-  width: 210px;
+  width: 262px;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: linear-gradient(155deg, rgba(11, 21, 33, 0.6), rgba(6, 12, 20, 0.45));
@@ -730,40 +730,52 @@ h2::after {
   pointer-events: none;
 }
 
-.legend ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
+/* A two-column glossary: what you are looking at, then what it means. Columns
+   are what keeps the meanings readable — a list of "x = y" lines drifts out of
+   alignment as soon as one term is longer than the others. */
+.legend table.gloss {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
 }
 
-.legend li {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.legend th {
+  text-align: left;
   font-family: var(--mono);
   font-size: 9.5px;
+  font-weight: 400;
   letter-spacing: 0.05em;
   color: #93aec2;
+  white-space: nowrap;
+  vertical-align: top;
+  padding: 0 12px 5px 0;
 }
 
-.legend li i {
+.legend td {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+  line-height: 1.45;
+  color: #5f7d94;
+  vertical-align: top;
+  padding: 0 0 5px;
+}
+
+.legend tr:last-child th,
+.legend tr:last-child td {
+  padding-bottom: 0;
+}
+
+/* colour swatch in front of a term that names a tint */
+.legend .sw {
+  display: inline-block;
   width: 6px;
   height: 6px;
   border-radius: 2px;
+  margin-right: 7px;
+  vertical-align: 1px;
   background: var(--c);
   box-shadow: 0 0 10px var(--c);
-  flex: none;
-}
-
-.legend li span {
-  margin-left: auto;
-  color: #43596b;
-  font-size: 8.5px;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
 }
 
 /* ---------- 3D labels ---------- */
