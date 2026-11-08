@@ -186,6 +186,18 @@ const KIND_COLOR: Record<KeyKind, number> = {
     zset: PALETTE.ice,
 }
 /**
+ * Where a value stops being compact. A small hash, list or zset lives in ONE
+ * flat listpack — a single contiguous allocation that is scanned linearly and
+ * costs about its bytes and nothing more. A set of integers lives in an intset,
+ * which converts much later. Past the limit redis has no way to add one more
+ * element in place: it allocates the real structure and rewrites the whole value
+ * in a single operation, on the one thread. These are the default limits.
+ */
+const LISTPACK_MAX_ENTRIES = 128
+const INTSET_MAX_ENTRIES = 512
+const encodingLimit = (kind: KeyKind) =>
+    kind === 'set' ? INTSET_MAX_ENTRIES : LISTPACK_MAX_ENTRIES
+/**
  * Bytes a key and its value take in the dump. Strings are small, collections are
  * not: this is why an RDB block holds a different number of keys every time, and
  * why the file's length tracks the dataset rather than the key count.
@@ -217,6 +229,43 @@ export interface RedisKey {
      * the only variation a dense file has.
      */
     bytes: number
+    /** elements in the value; 0 for a string, which has no element count */
+    entries: number
+    /**
+     * True once the value was converted out of its compact encoding. Redis never
+     * converts back: a hash that became a hashtable stays one until the key is
+     * deleted and rebuilt.
+     */
+    aux: boolean
+}
+
+/** How a value is actually stored, as `OBJECT ENCODING` would report it. */
+function encodingOf(key: RedisKey): string {
+    switch (key.kind) {
+        case 'string':
+            // embstr: header and bytes in one allocation (up to 44 B), else raw
+            return key.bytes <= 44 ? 'embstr' : 'raw'
+        case 'hash':
+            return key.aux ? 'hashtable' : 'listpack'
+        case 'set':
+            return key.aux ? 'hashtable' : 'intset'
+        case 'zset':
+            return key.aux ? 'skiplist + dict' : 'listpack'
+        case 'list':
+            return key.aux ? 'quicklist · 2 nodes' : 'quicklist · 1 node'
+    }
+}
+
+/**
+ * How many allocations the value's structure is drawn as. A compact encoding is
+ * one block — a single listpack, one contiguous run of bytes. Converted, a hash
+ * or a set becomes a bucket array plus per-entry nodes and a zset becomes TWO
+ * structures at once (a dict for O(1) by member and a skiplist for the range),
+ * so the drawing gives it two blocks: there really are two allocations.
+ */
+function auxBlocks(key: RedisKey): number {
+    if (!key.aux || key.kind === 'string') return 0
+    return key.kind === 'zset' ? 2 : 1
 }
 
 export interface RedisPort {
@@ -278,6 +327,10 @@ export class RedisInstance {
     private disk!: THREE.InstancedMesh
     private dictMesh!: THREE.InstancedMesh
     private keysMesh!: THREE.InstancedMesh
+    /** the second (and for a zset, third) allocation of a converted value */
+    private auxMesh!: THREE.InstancedMesh
+    /** per-key deploy of a conversion, 0 → 1; the map holds only keys mid-flight */
+    private auxAnim = new Map<number, number>()
     /** base albedo per instance, so a flash can be undone */
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
@@ -775,6 +828,22 @@ export class RedisInstance {
         keys.userData.infoFor = (hit: THREE.Intersection) => this.keyPick(hit)
         this.pickables.push(keys)
 
+        // The other allocation(s) of a converted value. Two slots per key, because
+        // a zset converts into two structures at once and the drawing gives it two
+        // blocks. Same geometry as a key block: these are allocations of the same
+        // order of magnitude, stacked on top of the entry they extend.
+        const aux = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows * 2)
+        aux.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+        this.group.add(aux)
+        this.auxMesh = aux
+        // the converted structures answer for the key they belong to: two
+        // instances per key, so the instance id carries the key in its high bits
+        aux.userData.infoFor = (hit: THREE.Intersection) => {
+            if (hit.distance > BLOCK_PICK_RANGE || hit.instanceId === undefined) return null
+            return this.keyInfo(Math.floor(hit.instanceId / 2))
+        }
+        this.pickables.push(aux)
+
         i = 0
         for (let r = 0; r < KEYS.rows; r++) {
             for (let c = 0; c < KEYS.cols; c++) {
@@ -784,6 +853,19 @@ export class RedisInstance {
                 const kinds: KeyKind[] = ['string', 'string', 'string', 'hash', 'list', 'set', 'zset']
                 const kind = kinds[randInt(0, kinds.length - 1)]
                 const size = VALUE_BYTES[kind]
+                // A long-running instance is a mix, not a fresh start: most values
+                // sit somewhere in the middle of their encoding's range, some
+                // already went through the conversion, and a few are one write away
+                // from the limit — which is exactly where the conversion happens, so
+                // that is where a visitor should be able to see it.
+                const limit = encodingLimit(kind)
+                const near = Math.random() < 0.18
+                const entries =
+                    kind === 'string'
+                        ? 0
+                        : near
+                            ? Math.max(1, limit - randInt(1, 4))
+                            : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
                     row: r,
@@ -795,6 +877,8 @@ export class RedisInstance {
                     heat: 0,
                     shade: rand(0.86, 1.1),
                     bytes: randInt(size[0], size[1]),
+                    entries,
+                    aux: entries > limit,
                 }
                 this.tmpObj.position.copy(home)
                 this.tmpObj.scale.setScalar(live ? 1 : 0.001)
@@ -807,6 +891,8 @@ export class RedisInstance {
             }
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
+        // the converted values' extra allocations, in their base colours
+        this.paintAux()
 
         const kW = KEYS.cols * PITCH
         const kD = KEYS.rows * PITCH
@@ -1224,18 +1310,42 @@ export class RedisInstance {
         if (hit.distance > BLOCK_PICK_RANGE) return null
         const i = this.instanceAt(hit, this.keys.length)
         if (i === null) return null
+        return this.keyInfo(i)
+    }
+
+    /** The inspector payload for one key, shared by its entry block and its structures. */
+    private keyInfo(i: number) {
         const key = this.keys[i]
-        if (!key.live) return null
+        if (!key || !key.live) return null
         const box = new THREE.Box3().setFromCenterAndSize(
-            key.home.clone().add(new THREE.Vector3(0, KEY.h / 2, 0)),
-            new THREE.Vector3(KEY.w, KEY.h, KEY.d),
+            key.home.clone().add(new THREE.Vector3(0, this.keyStack(key) / 2, 0)),
+            new THREE.Vector3(KEY.w, this.keyStack(key), KEY.d),
         )
+        const enc = encodingOf(key)
+        const limit = encodingLimit(key.kind)
+        const what = key.kind === 'hash' ? 'fields' : key.kind === 'set' ? 'members' : 'elements'
+        const ttl = key.ttl > 0 ? ` · ttl ≈ ${key.ttl.toFixed(0)} s` : ''
+        const isString = key.kind === 'string'
         return {
             key: `redis-key-${i}`,
             info: {
-                title: `key #${i} — ${key.kind}`,
-                body: 'One key and its value, living in the process heap. Reads are a hash plus a pointer chase: no buffer pool, no page read, no disk. This is also why a key that is bigger than memory cannot exist here at all, and why one slow O(N) command on a big value blocks every other client.',
-                meta: key.ttl > 0 ? `ttl ≈ ${key.ttl.toFixed(0)} s · in RAM` : 'no ttl · in RAM',
+                title: `key #${i} — ${key.kind} · ${enc}`,
+                body:
+                    'One key and its value, living in the process heap. Reads are a hash plus a pointer chase: no buffer pool, no page read, no disk. This is also why a key that is bigger than memory cannot exist here at all, and why one slow O(N) command on a big value blocks every other client. ' +
+                    (isString
+                        ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
+                        : key.aux
+                            ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
+                            (key.kind === 'zset'
+                                ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
+                                : key.kind === 'list'
+                                    ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
+                                    : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
+                            ' It never converts back: the bigger encoding is kept until the key is deleted.'
+                            : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                meta: isString
+                    ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
+                    : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
             } as Info,
             box: this.toWorld(box),
         }
@@ -1394,13 +1504,117 @@ export class RedisInstance {
         return key.home.clone().add(new THREE.Vector3(0, KEY.h / 2 + 0.04, 0))
     }
 
+    /** Height of what this key occupies on screen: its block, plus the structures above it. */
+    private keyStack(key: RedisKey): number {
+        return KEY.h * (1 + auxBlocks(key)) + 0.02 * auxBlocks(key)
+    }
+
     keyBox(key: RedisKey): THREE.Box3 {
+        const h = this.keyStack(key)
         return this.toWorld(
             new THREE.Box3().setFromCenterAndSize(
-                key.home.clone().add(new THREE.Vector3(0, KEY.h / 2, 0)),
-                new THREE.Vector3(KEY.w, KEY.h, KEY.d),
+                key.home.clone().add(new THREE.Vector3(0, h / 2, 0)),
+                new THREE.Vector3(KEY.w, h, KEY.d),
             ),
         )
+    }
+
+    /**
+     * The colour a key block rests at. Kind is the tint, `shade` is the per-slot
+     * jitter that keeps a plane of identical cubes from reading as one mass.
+     */
+    private keyBase(key: RedisKey): number {
+        return mixHex(0x06222c, KIND_COLOR[key.kind], 0.55 * key.shade)
+    }
+
+    /**
+     * Draw the allocations a converted value has: nothing for a compact encoding,
+     * one block for a hashtable, two for the skiplist + dict pair of a zset. They
+     * stack upward from the entry, so "this value got heavier" is a column height
+     * you can see across the plane.
+     */
+    private paintAuxKey(key: RedisKey) {
+        const n = auxBlocks(key)
+        const deploy = this.auxAnim.get(key.i) ?? 1
+        for (let b = 0; b < 2; b++) {
+            const on = key.live && b < n
+            const s = on ? deploy : 0.001
+            this.tmpObj.position.copy(key.home)
+            this.tmpObj.position.y += KEY.h * (b + 1) + 0.02 * (b + 1)
+            this.tmpObj.scale.set(s, s, s)
+            this.tmpObj.updateMatrix()
+            this.auxMesh.setMatrixAt(key.i * 2 + b, this.tmpObj.matrix)
+            this.auxMesh.setColorAt(key.i * 2 + b, this.tmpColor.setHex(this.keyBase(key)))
+        }
+        this.auxMesh.instanceMatrix.needsUpdate = true
+        if (this.auxMesh.instanceColor) this.auxMesh.instanceColor.needsUpdate = true
+    }
+
+    private paintAux() {
+        for (const key of this.keys) this.paintAuxKey(key)
+    }
+
+    /**
+     * A live key of this kind, preferring one still in its compact encoding: those
+     * are the ones a write can still convert, which is the event worth showing.
+     */
+    liveOfKind(kind: KeyKind): RedisKey | null {
+        const live = this.keys.filter((k) => k.live && k.kind === kind)
+        if (live.length === 0) return null
+        const compact = live.filter((k) => !k.aux)
+        if (compact.length === 0) return live[randInt(0, live.length - 1)]
+        // Half the time, aim at the value closest to its limit. That is a choice of
+        // the simulation, not a claim about redis — nothing in redis prefers a full
+        // key, it simply appends to whatever the client named. Without the bias a
+        // conversion is a rare accident of traffic and you would never see one.
+        if (Math.random() < 0.5) {
+            return compact.reduce((a, b) => (b.entries > a.entries ? b : a))
+        }
+        return compact[randInt(0, compact.length - 1)]
+    }
+
+    /**
+     * A free slot reused for a value of this type. A created key starts small —
+     * one element — so its encoding budget starts over with it.
+     */
+    setKeyKind(key: RedisKey, kind: KeyKind) {
+        const range = VALUE_BYTES[kind]
+        key.kind = kind
+        key.entries = kind === 'string' ? 0 : 1
+        key.aux = false
+        key.bytes = randInt(range[0], range[1])
+        this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
+        if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
+        this.paintAuxKey(key)
+    }
+
+    /**
+     * One element written into a collection.
+     *
+     * Returns true when this element pushed the value past its encoding limit. That
+     * is the one write in redis that is O(n): the flat listpack is read, freed, and
+     * the real structure is allocated and filled — on the only thread there is, so
+     * every other client waits for it. Redis never converts back down; a value
+     * keeps the bigger encoding until the key is deleted.
+     */
+    growKey(key: RedisKey): boolean {
+        if (key.kind === 'string' || !key.live) return false
+        key.entries++
+        if (key.aux) return false
+        if (key.entries <= encodingLimit(key.kind)) return false
+        key.aux = true
+        // the converted structure is bigger than the flat buffer it replaced: a
+        // pointer and a node per element, and a second index for a zset
+        key.bytes += 400 + key.entries * (key.kind === 'zset' ? 48 : 24)
+        this.auxAnim.set(key.i, 0)
+        this.flashKey(key, KIND_COLOR[key.kind], 0.9)
+        this.paintAuxKey(key)
+        return true
+    }
+
+    /** `OBJECT ENCODING` for a key, for the inspector. */
+    encoding(key: RedisKey): string {
+        return encodingOf(key)
     }
 
     setKeyLive(key: RedisKey, live: boolean) {
@@ -1412,6 +1626,8 @@ export class RedisInstance {
         this.tmpObj.updateMatrix()
         this.keysMesh.setMatrixAt(key.i, this.tmpObj.matrix)
         this.keysMesh.instanceMatrix.needsUpdate = true
+        // the value's other allocations go with it
+        this.paintAuxKey(key)
         this.flashKey(key, live ? KIND_COLOR[key.kind] : PALETTE.magenta, 0.5)
     }
 
@@ -2459,6 +2675,17 @@ export class RedisInstance {
             this.rehashTimer = 0.25
             this.rehashStep(2)
             this.maybeGrow()
+        }
+
+        // A conversion lands: the new structure grows in over a few frames rather
+        // than appearing whole, so the eye catches which key just paid for it.
+        if (this.auxAnim.size > 0) {
+            for (const [i, v] of this.auxAnim) {
+                const next = Math.min(1, v + dt * 3.4)
+                if (next >= 1) this.auxAnim.delete(i)
+                else this.auxAnim.set(i, next)
+                this.paintAuxKey(this.keys[i])
+            }
         }
 
         // keys cool down after being touched

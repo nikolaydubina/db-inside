@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { PALETTE } from './instance'
-import type { RedisInstance, RedisKey, RedisPort } from './redis'
+import type { KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { QueryChain, pathCurve } from './flow'
 import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from './util'
 
@@ -29,6 +29,13 @@ interface Command {
     write: boolean
     /** share of the traffic */
     weight: number
+    /**
+     * The value type this command needs. A write that names a type has to land
+     * on a key of that type — that is the difference between SET (which replaces
+     * whatever is there) and HSET (which appends a field to a hash, and is
+     * allowed to be the element that converts it).
+     */
+    kind?: KeyKind
 }
 
 /**
@@ -37,13 +44,16 @@ interface Command {
  * is only whether it reads the keyspace or also appends to the AOF.
  */
 const COMMANDS: Command[] = [
-    { name: 'GET', write: false, weight: 40 },
-    { name: 'MGET', write: false, weight: 8 },
-    { name: 'SET', write: true, weight: 26 },
-    { name: 'INCR', write: true, weight: 8 },
-    { name: 'HSET', write: true, weight: 7 },
-    { name: 'EXPIRE', write: true, weight: 5 },
-    { name: 'DEL', write: true, weight: 6 },
+    { name: 'GET', write: false, weight: 34 },
+    { name: 'MGET', write: false, weight: 7 },
+    { name: 'SET', write: true, weight: 20, kind: 'string' },
+    { name: 'INCR', write: true, weight: 7, kind: 'string' },
+    { name: 'HSET', write: true, weight: 8, kind: 'hash' },
+    { name: 'SADD', write: true, weight: 6, kind: 'set' },
+    { name: 'LPUSH', write: true, weight: 5, kind: 'list' },
+    { name: 'ZADD', write: true, weight: 5, kind: 'zset' },
+    { name: 'EXPIRE', write: true, weight: 4 },
+    { name: 'DEL', write: true, weight: 5 },
 ]
 
 const pickCommand = (): Command => {
@@ -206,13 +216,26 @@ export class RedisSim {
         let key: RedisKey | null = null
         let hit = true
         if (cmd.write) {
-            key = this.redis.freeKey()
+            // A typed command appends to a value that can hold it — that is the
+            // path a conversion happens on — and now and then starts a new one, the
+            // way real traffic does. A command with no type (EXPIRE, DEL) needs a
+            // live key and must never be aimed at a free slot.
+            const reuse =
+                cmd.kind === undefined
+                    ? this.redis.randomLiveKey()
+                    : Math.random() >= 0.3
+                        ? this.redis.liveOfKind(cmd.kind)
+                        : null
+            key = reuse ?? this.redis.freeKey()
             if (!key) {
                 // maxmemory: something has to go before this write fits
-                key = this.redis.randomLiveKey()
-                if (key) this.evict(key)
+                const victim = this.redis.randomLiveKey()
+                if (victim) this.evict(victim)
+                key = this.redis.freeKey()
             }
-            key = key ?? this.redis.randomLiveKey()
+            // a dead slot reused by a typed write becomes that type; the value
+            // starts at one element, so its encoding budget starts over with it
+            if (key && !key.live && cmd.kind) this.redis.setKeyKind(key, cmd.kind)
         } else {
             key = this.redis.randomLiveKey()
             hit = Math.random() > 0.012
@@ -277,6 +300,7 @@ export class RedisSim {
         // the thread takes the head of the queue now — everything behind it moves up
         this.redis.queuePop()
 
+        let converted = false
         if (key) {
             this.redis.pulseBucket(key)
             // one bucket of the rehash per operation, exactly as redis does it —
@@ -320,6 +344,16 @@ export class RedisSim {
                 this.redis.bufferAof(bytes)
                 this.note = `${cmd.name} · ${bytes} B into aof_buf — durable at the next fsync`
                 toBuf.fadeOut(this.ticker, 0.6)
+                // This write may be the one element too many. If so the value is
+                // rewritten into its real structure right here, on this thread,
+                // and nothing else runs until it is done — the only O(n) write in
+                // the whole command set, and the only one that costs this much.
+                const wasEnc = this.redis.encoding(key)
+                converted = this.redis.growKey(key)
+                if (converted) {
+                    this.note = `${cmd.name} · ${key.entries} elements overflow ${wasEnc} — now ${this.redis.encoding(key)}, rewritten in one pass with nothing else running`
+                    await this.ticker.wait(0.5)
+                }
             } else {
                 this.redis.flashKey(key, PALETTE.ice, 0.45)
                 this.note = hit ? `${cmd.name} · hash hit, no disk` : `${cmd.name} · miss`
@@ -357,7 +391,9 @@ export class RedisSim {
         chain.fadeOut(this.ticker, 0.7)
 
         const dt = performance.now() - t0
-        this.latencies.push(0.08 + dt * 0.0004 + rand(0, 0.06))
+        // a conversion is a real pause, not a flicker: the latency sample has to
+        // carry it, or the one O(n) write in the command set would look free
+        this.latencies.push(0.08 + dt * 0.0004 + rand(0, 0.06) + (converted ? 1.7 : 0))
         if (this.latencies.length > 40) this.latencies.shift()
         this.ops++
         this.recent.push(this.clock)

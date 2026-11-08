@@ -136,12 +136,10 @@ The redis cage has one thread, a shared command queue, a dict, five value types,
 eviction, the AOF (growth, `appendfsync`, rewrite, start-up load) and the RDB (`bgsave`, `save`,
 load). The connection path is drawn down to the kernel: a socket is a doughnut on the top rim, and
 `epoll`'s registered fds are a dashed plate of tiles under the queue that light on connect and flash
-when the loop actually reads from that fd. These are the structure-level things it still cannot show.
+when the loop actually reads from that fd. Values carry their encoding too: a compact value is one
+block, and a conversion stacks the new structure on top of it. These are the structure-level things
+it still cannot show.
 
-- [ ] **encoding conversion** — every key is drawn alike. Hash, list and zset stay a listpack until
-      128 entries; a set is an intset until it holds a non-integer or passes 512; then it becomes a
-      hashtable or a skiplist. One `SADD` can convert a whole key, and that conversion is a real
-      latency spike.
 - [ ] **blocking commands** — `BLPOP` does not stall the server: the client is parked and the thread
       moves on. The cage currently says a slow command stalls everyone, which is true of `KEYS *`
       and false of `BLPOP`, and that distinction is the most commonly misunderstood thing in Redis.

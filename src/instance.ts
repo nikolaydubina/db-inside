@@ -1817,10 +1817,6 @@ export class PostgresInstance {
         cells,
       })
     })
-
-    const lab = label('BACKENDS')
-    lab.position.set(-10.6, 11.05, 5.8)
-    this.group.add(lab)
   }
 
   /* ---------------------------- backends lifecycle --------------------------- */
