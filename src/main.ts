@@ -185,17 +185,17 @@ try {
   export: () => JSON.stringify(layoutNow()),
   step: MOVE_STEP,
 }
-; (window as unknown as Record<string, unknown>).__move = {
-  get mode() {
-    return moveMode
-  },
-  get cage() {
-    return hoverCage ?? lastCage
-  },
-  get axis() {
-    return drag?.axis ?? null
-  },
-}
+  ; (window as unknown as Record<string, unknown>).__move = {
+    get mode() {
+      return moveMode
+    },
+    get cage() {
+      return hoverCage ?? lastCage
+    },
+    get axis() {
+      return drag?.axis ?? null
+    },
+  }
 
 moveToggle.addEventListener('change', () => {
   moveMode = moveToggle.checked
@@ -251,22 +251,29 @@ function cageUnder(p: THREE.Vector3): CageName | null {
   return null
 }
 
-canvas.addEventListener('pointerdown', (e) => {
-  if (!moveMode || e.button !== 0) return
-  const ndc = ndcOf(e)
-  const ground = groundAt(ndc)
-  if (!ground) return
-  const hit = pick(ndc)
-  const cage = (hit ? ownerCage(hit.root) : null) ?? cageUnder(ground)
-  if (!cage) return
-  drag = { cage, corner0: anchorOf(cage), start: ground, axis: null }
-  world.controls.enabled = false
-  autoOrbit = false
-  world.controls.autoRotate = false
-  canvas.style.cursor = 'grabbing'
-  lastInteraction = performance.now()
-  e.preventDefault()
-})
+// Capture phase on purpose: this runs before OrbitControls' own pointerdown, so
+// a grab that turns out to be a cage can disable the controls before they emit
+// their "start" — moving a box must not read as a camera move.
+window.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (!moveMode || e.button !== 0) return
+    const ndc = ndcOf(e)
+    const ground = groundAt(ndc)
+    if (!ground) return
+    const hit = pick(ndc)
+    const cage = (hit ? ownerCage(hit.root) : null) ?? cageUnder(ground)
+    if (!cage) return
+    drag = { cage, corner0: anchorOf(cage), start: ground, axis: null }
+    world.controls.enabled = false
+    // hold the camera still for the duration of the grab; this is a box moving,
+    // not the camera, so the orbit preference and its timer are left alone
+    world.controls.autoRotate = false
+    canvas.style.cursor = 'grabbing'
+    e.preventDefault()
+  },
+  { capture: true },
+)
 
 window.addEventListener('pointermove', (e) => {
   if (!drag) return
@@ -286,7 +293,6 @@ window.addEventListener('pointermove', (e) => {
     snap(drag.corner0[0] + (axis === 'z' ? 0 : dx)),
     snap(drag.corner0[1] + (axis === 'x' ? 0 : dz)),
   ])
-  lastInteraction = performance.now()
 })
 
 window.addEventListener('pointerup', () => {
@@ -388,8 +394,10 @@ const hud = initHud({
     // cursor stays visible; it is only swapped for the crosshair while dragging
     crosshair.hidden = true
     canvas.style.cursor = on ? 'crosshair' : 'grab'
-    // flying and drifting orbit fight each other; flying wins
-    world.controls.autoRotate = on ? false : autoOrbit
+    // flying and drifting orbit fight each other; flying wins, and the drift
+    // only comes back after the same quiet spell any camera move gets
+    world.controls.autoRotate =
+      !on && autoOrbit && performance.now() - lastInteraction > ORBIT_COOLDOWN
   },
   unpin: () => {
     pinned = null
@@ -398,9 +406,37 @@ const hud = initHud({
 })
 
 let lastInteraction = performance.now()
-world.controls.addEventListener('start', () => {
+
+/**
+ * The drift pauses whenever the CAMERA is moved by hand, and comes back only
+ * after this long with no further camera movement — so an orbit drag, a zoom or
+ * a double-tap fly-to never lands you in a frame that is already turning.
+ * Moving a cage is not camera movement and does not touch this timer.
+ */
+const ORBIT_COOLDOWN = 5000
+
+let cameraMoves = 0
+function noteCameraMove() {
+  cameraMoves++
   lastInteraction = performance.now()
-})
+  world.controls.autoRotate = false
+}
+
+// what the drift is doing right now — handy when a gesture looks like it stuck
+; (window as unknown as Record<string, unknown>).__orbit = {
+  get state() {
+    return {
+      autoOrbit,
+      flyMode,
+      autoRotate: world.controls.autoRotate,
+      idleMs: Math.round(performance.now() - lastInteraction),
+      dragging: !!drag,
+      moves: cameraMoves,
+    }
+  },
+}
+
+world.controls.addEventListener('start', noteCameraMove)
 
 /* --------------------------------- views ---------------------------------- */
 
@@ -753,11 +789,13 @@ canvas.addEventListener('dblclick', (e) => {
       ? (root.box ?? root.root)
       : new THREE.Box3().setFromObject(instance.group).union(new THREE.Box3().setFromObject(redis.group)),
   ).then(() => {
+    // the fly-to is camera movement: keep the preference on, but leave the
+    // drift to the cooldown instead of starting it in the same breath
     autoOrbit = true
     if (orbitCheckbox) orbitCheckbox.checked = true
-    world.controls.autoRotate = true
+    noteCameraMove()
   })
-  lastInteraction = performance.now()
+  noteCameraMove()
 })
 
 window.addEventListener('keydown', (e) => {
@@ -940,7 +978,14 @@ function frame() {
   }
 
   // resume the slow orbit after the user stops interacting
-  if (autoOrbit && !flyMode && !world.controls.autoRotate && performance.now() - lastInteraction > 6000) {
+  // resume the slow orbit after a quiet spell — every camera move pushes this out
+  if (
+    autoOrbit &&
+    !flyMode &&
+    !drag &&
+    !world.controls.autoRotate &&
+    performance.now() - lastInteraction > ORBIT_COOLDOWN
+  ) {
     world.controls.autoRotate = true
   }
 

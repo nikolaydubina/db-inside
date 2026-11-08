@@ -20,8 +20,8 @@ export interface Axes {
     off(): void
     toggle(): boolean
     isOn(): boolean
-  /** Moves a mark — return value of mark(), call it when the thing it labels moves. */
-  mark(name: string, pos: THREE.Vector3): (next: THREE.Vector3) => void
+    /** Moves a mark — return value of mark(), call it when the thing it labels moves. */
+    mark(name: string, pos: THREE.Vector3): (next: THREE.Vector3) => void
 }
 
 const AXIS_X = 0xff6b6b
@@ -30,12 +30,12 @@ const AXIS_Z = 0x6b9bff
 
 export function createAxes(
     scene: THREE.Scene,
-  opts: { extentX?: number; extentZ?: number; tick?: number; labelEvery?: number } = {},
+    opts: { extentX?: number; extentZ?: number; tick?: number; labelEvery?: number } = {},
 ): Axes {
-  const extentX = opts.extentX ?? 64
-  const extentZ = opts.extentZ ?? 40
-  const tick = opts.tick ?? 2
-  const labelEvery = opts.labelEvery ?? 8
+    const extentX = opts.extentX ?? 64
+    const extentZ = opts.extentZ ?? 40
+    const tick = opts.tick ?? 2
+    const labelEvery = opts.labelEvery ?? 8
 
     const group = new THREE.Group()
     group.visible = false
@@ -62,17 +62,17 @@ export function createAxes(
 
     /* ---------------------------------- axes --------------------------------- */
 
-  segments([-extentX, 0, 0, extentX, 0, 0], AXIS_X, 0.65)
-  segments([0, 0, -extentZ, 0, 0, extentZ], AXIS_Z, 0.65)
-  segments([0, 0.001, 0, 0, 14, 0], AXIS_Y, 0.65)
+    segments([-extentX, 0, 0, extentX, 0, 0], AXIS_X, 0.65)
+    segments([0, 0, -extentZ, 0, 0, extentZ], AXIS_Z, 0.65)
+    segments([0, 0.001, 0, 0, 14, 0], AXIS_Y, 0.65)
 
-  // ticks: one per grid square (the floor grid is 2 units), so counting cells
-  // between two labelled points is exact
-  const xTicks: number[] = []
-  for (let x = -extentX; x <= extentX; x += tick) xTicks.push(x, 0, -0.45, x, 0, 0.45)
-  segments(xTicks, AXIS_X, 0.28)
-  const zTicks: number[] = []
-  for (let z = -extentZ; z <= extentZ; z += tick) zTicks.push(-0.45, 0, z, 0.45, 0, z)
+    // ticks: one per grid square (the floor grid is 2 units), so counting cells
+    // between two labelled points is exact
+    const xTicks: number[] = []
+    for (let x = -extentX; x <= extentX; x += tick) xTicks.push(x, 0, -0.45, x, 0, 0.45)
+    segments(xTicks, AXIS_X, 0.28)
+    const zTicks: number[] = []
+    for (let z = -extentZ; z <= extentZ; z += tick) zTicks.push(-0.45, 0, z, 0.45, 0, z)
     segments(zTicks, AXIS_Z, 0.28)
     const yTicks: number[] = []
     for (let y = 0; y <= 14; y += 2) yTicks.push(-0.3, y, 0, 0.3, y, 0)
