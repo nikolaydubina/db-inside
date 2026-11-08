@@ -916,6 +916,9 @@ function frame() {
   redisSim.update(dt)
   redis.update(dt, now * 0.001)
   updateFly(raw)
+  // keep the camera on the subject of the current view while it moves — on real
+  // time, not sim time, so the follow feels the same at any clock speed
+  rig.follow(raw)
 
   // ambient traffic so the machine always feels alive; a story switches it off
   // so the only load on screen is the load it just described

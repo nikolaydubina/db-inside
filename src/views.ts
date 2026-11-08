@@ -93,6 +93,17 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-4.5, 8.5, 12.5], 36),
     },
     {
+        id: 'redis-aof',
+        label: 'redis aof',
+        entity: 'aof tail',
+        hint: 'the end of the log: the block being appended, and the bytes still in aof_buf above it',
+        // Aimed between the two things that matter here: the floating buffer and
+        // the block under it. The target sits below the strip on purpose, so the
+        // cubes and the disk blocks they are destined for are both in frame —
+        // framing the buffer alone would cut off what it points at.
+        pose: () => shot(REDIS_ANCHOR.aofBuf, [-3.4, 3.4, 4.8], 34, [0, -0.78, 0]),
+    },
+    {
         id: 'disk',
         label: 'disk',
         entity: 'disk plate',
@@ -112,6 +123,18 @@ export const VIEWS: ViewDef[] = [
         entity: 'wal run',
         hint: 'log run, write head, and the wal_buffers hovering above it',
         pose: () => shot(ANCHOR.wal, [4.5, 4.0, 7.5], 32, [0, 0.2, 0]),
+    },
+    {
+        id: 'wal-buffers',
+        label: 'wal buffers',
+        entity: 'wal_buffers',
+        hint: 'the tail of the log in memory: the cubes, and the segments they are destined for below',
+        // Same shot as redis-aof, on purpose: the two buffers are the same idea in
+        // two machines, so they are framed the same way — same direction, aimed
+        // under the cubes so the memory and the blocks it will be written to are
+        // both in frame. Pulled back a little because this strip is wider (four
+        // 8 kB cubes end to end, not five 4 kB ones).
+        pose: () => shot(ANCHOR.walBuf, [-4.3, 4.3, 6.1], 34, [0, -0.85, 0]),
     },
     {
         id: 'buffers',
@@ -225,6 +248,21 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
      */
     let nav = 0
 
+    /**
+     * What the camera keeps its TARGET on, as a live point. A named view
+     * resolves this through its own pose function, and poses are built from live
+     * anchors — so the point moves when the thing the view is about moves: a cage
+     * being dragged, the aof_buf strip drifting along the log.
+     */
+    let followPoint: (() => THREE.Vector3) | null = null
+    /** Name of what is being followed, for the console and for tests. */
+    let followName: string | null = null
+    /** Tweens in flight: following must not write while one is aiming the camera. */
+    let tweening = 0
+    /** How hard the camera is pulled after a target that moved, in 1/s. */
+    const FOLLOW_RATE = 3.2
+    const followDelta = new THREE.Vector3()
+
     const apply = (pose: CameraPose) => {
         camera.position.copy(pose.pos)
         controls.target.copy(pose.target)
@@ -314,10 +352,23 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         const fromTarget = controls.target.clone()
 
         current = null
+        // A box was measured at this instant, so there is nothing live to hold on
+        // to — but a picked OBJECT has a position of its own, so a double-tapped
+        // cage can still be dragged afterwards and the camera stays on it.
+        if (target instanceof THREE.Box3) {
+            followPoint = null
+            followName = null
+        } else {
+            const live = new THREE.Vector3()
+            const shift = centre.clone().sub(target.getWorldPosition(live))
+            followPoint = () => target.getWorldPosition(live).add(shift)
+            followName = 'focus'
+        }
         beforeNavigate?.()
 
         const dur = opts.duration ?? 0.95
         const mine = ++nav
+        tweening++
         return ticker
             .add(dur, (k) => {
                 if (mine !== nav) return
@@ -326,7 +377,10 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
                 controls.target.lerpVectors(fromTarget, centre, e)
                 controls.update()
             })
-            .then(() => true)
+            .then(() => {
+                tweening--
+                return true
+            })
     }
 
     /** Fly to a named view. `instant` cuts instead of tweening (tests, links). */
@@ -340,6 +394,10 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         current = id
         // a drifting auto-orbit would immediately drag the camera off the pose
         beforeNavigate?.()
+
+        // from now on the camera holds on to whatever this view is about
+        followPoint = () => view.pose().target
+        followName = id
 
         if (opts.instant) {
             // an instant cut must still cancel any tween already in flight,
@@ -356,15 +414,18 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         const fromFov = camera.fov
         const dur = opts.duration ?? 0.85
         const mine = ++nav
-        void ticker.add(dur, (k) => {
-            if (mine !== nav) return
-            const e = easeInOutCubic(k)
-            camera.position.lerpVectors(fromPos, pose.pos, e)
-            controls.target.lerpVectors(fromTarget, pose.target, e)
-            camera.fov = fromFov + (pose.fov - fromFov) * e
-            camera.updateProjectionMatrix()
-            controls.update()
-        })
+        tweening++
+        void ticker
+            .add(dur, (k) => {
+                if (mine !== nav) return
+                const e = easeInOutCubic(k)
+                camera.position.lerpVectors(fromPos, pose.pos, e)
+                controls.target.lerpVectors(fromTarget, pose.target, e)
+                camera.fov = fromFov + (pose.fov - fromFov) * e
+                camera.updateProjectionMatrix()
+                controls.update()
+            })
+            .then(() => tweening--)
         return true
     }
 
@@ -383,6 +444,28 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
             controls.target.add(delta)
             controls.update()
         },
+        /**
+         * Hold the camera on what the current view is about, whatever happens to
+         * it. Subjects move for their own reasons — a cage is dragged across the
+         * floor, the aof_buf strip drifts along the log as it grows, a write head
+         * walks along its run — and a camera parked at absolute coordinates
+         * silently stops describing them.
+         *
+         * This only ever PANS. Orbit angle, distance and field of view are kept
+         * exactly as the user set them, so looking around a subject still works
+         * while it moves. The pull is exponential rather than instant: the camera
+         * trails a little and settles, instead of teleporting after every step.
+         */
+        follow(dt: number) {
+            if (!followPoint || tweening > 0) return
+            followDelta.copy(followPoint()).sub(controls.target)
+            if (followDelta.lengthSq() < 1e-8) return
+            followDelta.multiplyScalar(1 - Math.exp(-dt * FOLLOW_RATE))
+            controls.target.add(followDelta)
+            camera.position.add(followDelta)
+        },
+        /** What the camera is currently holding on to, if anything. */
+        following: () => followName,
         /**
          * Frame a world-space box from a direction. This is how the story aims
          * the camera: it knows *what* it wants to look at and hands over a box,
@@ -415,21 +498,27 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
             const pose: CameraPose = { pos: centre.clone().addScaledVector(d, dist), target, fov }
 
             current = null
+            // the box was measured once, so there is nothing live to follow
+            followPoint = null
+            followName = null
             beforeNavigate?.()
             const fromPos = camera.position.clone()
             const fromTarget = controls.target.clone()
             const fromFov = camera.fov
             const dur = opts.duration ?? 0.85
             const mine = ++nav
-            void ticker.add(dur, (k) => {
-                if (mine !== nav) return
-                const e = easeInOutCubic(k)
-                camera.position.lerpVectors(fromPos, pose.pos, e)
-                controls.target.lerpVectors(fromTarget, pose.target, e)
-                camera.fov = fromFov + (pose.fov - fromFov) * e
-                camera.updateProjectionMatrix()
-                controls.update()
-            })
+            tweening++
+            void ticker
+                .add(dur, (k) => {
+                    if (mine !== nav) return
+                    const e = easeInOutCubic(k)
+                    camera.position.lerpVectors(fromPos, pose.pos, e)
+                    controls.target.lerpVectors(fromTarget, pose.target, e)
+                    camera.fov = fromFov + (pose.fov - fromFov) * e
+                    camera.updateProjectionMatrix()
+                    controls.update()
+                })
+                .then(() => tweening--)
             return pose
         },
         /** Is the camera sitting at an arbitrary pose (used for framed subjects)? */

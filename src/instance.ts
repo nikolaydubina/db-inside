@@ -336,6 +336,12 @@ export const ANCHOR = {
   exec: V(1.6, 6.85, -2.4),
   bufferCenter: V(-1.0, 5.35, -1.5),
   wal: V(-4.0, 0.55, 7.25),
+  /**
+   * The wal_buffers strip. It drifts along the run with the write head, so
+   * PostgresInstance.update() rewrites this one live, every frame — a view that
+   * frames it has to read the value at call time, not at boot.
+   */
+  walBuf: V(pageX(WAL_C0 + WAL_LEN - 1), 1.95, pageZ(WAL_ROW)),
   heap: V(-7.4, 0.5, 4.0),
   index: V(4.2, 2.6, -5.6),
   disk: V(7.0, 0.5, 5.6),
@@ -2448,6 +2454,9 @@ export class PostgresInstance {
       g.position.x += (targetX - g.position.x) * Math.min(1, dt * 2.4)
       g.position.z = pageZ(WAL_ROW)
       g.position.y = 1.95 + Math.sin(time * 1.3) * 0.08
+      // keep the world anchor on the strip, so a camera framing wal_buffers
+      // follows it: views and double-tap focus read this at call time
+      WORLD_ANCHOR.walBuf.copy(g.position).add(POSTGRES_ORIGIN)
       this.walBufBlocks.forEach((m, i) => {
         const ph = i * 1.15
         m.position.y = 0.16 + Math.sin(time * 1.9 + ph) * 0.09

@@ -9,6 +9,7 @@ import {
     floorLabel,
     halo,
     label,
+    neonEdges,
     radialTexture,
     rand,
     randInt,
@@ -69,6 +70,8 @@ const QUEUE = { cells: 10, y: 8.95, z: BACKEND_ORIGIN.z }
 
 /** AOF buffer: the bytes not yet written to the file, in memory. */
 const AOF_BUF_CELLS = 5
+/** Height the aof_buf strip floats at: above the run, below the keyspace. */
+const AOF_BUF_Y = 1.7
 
 const RDB_CENTRE = new THREE.Vector3(
     (xAt(RDB.c0) + xAt(RDB.c1)) / 2,
@@ -121,6 +124,8 @@ export const REDIS_ANCHOR = {
     loop: new THREE.Vector3(),
     ports: new THREE.Vector3(),
     aof: new THREE.Vector3(),
+    /** the floating aof_buf strip — it drifts, so update() rewrites this live */
+    aofBuf: new THREE.Vector3(),
     rdb: new THREE.Vector3(),
 }
 
@@ -133,6 +138,7 @@ function rebaseAnchors() {
     REDIS_ANCHOR.loop.copy(LOOP).add(o)
     REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
     REDIS_ANCHOR.aof.set(xAt(AOF_C0 + AOF_LEN / 2), BLOCK_TOP, zAt(AOF_ROW)).add(o)
+    REDIS_ANCHOR.aofBuf.set(xAt(AOF_C0), AOF_BUF_Y, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.rdb.copy(RDB_CENTRE).add(o)
 }
 rebaseAnchors()
@@ -161,8 +167,12 @@ export class RedisInstance {
     /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
     private aofHead = 0
-    private aofBlade!: THREE.Mesh
+    /** aof_buf: the cubes hover above wherever the end of the file is. */
+    private aofBufGroup!: THREE.Group
     private aofBufCells: THREE.Mesh[] = []
+    private aofBufMats: THREE.MeshStandardMaterial[] = []
+    /** bytes sitting in aof_buf, as a fraction of the strip */
+    private aofBuffered = 0
 
     private queueCells: THREE.Mesh[] = []
     private loopCore!: THREE.MeshStandardMaterial
@@ -171,6 +181,8 @@ export class RedisInstance {
     private rewriteDrone!: THREE.Group
 
     private markGeo = new THREE.TorusGeometry(0.34, 0.025, 4, 28)
+    /** Smaller ring for a disk block, so the pulse never spills onto its neighbour. */
+    private blockMarkGeo = new THREE.TorusGeometry(0.3, 0.02, 4, 24)
     private markMat = new THREE.MeshBasicMaterial({
         color: PALETTE.amber,
         transparent: true,
@@ -180,6 +192,7 @@ export class RedisInstance {
     })
 
     private tmpColor = new THREE.Color()
+    private amberColor = new THREE.Color(PALETTE.amber)
     private tmpObj = new THREE.Object3D()
     private tmpBox = new THREE.Box3()
 
@@ -288,10 +301,13 @@ export class RedisInstance {
 
                 this.tmpObj.position.copy(home)
                 if (used) {
-                    const fill = onAof ? 0.55 + 0.4 * ((c - AOF_C0) / AOF_LEN) : 0.96
-                    this.tmpObj.scale.set(1, 0.45 + 0.55 * fill, 1)
+                    // One shape for every block in this scene, the same one the page
+                    // field uses. A file is written in whole filesystem blocks, so
+                    // nothing here is a short plate or a half-height block.
+                    this.tmpObj.scale.set(1, 1, 1)
                 } else {
-                    // no page here: collapse it so the plate and the slot lattice show
+                    // nothing is here: collapse it on ALL three axes, so the plate
+                    // and the slot lattice show and no flattened sliver is left
                     this.tmpObj.scale.setScalar(0.001)
                 }
                 this.tmpObj.updateMatrix()
@@ -309,6 +325,11 @@ export class RedisInstance {
             }
         }
         if (field.instanceColor) field.instanceColor.needsUpdate = true
+
+        // The log starts part-written: the file has only reached the first N of
+        // these blocks, and the rest are not drawn at all (see layoutAof).
+        this.aofHead = Math.round(AOF_LEN * 0.6)
+        this.layoutAof()
 
         // slot lattice across the free space — the same "room to grow" texture the
         // postgres disk uses for its untouched tail
@@ -333,18 +354,14 @@ export class RedisInstance {
             ),
         )
 
-        // the write head of the AOF: it only ever moves forward until a rewrite
-        this.aofBlade = new THREE.Mesh(
-            new THREE.BoxGeometry(0.05, 0.75, 0.9),
-            new THREE.MeshBasicMaterial({
-                color: PALETTE.amber,
-                transparent: true,
-                opacity: 0.9,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-            }),
-        )
-        this.group.add(this.aofBlade)
+        // There is no write-head marker, and deliberately so. A frame, a blade,
+        // a highlighted "selected" block — all of them claim something the log
+        // does not do: that one block is special, or that it is about to be
+        // swapped out. Appending touches exactly one block, and the honest way
+        // to show that is the same way an edited page is shown next door: a
+        // single pulse, then the block goes back to being an ordinary block.
+        // The end of the file is readable from the log itself — the run stops
+        // where the blocks stop.
 
         // floor labels, painted on the same ground as the postgres ones
         const diskLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
@@ -361,7 +378,7 @@ export class RedisInstance {
         rdbLab.position.set(RDB_CENTRE.x, FLOOR_LABEL_Y, zAt(RDB.r1) + 0.75)
         this.group.add(rdbLab)
 
-        const freeLab = floorLabel('FREE SPACE · ALLOCATABLE', {
+        const freeLab = floorLabel('FREE SPACE', {
             height: 0.34,
             color: 'rgba(120, 170, 190, 0.75)',
             opacity: 0.8,
@@ -486,37 +503,50 @@ export class RedisInstance {
         this.group.add(keysLab)
 
         /* --------------------------- AOF buffer --------------------------- */
-        const bufGeo = new RoundedBoxGeometry(0.3, 0.3, 0.3, 2, 0.03)
-        const bufMat = new THREE.MeshStandardMaterial({
-            color: 0x1a1206,
-            emissive: PALETTE.amber,
-            emissiveIntensity: 1.5,
-            roughness: 0.35,
-            metalness: 0.35,
-        })
+        // Same treatment as wal_buffers next door: block-sized cubes of memory
+        // floating above the run, each with its own edges, bobbing and swaying,
+        // drifting along with the end of the file. Deliberately not a box with
+        // cubes inside it — these bytes are in RAM only, so they should read as
+        // only half in this world.
         const bufGroup = new THREE.Group()
+        this.aofBufGroup = bufGroup
+        bufGroup.position.set(this.aofHeadX(), AOF_BUF_Y, zAt(AOF_ROW))
         this.group.add(bufGroup)
         for (let n = 0; n < AOF_BUF_CELLS; n++) {
-            const cube = new THREE.Mesh(bufGeo, bufMat)
-            cube.position.set(xAt(AOF_C0 + 2) + n * 0.42, 1.35, zAt(AOF_ROW) + 0.1)
-            cube.visible = n < 2
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0x2a1a06,
+                emissive: PALETTE.amber,
+                // dim at rest: adjacent emissive cubes at full strength bloom
+                // into one white slab and stop reading as separate pages
+                emissiveIntensity: 0.28,
+                roughness: 0.35,
+                metalness: 0.45,
+                transparent: true,
+                opacity: 0.94,
+            })
+            const cube = new THREE.Mesh(this.blockGeo, mat)
+            cube.position.set((n - (AOF_BUF_CELLS - 1) / 2) * PITCH, 0, 0)
+            cube.add(neonEdges(this.blockGeo, 0xe8a961, 0.35))
             bufGroup.add(cube)
             this.aofBufCells.push(cube)
+            this.aofBufMats.push(mat)
         }
-        const bufEdge = new OutlineBox(AOF_BUF_CELLS * 0.42 + 0.2, 0.42, 0.5, PALETTE.amber, 0.35)
-            .centre(xAt(AOF_C0 + 2) + ((AOF_BUF_CELLS - 1) * 0.42) / 2, 1.35, zAt(AOF_ROW) + 0.1)
-        this.group.add(bufEdge)
-        this.register(
-            bufEdge,
-            {
-                title: 'AOF buffer — bytes not yet on disk',
-                body: 'Write commands are appended here first, in memory, and fsynced to the AOF file according to appendfsync: everysec (the default) loses up to a second, always loses nothing but pays a flush per write, no quietly hands durability to the kernel. Same idea as wal_buffers in postgres, one fsync policy instead of a WAL writer.',
-                meta: 'aof_buf · appendfsync everysec by default',
-            },
+        const bufPick = new THREE.Mesh(
+            new THREE.BoxGeometry(AOF_BUF_CELLS * PITCH, 0.6, BLOCK.d * 1.3),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
+        bufPick.position.set(0, 0.1, 0)
+        bufGroup.add(bufPick)
+        this.register(bufPick, {
+            title: 'AOF buffer — bytes not yet on disk',
+            body: 'Write commands are appended here first, in memory, and fsynced to the AOF file according to appendfsync: everysec (the default) loses up to a second, always loses nothing but pays a flush per write, no quietly hands durability to the kernel. The handover is a copy, not a move: write(2) hands these bytes to the kernel page cache and the buffer is reused. Same idea as wal_buffers in postgres, one fsync policy instead of a WAL writer.',
+            meta: 'aof_buf · appendfsync everysec by default',
+        })
+        // the label hangs UNDER the strip: the space above it belongs to the
+        // AOF REWRITE agent, which works directly above the end of the log
         const bufLab = label('AOF BUFFER')
-        bufLab.position.set(xAt(AOF_C0 + 2) - 0.2, 1.95, zAt(AOF_ROW) + 0.1)
-        this.group.add(bufLab)
+        bufLab.position.set(0, -0.62, 0)
+        bufGroup.add(bufLab)
     }
 
     private buildPorts() {
@@ -677,7 +707,10 @@ export class RedisInstance {
             },
         )
         this.rewriteDrone = this.makeAgent(
-            new THREE.Vector3(8.4, 2.1, zAt(AOF_ROW) - 0.1),
+            // over the base file, not over the end of the log: the rewrite writes
+            // a fresh base, and the aof_buf strip drifts along the log right where
+            // the drone used to sit
+            new THREE.Vector3(RDB_CENTRE.x, 2.1, RDB_CENTRE.z),
             PALETTE.amber,
             'AOF REWRITE',
             {
@@ -943,31 +976,91 @@ export class RedisInstance {
 
     /* ----------------------------------- AOF --------------------------------- */
 
+    /** How many blocks the log occupies right now. */
     get aofUsed() {
-        return this.aofOrder.length
+        return this.aofHead + 1
     }
 
-    /** Append one write: advance the head, light the block, return its top face. */
+    private aofHeadX(): number {
+        return xAt(AOF_C0 + Math.min(this.aofHead, this.aofOrder.length - 1))
+    }
+
+    /**
+     * Only the blocks the file has actually reached are drawn.
+     *
+     * A block past the end of the log is not "dark", not "empty" and not a flat
+     * plate — it does not exist yet, so it is collapsed to nothing on all three
+     * axes. Flattening only the height was the bug: it left a full-footprint
+     * sliver behind, which reads as a block that is there but switched off.
+     */
+    private layoutAof() {
+        const hex = mixHex(0x8a5c10, PALETTE.amber, 0.72)
+        this.aofOrder.forEach((i, k) => {
+            const on = k <= this.aofHead
+            this.disk.getMatrixAt(i, this.tmpObj.matrix)
+            this.tmpObj.position.setFromMatrixPosition(this.tmpObj.matrix)
+            const s = on ? 1 : 0.001
+            this.tmpObj.scale.set(s, s, s)
+            this.tmpObj.updateMatrix()
+            this.disk.setMatrixAt(i, this.tmpObj.matrix)
+            const base = on ? hex : 0x000000
+            this.diskBase[i] = base
+            this.disk.setColorAt(i, this.tmpColor.setHex(base))
+        })
+        this.disk.instanceMatrix.needsUpdate = true
+        if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+    }
+
+    /** Append one write: the log gains a block, and that block pulses once. */
     appendAof(bytes: number): THREE.Vector3 {
         this.aofBytes += bytes
-        const i = this.aofOrder[Math.min(this.aofHead, this.aofOrder.length - 1)]
-        const block = new THREE.Vector3()
-        this.disk.getMatrixAt(i, this.tmpObj.matrix)
-        block.setFromMatrixPosition(this.tmpObj.matrix)
+        // the record goes after the last byte of the file, so at most it starts a
+        // new block; it never rewrites one that is already there
+        this.aofHead = Math.min(this.aofHead + 1, this.aofOrder.length - 1)
+        this.layoutAof()
 
+        const i = this.aofOrder[this.aofHead]
+        this.disk.getMatrixAt(i, this.tmpObj.matrix)
+        const block = new THREE.Vector3().setFromMatrixPosition(this.tmpObj.matrix)
+
+        // One pulse per append, on the one block that changed — the same pulse an
+        // edited page gets on the postgres disk. No frame, no standing second
+        // colour: after ~0.4 s it is an ordinary block again.
         this.diskBoost.set(i, 1)
         this.disk.setColorAt(i, this.tmpColor.setHex(PALETTE.amber))
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+        this.markBlockTop(block)
 
-        this.aofBlade.position.set(block.x + 0.3, PAGE_Y + 0.4, block.z)
-        this.aofBufCells.forEach((c, n) => (c.visible = n < Math.min(AOF_BUF_CELLS, 1 + (this.aofHead % 3))))
-
-        this.aofHead += 1
-        if (this.aofHead >= this.aofOrder.length) {
-            // the run is full: a rewrite is what reclaims it, not a wrap
-            this.aofHead = this.aofOrder.length - 1
+        // the bytes are in aof_buf until the next fsync, not on the disk
+        this.aofBuffered = Math.min(1, this.aofBuffered + 0.25)
+        const mat = this.aofBufMats[this.bufferCubeIndex()]
+        if (mat) {
+            void this.ticker.add(0.5, (k) => {
+                mat.emissiveIntensity = 1.3 - 0.8 * k
+            })
         }
-        return block.clone().add(new THREE.Vector3(0, BLOCK.h / 2, 0))
+
+        return block.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
+    }
+
+    /** Expanding ring over one block: "this is the block the record went into". */
+    private markBlockTop(block: THREE.Vector3) {
+        const ring = new THREE.Mesh(this.blockMarkGeo, this.markMat.clone())
+        const mat = ring.material as THREE.MeshBasicMaterial
+        mat.color.setHex(PALETTE.amber)
+        ring.rotation.x = -Math.PI / 2
+        ring.position.set(block.x, PAGE_Y + BLOCK.h / 2 + 0.02, block.z)
+        ring.scale.setScalar(0.3)
+        this.group.add(ring)
+        void this.ticker
+            .add(0.55, (k) => {
+                ring.scale.setScalar(0.3 + k * 0.85)
+                mat.opacity = 0.9 * (1 - k)
+            })
+            .then(() => {
+                this.group.remove(ring)
+                mat.dispose()
+            })
     }
 
     aofHeadTop(): THREE.Vector3 {
@@ -978,32 +1071,31 @@ export class RedisInstance {
     }
 
     aofBufferTop(): THREE.Vector3 {
-        return this.aofBufCells[0].position.clone().add(new THREE.Vector3(0, 0.2, 0))
+        // cage-local, like every other point the redis sim aims at
+        const m = this.aofBufCells[this.bufferCubeIndex()]
+        if (!m || !this.aofBufGroup) return this.aofHeadTop()
+        const v = this.aofBufGroup.position.clone().add(m.position)
+        return v.setY(v.y + BLOCK.h * 0.7)
+    }
+
+    /** The cube the next record lands in, mirroring wal_buffers next door. */
+    private bufferCubeIndex() {
+        return Math.min(
+            this.aofBufCells.length - 1,
+            Math.floor(this.aofBuffered * this.aofBufCells.length),
+        )
     }
 
     rdbCentre(): THREE.Vector3 {
         return RDB_CENTRE.clone()
     }
 
-    /** Rewrite: the log goes back to the few records that describe the state. */
+    /** Rewrite: a new, much shorter file — the end of it moves back. */
     rewriteAof() {
         this.rewrites++
-        const old = this.aofHead
-        this.aofHead = Math.max(2, Math.round(old * 0.25))
-        this.aofBlade.position.x = xAt(AOF_C0 + this.aofHead) + 0.3
+        this.aofHead = Math.max(2, Math.round(this.aofHead * 0.25))
         this.aofBytes = Math.round(this.aofBytes * 0.25)
-        this.aofOrder.forEach((i, n) => {
-            const on = n <= this.aofHead
-            this.disk.getMatrixAt(i, this.tmpObj.matrix)
-            const p = new THREE.Vector3().setFromMatrixPosition(this.tmpObj.matrix)
-            this.tmpObj.position.copy(p)
-            this.tmpObj.scale.set(1, on ? 0.45 + 0.55 * 0.9 : 0.001, 1)
-            this.tmpObj.updateMatrix()
-            this.disk.setMatrixAt(i, this.tmpObj.matrix)
-            this.disk.setColorAt(i, this.tmpColor.setHex(on ? mixHex(0x8a5c10, PALETTE.amber, 0.78) : 0x000000))
-        })
-        this.disk.instanceMatrix.needsUpdate = true
-        if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+        this.layoutAof()
         this.pulseAgent(this.rewriteDrone)
     }
 
@@ -1068,12 +1160,20 @@ export class RedisInstance {
         if (this.diskBoost.size > 0) {
             let dirty = false
             for (const [i, v] of this.diskBoost) {
-                const next = v - dt * 1.6
+                // quick enough to read as a pulse rather than a state: the block
+                // is lit on the write and back to its own colour in ~0.4 s
+                const next = v - dt * 2.6
                 if (next <= 0) {
                     this.diskBoost.delete(i)
                     this.disk.setColorAt(i, this.tmpColor.setHex(this.diskBase[i] || 0x000000))
                 } else {
                     this.diskBoost.set(i, next)
+                    this.disk.setColorAt(
+                        i,
+                        this.tmpColor
+                            .setHex(this.diskBase[i] || 0x000000)
+                            .lerp(this.amberColor, next),
+                    )
                 }
                 dirty = true
             }
@@ -1081,8 +1181,37 @@ export class RedisInstance {
         }
 
         // the write head shimmers so the append point is findable at a glance
-        const bladeMat = this.aofBlade.material as THREE.MeshBasicMaterial
-        bladeMat.opacity = 0.65 + 0.3 * breathe(time, 3.4)
+        // (removed: the append point is only ever visible as a pulse on the block
+        // that changed, never as a standing marker)
+
+        // aof_buf floats above the end of the file, bobbing and swaying like it is
+        // only half in this world — because it is not on disk yet. Same treatment
+        // as wal_buffers, and it drifts along as the file grows.
+        if (this.aofBufGroup) {
+            const g = this.aofBufGroup
+            g.position.x += (this.aofHeadX() - g.position.x) * Math.min(1, dt * 2.4)
+            g.position.y = AOF_BUF_Y + Math.sin(time * 1.3) * 0.08
+            g.position.z = zAt(AOF_ROW)
+            this.aofBufCells.forEach((m, i) => {
+                const ph = i * 1.15
+                m.position.y = Math.sin(time * 1.9 + ph) * 0.09
+                m.rotation.z = Math.sin(time * 1.15 + ph) * 0.16
+                m.rotation.y = Math.sin(time * 0.75 + ph * 0.7) * 0.4
+                m.scale.setScalar(1 + Math.sin(time * 2.4 + ph) * 0.035)
+            })
+            // the strip drains on fsync, so what is still in it is what is not
+            // durable yet
+            if (this.aofBuffered > 0) {
+                this.aofBuffered = Math.max(0, this.aofBuffered - dt * 0.18)
+            }
+            this.aofBufMats.forEach((mat, i) => {
+                const live = i <= this.bufferCubeIndex() ? this.aofBuffered : 0
+                mat.emissiveIntensity +=
+                    (0.28 + live * 0.5 - mat.emissiveIntensity) * Math.min(1, dt * 5)
+            })
+            // keep the world anchor on the strip: views and the camera aim at it
+            REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)
+        }
 
         // agents drift in place, the way the autovacuum drone does
         this.bgsaveDrone.position.y = 8.3 + Math.sin(time * 0.9) * 0.12
