@@ -167,8 +167,10 @@ export class RedisSim {
         // the cage, so sliding the cage takes its in-flight traffic with it.
         const cage = this.redis.group
         const portTop = pod.group.position.clone().add(new THREE.Vector3(0, 0.15, 0))
-        const cell = randInt(0, 9)
-        const queue = this.redis.queueCellTop(cell)
+        // the command joins the back of the shared queue the moment it is parsed,
+        // before it is executed: that waiting is what the strip shows
+        const slot = this.redis.queuePush()
+        const queue = this.redis.queueCellTop(slot)
         const loop = this.redis.loopTop()
 
         // which key: a read hits a live one, a write updates or creates one
@@ -193,7 +195,6 @@ export class RedisSim {
 
         const t0 = performance.now()
         this.redis.pulsePort(pod)
-        this.redis.pulseQueue(cell)
 
         // The request enters from ABOVE the frame and falls a long way into the
         // socket, exactly as a query does on the postgres side: same packet, same
@@ -215,7 +216,6 @@ export class RedisSim {
         // the wire stays a beat after the packet lands, then goes: a hammered
         // socket must not silt the scene up with permanent lines
         void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
-        this.redis.pulseQueue(cell)
 
         // the whole way down is one thread: queue → loop → the key itself
         const chain = new QueryChain(cage)
@@ -229,6 +229,8 @@ export class RedisSim {
 
         await this.ticker.wait(0.22)
         this.redis.pulseLoop()
+        // the thread takes the head of the queue now — everything behind it moves up
+        this.redis.queuePop()
 
         if (key) {
             this.redis.pulseBucket(key)

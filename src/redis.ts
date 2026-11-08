@@ -86,6 +86,9 @@ const AOF_BUF_CELLS = 5
 const AOF_BUF_Y = 1.7
 /** Top speed of a working agent, in units/s — fast, but a flight you can follow. */
 const AGENT_SPEED = 16
+/** Emissive of an empty queue slot, and of the head of the queue. */
+const QUEUE_EMPTY = 0.05
+const QUEUE_HEAD = 1.5
 
 const RDB_CENTRE = new THREE.Vector3(
     (xAt(RDB.c0) + xAt(RDB.c1)) / 2,
@@ -189,6 +192,9 @@ export class RedisInstance {
     private aofBuffered = 0
 
     private queueCells: THREE.Mesh[] = []
+    private queueMats: THREE.MeshStandardMaterial[] = []
+    /** How many commands are waiting right now. 0 = the queue is empty. */
+    private queueDepth = 0
     private loopCore!: THREE.MeshStandardMaterial
     private loopRing!: THREE.Mesh
     private bgsaveDrone!: THREE.Group
@@ -674,20 +680,25 @@ export class RedisInstance {
     }
 
     private buildPipeline() {
-        // the shared queue: everything the connections wrote, waiting for the loop
+        // The shared queue: everything the connections wrote, waiting for the loop.
+        // Each slot gets its own material, because the whole point of a queue is
+        // that slots differ: occupied ones are commands waiting their turn, empty
+        // ones are just room. One shared material could only ever flash the strip
+        // as a single object.
         const cellGeo = new THREE.BoxGeometry(0.36, 0.16, 0.52)
-        const cellMat = new THREE.MeshStandardMaterial({
-            color: 0x140a1c,
-            emissive: PALETTE.violet,
-            emissiveIntensity: 0.35,
-            roughness: 0.4,
-            metalness: 0.4,
-        })
         for (let n = 0; n < QUEUE.cells; n++) {
-            const cell = new THREE.Mesh(cellGeo, cellMat)
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0x140a1c,
+                emissive: PALETTE.violet,
+                emissiveIntensity: QUEUE_EMPTY,
+                roughness: 0.4,
+                metalness: 0.4,
+            })
+            const cell = new THREE.Mesh(cellGeo, mat)
             cell.position.set((n - (QUEUE.cells - 1) / 2) * 0.52, QUEUE.y, QUEUE.z)
             this.group.add(cell)
             this.queueCells.push(cell)
+            this.queueMats.push(mat)
         }
         const qW = QUEUE.cells * 0.52 + 0.14
         // same rule as the bucket array: the queue is a container, not a marked
@@ -952,13 +963,64 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity = 3.4
     }
 
-    pulseQueue(n: number) {
-        const cell = this.queueCells[Math.max(0, Math.min(this.queueCells.length - 1, n))]
-        const mat = cell.material as THREE.MeshStandardMaterial
-        mat.emissiveIntensity = 2.4
-        void this.ticker.add(0.35, (k) => {
-            mat.emissiveIntensity = 2.4 - 2.05 * k
+    /**
+     * A command arrived and joined the back of the queue. Returns its slot, which
+     * is where the request's own path should point.
+     *
+     * The occupied slots always sit at the head end, oldest first: slot 0 is the
+     * command the thread will take next, and a new arrival takes the slot behind
+     * the last one. That is what makes the strip read as a queue and not as a
+     * row of lights.
+     */
+    queuePush(): number {
+        this.queueDepth = Math.min(this.queueCells.length, this.queueDepth + 1)
+        const n = this.queueDepth - 1
+        this.paintQueue(2.4, n)
+        return n
+    }
+
+    /** The thread took the head of the queue; everything behind it moves up one. */
+    queuePop(): void {
+        if (this.queueDepth <= 0) return
+        this.queueDepth -= 1
+        // flash the slot that just became the head: that is the queue advancing
+        this.paintQueue(2.0, 0)
+    }
+
+    /** How many commands are waiting — the HUD can show it. */
+    get queueLength() {
+        return this.queueDepth
+    }
+
+    /**
+     * Lit from the head backwards, fading with depth: the front command is the
+     * brightest because it is next, and empty slots stay almost dark.
+     * `spike` flashes one slot for a beat (arrival, or the new head).
+     */
+    private paintQueue(spike = 0, spikeIndex = -1) {
+        this.queueMats.forEach((mat, i) => {
+            if (i >= this.queueDepth) {
+                mat.emissiveIntensity = QUEUE_EMPTY
+                return
+            }
+            const depthFade = this.queueDepth <= 1 ? 1 : 1 - (i / this.queueDepth) * 0.55
+            mat.emissiveIntensity = QUEUE_HEAD * depthFade
         })
+        if (spike > 0 && spikeIndex >= 0) {
+            const mat = this.queueMats[spikeIndex]
+            if (!mat) return
+            const base = mat.emissiveIntensity
+            void this.ticker
+                .add(0.35, (k) => {
+                    // the slot may have been drained while the flash was running;
+                    // writing the old value back would leave a served command lit
+                    if (spikeIndex >= this.queueDepth) return
+                    mat.emissiveIntensity = base + (spike - base) * (1 - k)
+                })
+                // and re-derive the whole strip from the depth, so a flash can
+                // never be the last word on what is in the queue
+                .then(() => this.paintQueue())
+        }
     }
 
     /* ---------------------------------- keys --------------------------------- */
