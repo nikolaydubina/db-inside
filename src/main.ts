@@ -1060,14 +1060,11 @@ canvas.addEventListener('dblclick', (e) => {
     void rig.focus(box)
     setAddress(db ?? dbInFrame(), null)
   } else {
-    // nothing under the cursor: that is "zoom out", which is the floor's shot
-    const near = dbInFrame()
-    const ov = viewBySlug(near, 'overview')
-    if (ov) {
-      rig.go(ov.id)
-      markView(ov.id)
-      setAddress(near, ov)
-    }
+    // Nothing under the cursor is "zoom out": the floor's shot, which has no
+    // address of its own, so the path keeps naming the last thing you asked for
+    // rather than inventing a place the floor does not have.
+    rig.go('overview')
+    markView('overview')
   }
   // the fly-to is camera movement: the drift stays off until the cooldown
   noteCameraMove()

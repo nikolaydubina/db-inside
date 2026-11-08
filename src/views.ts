@@ -43,6 +43,13 @@ export interface ViewDef {
      * about one thing, and zooming out is the opposite of that.
      */
     whole?: boolean
+    /**
+     * No button, and no `<cage>/<slug>` address: `rig.go()` still reaches it, so a
+     * gesture can use it, but it is not something you ask for by name or link to.
+     * The floor's shot is like this — it is about both cages, so neither cage's
+     * name belongs in front of it, and there is no third path to put it under.
+     */
+    unlisted?: boolean
     pose(): CameraPose
 }
 
@@ -90,6 +97,10 @@ export const VIEWS: ViewDef[] = [
         label: 'overview',
         db: 'both',
         whole: true,
+        // Unlisted on purpose: no button in either card, and no `/postgresql/overview`
+        // address. Double-tapping empty space still zooms out to it, and the stories
+        // still ask for it by id; it is a view, not a place.
+        unlisted: true,
         entity: 'the floor',
         hint: 'both databases on the same floor, each in its own cage',
         // midway between the two cages, so rearranging them keeps both in frame
@@ -318,11 +329,11 @@ export const ALL_VIEWS = [
 /**
  * The shots that belong in one database's panel. A view with no `db` is
  * postgres's (the first cage, and the default for anything unnamed), and a
- * `both` view — the floor, the overview — is listed in each panel, because
- * either tab may want to leave and look at the whole room.
+ * `both` view is listed in each panel, because either tab may want it. Unlisted
+ * shots are in neither list — they have no address and no button.
  */
 export const viewsFor = (db: 'postgres' | 'redis') =>
-    ALL_VIEWS.filter((v) => v.db === 'both' || (v.db ?? 'postgres') === db)
+    ALL_VIEWS.filter((v) => !v.unlisted && (v.db === 'both' || (v.db ?? 'postgres') === db))
 
 /**
  * The path segment of a shot — `/postgresql/wal`, `/redis/keys`.
