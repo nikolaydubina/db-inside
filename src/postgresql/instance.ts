@@ -2408,9 +2408,9 @@ export class PostgresInstance {
           n.group.position.set(
             n.home.x + Math.sin(time * 0.42 + phase) * 0.05,
             n.home.y +
-              Math.sin(time * 0.75 + phase * 1.3) * 0.09 +
-              Math.sin(time * 1.9 + phase) * 0.03 +
-              n.pulse * 0.12,
+            Math.sin(time * 0.75 + phase * 1.3) * 0.09 +
+            Math.sin(time * 1.9 + phase) * 0.03 +
+            n.pulse * 0.12,
             n.home.z + Math.cos(time * 0.5 + phase) * 0.05,
           )
           n.group.rotation.y += dt * 0.12

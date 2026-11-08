@@ -19,7 +19,7 @@ import type { StoryScene } from './stories'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
 import type { ShareDb } from './share'
 import { initHud } from './ui'
-import { Ticker, label, rand, OutlineBox } from './core/util'
+import { Ticker, label, rand, OutlineBox, updateLabelLOD } from './core/util'
 
 const canvas = document.querySelector<HTMLCanvasElement>('#c')!
 const labelHost = document.querySelector<HTMLElement>('#labels')!
@@ -1402,6 +1402,7 @@ function frame() {
   if (driftOn && speed > 0) drift(raw)
 
   world.render(raw, dt)
+  updateLabelLOD(camera)
   telemetry.tick(dt, raw)
   hud.setStats(sim.stats)
   updateRedisCard(redisSim.stats)

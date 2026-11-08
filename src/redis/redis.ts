@@ -22,6 +22,7 @@ import {
     radialTexture,
     rand,
     randInt,
+    setLabelEnabled,
     slotLattice,
 } from '../core/util'
 import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, keyX, keyZ, xAt, zAt, } from './layout'
@@ -233,7 +234,7 @@ export class RedisInstance {
     private aofEdge!: OutlineBox
     private aofPick!: THREE.Mesh
     /** the "this is a new file" tag over the staging area, shown only while rewriting */
-    private stagingLab!: THREE.Object3D
+    private stagingLab!: CSS2DObject
 
     /** The base file's blocks in the order the encoder writes them. */
     private rdbOrder: number[] = []
@@ -597,7 +598,7 @@ export class RedisInstance {
         // would be a permanent claim about nothing.
         const stagingLab = label('AOF REWRITE · new file')
         stagingLab.position.set(xAt(AOF_C0) + 0.2, 1.1, zAt(STAGING_ROW) - 0.45)
-        stagingLab.visible = false
+        setLabelEnabled(stagingLab, false)
         this.group.add(stagingLab)
         this.stagingLab = stagingLab
 
@@ -2860,7 +2861,7 @@ export class RedisInstance {
 
         // 2. it drops to the staging area — free floor in front of the log, not
         //    the log itself — and writes the new file there, block by block
-        this.stagingLab.visible = true
+        setLabelEnabled(this.stagingLab, true)
         this.rewriteAim.copy(this.stagingSlot(0)).setY(1.4)
         await this.ticker.wait(0.45)
         let staged = 0
@@ -2914,7 +2915,7 @@ export class RedisInstance {
         }
 
         for (let j = 0; j < staged; j++) this.setStaged(j, false)
-        this.stagingLab.visible = false
+        setLabelEnabled(this.stagingLab, false)
         this.rewrites++
         this.aofHead = newHead
         this.aofBytes = Math.round(this.aofBytes * 0.25)

@@ -269,14 +269,55 @@ export const lineBufferHeight = () => lineCssH * lineDpr
  * entries is a drawing of allocations scattered across the heap.
  */
 
+/** How far a floating tag may be before it stops being worth drawing. */
+export const LABEL_MAX_DISTANCE = 45
+
+/** Every label created through label(), for the per-frame distance pass. */
+const lodLabels = new Set<CSS2DObject>()
+const lodWorld = new THREE.Vector3()
+
 /** Small camera-facing text tag. */
-export function label(text: string, className = 'tag'): CSS2DObject {
+export function label(
+  text: string,
+  className = 'tag',
+  maxDistance = LABEL_MAX_DISTANCE,
+): CSS2DObject {
   const el = document.createElement('div')
   el.className = className
   el.textContent = text
   const obj = new CSS2DObject(el)
   obj.center.set(0, 0.5)
+  obj.userData.labelMaxDistance = maxDistance
+  obj.userData.labelEnabled = true
+  lodLabels.add(obj)
   return obj
+}
+
+/**
+ * Enable or disable a tag for reasons other than distance (the rewrite tag is
+ * only meaningful while a rewrite runs). Kept separate from `visible` so the
+ * distance pass cannot un-hide something its owner deliberately hid.
+ */
+export function setLabelEnabled(obj: CSS2DObject, on: boolean) {
+  obj.userData.labelEnabled = on
+  obj.visible = on
+}
+
+/**
+ * Hide floating tags that are farther than their own budget. 
+ *
+ * The two cages are 34 units apart, so a close study of one machine would
+ * otherwise keep the other machine's labels on screen at a size that says
+ * nothing. Floor labels are painted geometry and are not affected.
+ */
+export function updateLabelLOD(camera: THREE.Camera) {
+  for (const obj of lodLabels) {
+    obj.getWorldPosition(lodWorld)
+    const max = (obj.userData.labelMaxDistance as number | undefined) ?? LABEL_MAX_DISTANCE
+    const near = camera.position.distanceToSquared(lodWorld) <= max * max
+    const visible = obj.userData.labelEnabled !== false && near
+    if (obj.visible !== visible) obj.visible = visible
+  }
 }
 
 /** Promise-based tween clock driven by the render loop. */
