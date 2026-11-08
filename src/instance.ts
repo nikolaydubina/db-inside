@@ -1425,6 +1425,26 @@ export class PostgresInstance {
     })
   }
 
+  /**
+   * Cage a structure that exists only so the diagram has somewhere to put it.
+   *
+   * Dashed, and registered as the pick's outline so hovering highlights the cage
+   * rather than drawing a second box. The distinction is the point: a solid
+   * outline marks a volume that is really there — a process, a file, a run of
+   * pages — while dashed marks a volume that is ours. An index drawn as a tree of
+   * nodes is a drawing; its pages are on the plate below and its cached pages are
+   * in the buffer pool.
+   */
+  private markDiagram(pick: THREE.Mesh, info: Info, color: number) {
+    const size = (pick.geometry as THREE.BoxGeometry).parameters
+    const cage = new OutlineBox(size.width, size.height, size.depth, color, 0.3, {
+      dashed: true,
+    }).centre(pick.position.x, pick.position.y, pick.position.z)
+    this.group.add(cage)
+    this.register(pick, info, cage)
+    return cage
+  }
+
   private buildIndex() {
     const cx = ANCHOR.index.x
     const cz = ANCHOR.index.z
@@ -1496,11 +1516,15 @@ export class PostgresInstance {
     )
     pick.position.set(cx, 1.5 + RAM_LIFT, cz)
     this.group.add(pick)
-    this.register(pick, {
-      title: 'B-tree index — the tree as it sits in RAM',
-      body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table.',
-      meta: 'b-tree · 3 levels · key → TID · pages cached in RAM',
-    })
+    this.markDiagram(
+      pick,
+      {
+        title: 'B-tree index — the tree as it sits in RAM',
+        body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table. The dashed box is not a block of memory — the tree has no such footprint; it is the shape of the structure, drawn so you can follow a descent. The pages it lives in are 8 kB blocks on the plate, like every other page.',
+        meta: 'b-tree · 3 levels · key → TID · pages cached in RAM',
+      },
+      PALETTE.violet,
+    )
 
     const lab = label('B-TREE')
     lab.position.set(cx - 1.6, 2.85 + RAM_LIFT, cz + 1.4)
@@ -1561,11 +1585,15 @@ export class PostgresInstance {
     )
     pick.position.set(cx, 1.3 + RAM_LIFT, cz)
     this.group.add(pick)
-    this.register(pick, {
-      title: 'GIN — Generalized Inverted Index',
-      body: 'Maps each element of a composite value — a jsonb key, an array element, a full-text lexeme — to a posting list of row TIDs. Fast for containment (`@>`, `?`, `@@`) and full-text search, expensive to update because one row can write many postings.',
-      meta: 'gin · element → posting list · jsonb / arrays / tsvector',
-    })
+    this.markDiagram(
+      pick,
+      {
+        title: 'GIN — Generalized Inverted Index',
+        body: 'Maps each element of a composite value — a jsonb key, an array element, a full-text lexeme — to a posting list of row TIDs. Fast for containment (`@>`, `?`, `@@`) and full-text search, expensive to update because one row can write many postings. Dashed, because this is the shape of the structure rather than a block of memory: the postings live in 8 kB pages on the plate.',
+        meta: 'gin · element → posting list · jsonb / arrays / tsvector',
+      },
+      PALETTE.magenta,
+    )
 
     const lab = label('GIN')
     lab.position.set(cx - 1.3, 2.75 + RAM_LIFT, cz + 0.3)
@@ -1599,11 +1627,15 @@ export class PostgresInstance {
     )
     pick.position.set(cx, 0.55 + RAM_LIFT, cz)
     this.group.add(pick)
-    this.register(pick, {
-      title: 'BRIN — Block Range Index',
-      body: 'Stores only min/max per range of pages (default 128), so the whole index is a few kilobytes even for a huge heap. Floating here because the summary tuples are what lives in memory while a scan runs; it is a tiny file of its own on the plate below. Great when data is ordered by the indexed column, useless when values are scattered.',
-      meta: 'brin · min/max per 128 pages · tiny · summarised in RAM',
-    })
+    this.markDiagram(
+      pick,
+      {
+        title: 'BRIN — Block Range Index',
+        body: 'Stores only min/max per range of pages (default 128), so the whole index is a few kilobytes even for a huge heap. Floating here because the summary tuples are what lives in memory while a scan runs; it is a tiny file of its own on the plate below. Great when data is ordered by the indexed column, useless when values are scattered. The dashed box is the summary structure, not an allocation.',
+        meta: 'brin · min/max per 128 pages · tiny · summarised in RAM',
+      },
+      PALETTE.violet,
+    )
 
     const lab = label('BRIN')
     lab.position.set(cx + 0.1, 1.35 + RAM_LIFT, cz + 0.85)
@@ -1638,11 +1670,15 @@ export class PostgresInstance {
     )
     pick.position.set(cx, 0.45 + RAM_LIFT, cz)
     this.group.add(pick)
-    this.register(pick, {
-      title: 'Hash index',
-      body: 'Hashes the key into one of N buckets and stores TIDs there. Equality lookups only: no range scans, no ordering. Shown in memory: a lookup touches a single bucket page, and those pages sit in shared buffers while the index is being used.',
-      meta: 'hash · 32-bit hash → bucket · equality only',
-    })
+    this.markDiagram(
+      pick,
+      {
+        title: 'Hash index',
+        body: 'Hashes the key into one of N buckets and stores TIDs there. Equality lookups only: no range scans, no ordering. Shown in memory: a lookup touches a single bucket page, and those pages sit in shared buffers while the index is being used. The dashed box around the fan-out is the shape of the structure, not a block of memory.',
+        meta: 'hash · 32-bit hash → bucket · equality only',
+      },
+      PALETTE.teal,
+    )
 
     const lab = label('HASH')
     lab.position.set(cx + 0.2, 1.35 + RAM_LIFT, cz + 1.7)

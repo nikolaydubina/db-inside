@@ -77,6 +77,19 @@ A tick looks like:
 `draw`/`fps` come from `renderer.info` summed across the bloom passes, so instancing
 regressions show up immediately. Open the page with `?debug` to have telemetry on from boot.
 
+The redis cage is one instanced mesh with no idea what is in it, and its files are a handful of
+indices, so the two can drift apart. Instead of squinting at it, ask it to prove itself:
+
+```js
+__redis.check()             // [] = the drawn blocks are exactly the blocks the files have
+```
+
+It reads the instance matrices back and checks that the log is exactly blocks `0..head` at their
+own slots, that the floor past the end is empty, that the base file is its blocks with a partial
+tail, that no block is in both files, that each cage equals its file's footprint, that no staged
+block survives a rewrite, and that no drawn block is black. `?debug` runs the same check after
+every layout, save, load and rewrite and throws on the first broken statement.
+
 ## Stack
 
 TypeScript + [three.js](https://threejs.org) + Vite, with an `EffectComposer` bloom pass, PCF shadows,
@@ -86,6 +99,8 @@ CSS2D labels and a small promise-based tween engine driving the simulation.
 
 Things the scene does not show yet. The first block is already listed in the Stories card with a
 `soon` tag, so the gaps are visible in the app as well as here.
+
+### PostgreSQL
 
 **Long-running-instance failures**
 - [ ] **a slot that pins the WAL** — an inactive replication slot stops the ring recycling, so
@@ -114,6 +129,40 @@ Things the scene does not show yet. The first block is already listed in the Sto
       copy already states 16 MB per segment.
 - [ ] a few 3D labels still collide (`PARSER`).
 - [ ] this README predates story mode and the workload regimes.
+
+### Redis
+
+The redis cage has one thread, a shared command queue, a dict, five value types, TTL expiry,
+eviction, the AOF (growth, `appendfsync`, rewrite, start-up load) and the RDB (`bgsave`, `save`,
+load). These are the structure-level things it still cannot show.
+
+- [ ] **dict rehash** — the bucket array is frozen at 32×7. A real dict doubles at load factor 1 and
+      rehashes *incrementally*: two tables live at once, one bucket migrated per operation. This is
+      the picture that makes "O(1) while the table grows" believable.
+- [ ] **encoding conversion** — every key is drawn alike. Hash, list and zset stay a listpack until
+      128 entries; a set is an intset until it holds a non-integer or passes 512; then it becomes a
+      hashtable or a skiplist. One `SADD` can convert a whole key, and that conversion is a real
+      latency spike.
+- [ ] **blocking commands** — `BLPOP` does not stall the server: the client is parked and the thread
+      moves on. The cage currently says a slow command stalls everyone, which is true of `KEYS *`
+      and false of `BLPOP`, and that distinction is the most commonly misunderstood thing in Redis.
+- [ ] **`MULTI`/`EXEC` and Lua** — queued, then executed in one burst; and `BUSY` after
+      `lua-time-limit`, the only reply of its kind Redis ever sends.
+- [ ] **`KEYS *`** — absent from the command mix, so the queue never shows a real stall.
+- [ ] **replication** — replica, `PSYNC`, and the **repl backlog: a fixed-size ring buffer** — the one
+      structure here whose policy is the opposite of the AOF that only ever grows. Full resync is an
+      RDB transfer followed by a stream.
+- [ ] **pub/sub** — no keys, no storage, pure fan-out to N sockets: a path that never touches the
+      keyspace or the log.
+- [ ] **LRU/LFU eviction** — eviction picks a random key today. Redis samples `maxmemory-samples`
+      keys and evicts the least recently used of the sample, and `allkeys-*` vs `volatile-*` decides
+      whether keys with a TTL are preferred victims.
+- [ ] **lazy expiry** — only the active cycle exists, so a key whose TTL passed is still served until
+      the cycle reaches it.
+- [ ] **io-threads** — Redis 6+ reads and writes sockets on several threads while command execution
+      stays serial. Worth showing because "is it single-threaded?" is the question everyone asks.
+- [ ] **client buffers** — `output-buffer-limit`, `query-buffer-limit` and the `OOM command not
+      allowed` reply are not drawn, so backpressure has no visual.
 
 ## Deploy 
 

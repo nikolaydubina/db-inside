@@ -130,6 +130,26 @@ const UNIT_BOX_EDGE_POINTS: number[] = (() => {
   return v
 })()
 
+/**
+ * The same 12 edges at a real size, for outlines that are dashed.
+ *
+ * A dash is a distance along the geometry. Scaling a unit box non-uniformly
+ * scales the distances with it, so the same dash setting comes out long on the
+ * long side and short on the short side — which reads as "the pattern is
+ * different on every edge". Building the edges at their actual size puts every
+ * dash in world units, and then one dash size is one dash size everywhere.
+ */
+const boxEdgePoints = (w: number, h: number, d: number) => {
+  const v: number[] = []
+  const xs = [-w / 2, w / 2]
+  const ys = [-h / 2, h / 2]
+  const zs = [-d / 2, d / 2]
+  for (const y of ys) for (const z of zs) v.push(xs[0], y, z, xs[1], y, z)
+  for (const x of xs) for (const z of zs) v.push(x, ys[0], z, x, ys[1], z)
+  for (const x of xs) for (const y of ys) v.push(x, y, zs[0], x, y, zs[1])
+  return v
+}
+
 /** Plain 1 px line geometry — used only as an invisible picking proxy. */
 const UNIT_BOX_PICK_GEO = (() => {
   const g = new THREE.BufferGeometry()
@@ -202,6 +222,12 @@ export const lineBufferHeight = () => lineCssH * lineDpr
  * The visible edges are fat lines, so an outline stays solid at any angle. An
  * invisible 1 px twin rides along with them purely for picking, because the
  * world-space pick radius we want cannot be expressed by a screen-space line.
+ *
+ * A DASHED outline means something different from a solid one and is not
+ * decoration: solid marks a volume that is really there — a process, a file, a
+ * run of pages — while dashed marks a volume that exists only so the diagram has
+ * somewhere to put a structure. The bucket array is an array; a plane of key
+ * entries is a drawing of allocations scattered across the heap.
  */
 export class OutlineBox extends THREE.Group {
   private glowMat: LineMaterial
@@ -212,18 +238,36 @@ export class OutlineBox extends THREE.Group {
   w: number
   h: number
   d: number
+  readonly dashed: boolean
 
-  constructor(w: number, h: number, d: number, color: number, opacity = 0.7) {
+  constructor(
+    w: number,
+    h: number,
+    d: number,
+    color: number,
+    opacity = 0.7,
+    opts: { dashed?: boolean } = {},
+  ) {
     super()
     this.w = w
     this.h = h
     this.d = d
     this.baseColor = color
     this.baseOpacity = opacity
+    this.dashed = opts.dashed ?? false
 
+    // Dashes are measured along the geometry, which is a unit box that gets
+    // scaled — so the dash length is divided by the largest side to keep it the
+    // same size in the world no matter how big the box is.
     // A hairline: 0.7 CSS px lands on 1.4 device px at DPR 2, which is the
     // thinnest a screen-space quad can go before it starts breaking into dots.
-    const glowWidth = 0.7
+    // Dashed outlines go thinner still: a broken line already carries more
+    // visual weight than a continuous one of the same width, and at 0.7 px the
+    // dashes read as beads.
+    const glowWidth = this.dashed ? 0.45 : 0.7
+    // Dash and gap are world units, and stayed constant across every outline:
+    // the pattern is a property of the notation, not of the box it is wrapped
+    // around.
     this.glowMat = registerLineMaterial(
       new LineMaterial({
         color,
@@ -233,15 +277,22 @@ export class OutlineBox extends THREE.Group {
         blending: THREE.AdditiveBlending,
         depthWrite: false,
         worldUnits: false,
+        dashed: this.dashed,
+        dashSize: 0.22,
+        gapSize: 0.2,
+        dashScale: 1,
       }),
       glowWidth,
     )
     const glow = new LineSegments2(
-      new LineSegmentsGeometry().setPositions(UNIT_BOX_EDGE_POINTS),
+      new LineSegmentsGeometry().setPositions(
+        this.dashed ? boxEdgePoints(w, h, d) : UNIT_BOX_EDGE_POINTS,
+      ),
       this.glowMat,
     )
     glow.frustumCulled = false
-    glow.scale.set(w, h, d)
+    if (!this.dashed) glow.scale.set(w, h, d)
+    else glow.computeLineDistances()
     this.glow = glow
     this.add(glow)
 

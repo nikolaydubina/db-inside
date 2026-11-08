@@ -254,11 +254,15 @@ export class RedisSim {
             return
         }
 
-        // the whole way down is one thread: queue → loop → the key itself
+        // The whole way down is one thread, and the hop through the bucket is a
+        // real step: hash the key, land on a bucket, follow the chain to the
+        // entry. Drawing loop → key directly would skip the only lookup in the
+        // whole system — the thing that makes it O(1).
         const chain = new QueryChain(cage)
         const target = key ? this.redis.keyTop(key) : loop.clone()
+        const bucket = key ? this.redis.bucketTop(key) : loop.clone()
         chain.add(
-            [portTop, queue, loop, target].map((p) => p.clone()),
+            [portTop, queue, loop, bucket, target].map((p) => p.clone()),
             PALETTE.violet,
             { speed: 0.9, opacity: 0.5 },
         )
@@ -275,6 +279,9 @@ export class RedisSim {
 
         if (key) {
             this.redis.pulseBucket(key)
+            // one bucket of the rehash per operation, exactly as redis does it —
+            // the cron makes up the rest
+            this.redis.rehashStep(1)
             if (cmd.write && !this.redis.aofCanGrow) {
                 // A write that cannot be appended is a write redis will not serve:
                 // the client gets an error and memory is not touched, because the

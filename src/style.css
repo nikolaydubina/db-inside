@@ -818,6 +818,15 @@ h2::after {
   box-shadow: 0 0 10px var(--c);
 }
 
+/* a dashed outline is a different claim from a solid one, so the swatch is drawn
+   as a dashed box rather than a filled square */
+.legend .sw.dashed {
+  background: none;
+  border: 1px dashed #7fa7bd;
+  box-shadow: none;
+  border-radius: 1px;
+}
+
 /* ---------- 3D labels ---------- */
 
 .tag {

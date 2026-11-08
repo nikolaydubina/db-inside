@@ -1,5 +1,6 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
+import type { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { BACKEND_ORIGIN, BACKEND_SLOTS, BLOCK_PICK_RANGE, PALETTE } from './instance'
 import type { Info } from './instance'
 import {
@@ -44,7 +45,16 @@ const SHELL = { w: 26.0, h: 9.8, d: 16.0 }
 const FIELD = { w: 24, d: 8.5, cz: 3.25 }
 
 const PITCH = 0.5
+/** One filesystem block: 4 kB. The only unit a file has. */
 const BLOCK = { w: 0.46, h: 0.28, d: 0.46 }
+/**
+ * One key: a dictEntry, its sds key and its value object. A few hundred bytes at
+ * most — twenty times smaller than the 4 kB block it is stored in, which is why a
+ * key is drawn as a small cube and not as a block. Sizes here are a fourth of a
+ * block's, not 1/20th: below that the keys stop being readable as objects, and
+ * the point is the ratio, not the exact scale.
+ */
+const KEY = { w: 0.16, h: 0.1, d: 0.16 }
 /** What a filesystem stores a byte stream in — the only unit a file has. */
 const BLOCK_BYTES = 4096
 /** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
@@ -104,6 +114,13 @@ export function setInvariantChecks(on: boolean) {
 
 /** The keyspace: a bucket array, and the entries it points at, both floating. */
 const DICT = { cols: 32, rows: 7, y: 3.9, cz: -2.2 }
+/**
+ * Bucket counts the floor can draw. Real dicts double forever; this lattice holds
+ * 224 tiles, so the demonstration stops at 128 and says so in the card rather
+ * than silently refusing to grow.
+ */
+const HASH_SIZES = [32, 64, 128] as const
+const HASH_MAX = HASH_SIZES[HASH_SIZES.length - 1]
 const KEYS = { cols: 26, rows: 7, y: 7.0, cz: -2.2 }
 
 const dictX = (c: number) => (c - (DICT.cols - 1) / 2) * PITCH
@@ -241,6 +258,8 @@ export class RedisInstance {
 
     /** The 8 kB lattice. Same geometry and spacing as the postgres disk. */
     readonly blockGeo = new RoundedBoxGeometry(BLOCK.w, BLOCK.h, BLOCK.d, 1, 0.02)
+    /** One key. Deliberately much smaller than a block — see KEY above. */
+    readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
 
     private disk!: THREE.InstancedMesh
     private dictMesh!: THREE.InstancedMesh
@@ -248,6 +267,21 @@ export class RedisInstance {
     /** base albedo per instance, so a flash can be undone */
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
+
+    /* --------------------------- the dict's two tables --------------------------- */
+    /** buckets in the live table; always one of HASH_SIZES */
+    private htSize = 32
+    /** buckets in the table being filled during a rehash, 0 when not rehashing */
+    private ht1Size = 0
+    /** the next bucket of ht[0] to migrate; -1 when not rehashing */
+    private rehashIdx = -1
+    /** which half of the lattice the live table occupies: it alternates per growth */
+    private htHalf: 0 | 1 = 0
+    /** stable per-tile shade, so repainting does not make the table shimmer */
+    private dictShade: number[] = []
+    private dictTableLab!: CSS2DObject
+    /** seconds to the next rehash cron burst */
+    private rehashTimer = 0.6
 
     /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
@@ -673,11 +707,14 @@ export class RedisInstance {
                 this.tmpObj.scale.setScalar(1)
                 this.tmpObj.updateMatrix()
                 dict.setMatrixAt(i, this.tmpObj.matrix)
-                dict.setColorAt(i, this.tmpColor.setHex(mixHex(0x0d3a48, PALETTE.cyan, rand(0.25, 0.5))))
+                this.dictShade[i] = rand(0.25, 0.5)
                 i++
             }
         }
         if (dict.instanceColor) dict.instanceColor.needsUpdate = true
+        // the table's extent and which buckets hold entries are painted from the
+        // dict's own state, so the picture cannot claim a size the dict does not have
+        this.paintDict()
 
         const dW = DICT.cols * PITCH
         const dD = DICT.rows * PITCH
@@ -691,13 +728,19 @@ export class RedisInstance {
         dictPick.position.set(0, DICT.y, DICT.cz)
         this.group.add(dictPick)
         this.register(dictPick, {
-            title: 'Hash table — the bucket array',
-            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap. There is no index to choose and no planner to consult — the data structure is the query plan.',
-            meta: 'dict · bucket array · in the process heap',
+            title: 'Hash table — the bucket array, and the rehash',
+            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap — one contiguous allocation of pointers, and each of those pointers leads to a key entry floating in the plane above. There is no index to choose and no planner to consult — the data structure is the query plan. It also GROWS: when the entries outnumber the buckets, redis allocates a second table at twice the size and migrates buckets into it one at a time — the tiles vanishing on one half and lighting up on the other. Both tables are live meanwhile, and every lookup checks both, which is why the growth is incremental: a stop-the-world rehash of a million keys would be a latency spike, and a billion-key one would be a stall you could not hide. The two halves during a rehash are literal: there really are two arrays allocated at once.',
+            meta: 'dict · ht_table[2] · incremental rehash, one bucket per operation',
         })
         const dictLab = label('DICT · BUCKETS')
         dictLab.position.set(-dW / 2 - 0.3, DICT.y + 0.55, DICT.cz - dD / 2)
         this.group.add(dictLab)
+        // the size line, rewritten as the tables change
+        const tableLab = label('')
+        tableLab.position.set(-dW / 2 - 0.3, DICT.y + 0.22, DICT.cz - dD / 2)
+        this.group.add(tableLab)
+        this.dictTableLab = tableLab
+        this.paintDict()
 
         /* ----------------------------- entries ---------------------------- */
         const kMat = new THREE.MeshStandardMaterial({
@@ -707,7 +750,7 @@ export class RedisInstance {
             roughness: 0.45,
             metalness: 0.3,
         })
-        const keys = new THREE.InstancedMesh(this.blockGeo, kMat, KEYS.cols * KEYS.rows)
+        const keys = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows)
         keys.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
         this.group.add(keys)
         this.keysMesh = keys
@@ -758,11 +801,22 @@ export class RedisInstance {
         )
         keysPick.position.set(0, KEYS.y, KEYS.cz)
         this.group.add(keysPick)
-        this.register(keysPick, {
-            title: 'Keyspace — the database itself, in RAM',
-            body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it.',
-            meta: `${KEYS.cols * KEYS.rows} slots · values live in the process heap`,
-        })
+        // DASHED, because the volume is ours: the entries are separate
+        // allocations scattered across the heap, and this plane is only where we
+        // put them so they can be pointed at. A solid cage is reserved for
+        // volumes that really exist — the process, the two files.
+        const keysCage = new OutlineBox(kW, 0.9, kD, PALETTE.cyan, 0.26, { dashed: true })
+            .centre(0, KEYS.y, KEYS.cz)
+        this.group.add(keysCage)
+        this.register(
+            keysPick,
+            {
+                title: 'Keyspace — the database itself, in RAM',
+                body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it. Two things to be clear about, because the drawing is ours: this is the SAME structure as the bucket array below, not a second arena — the buckets are one array of pointers, and each key is a separate little allocation that a bucket points at. And the lattice is only how we place them: in memory those entries are scattered across the heap wherever malloc put them, with no order at all. That is what the dashed cage says: the volume is a drawing, the blocks in it are real. The blocks are also deliberately small: a key is a dictEntry plus its key string plus a value object, a few hundred bytes, while the smallest unit on the floor below is a 4 kB block.',
+                meta: `${KEYS.cols * KEYS.rows} slots · one allocation per key · position is representational`,
+            },
+            keysCage,
+        )
         const keysLab = label('KEYS')
         keysLab.position.set(-kW / 2 - 0.4, KEYS.y + 0.95, KEYS.cz - kD / 2)
         this.group.add(keysLab)
@@ -1097,8 +1151,8 @@ export class RedisInstance {
         const key = this.keys[i]
         if (!key.live) return null
         const box = new THREE.Box3().setFromCenterAndSize(
-            key.home.clone().add(new THREE.Vector3(0, BLOCK.h / 2, 0)),
-            new THREE.Vector3(BLOCK.w, BLOCK.h, BLOCK.d),
+            key.home.clone().add(new THREE.Vector3(0, KEY.h / 2, 0)),
+            new THREE.Vector3(KEY.w, KEY.h, KEY.d),
         )
         return {
             key: `redis-key-${i}`,
@@ -1259,14 +1313,14 @@ export class RedisInstance {
     }
 
     keyTop(key: RedisKey): THREE.Vector3 {
-        return key.home.clone().add(new THREE.Vector3(0, BLOCK.h / 2 + 0.06, 0))
+        return key.home.clone().add(new THREE.Vector3(0, KEY.h / 2 + 0.04, 0))
     }
 
     keyBox(key: RedisKey): THREE.Box3 {
         return this.toWorld(
             new THREE.Box3().setFromCenterAndSize(
-                key.home.clone().add(new THREE.Vector3(0, BLOCK.h / 2, 0)),
-                new THREE.Vector3(BLOCK.w, BLOCK.h, BLOCK.d),
+                key.home.clone().add(new THREE.Vector3(0, KEY.h / 2, 0)),
+                new THREE.Vector3(KEY.w, KEY.h, KEY.d),
             ),
         )
     }
@@ -1283,16 +1337,176 @@ export class RedisInstance {
         this.flashKey(key, live ? KIND_COLOR[key.kind] : PALETTE.magenta, 0.5)
     }
 
+    /* ---------------------------------- dict --------------------------------- */
+
+    /** Which bucket this entry lands in, for a table of `size` buckets. */
+    private bucketOf(i: number, size: number): number {
+        // the multiplicative hash, truncated to a uint32 like the real one
+        return ((i * 2654435761) >>> 0) % size
+    }
+
+    /**
+     * The bucket a tile stands for. The live table occupies one half of the
+     * lattice and a growing table the other, so a growth is a physical expansion
+     * instead of the buckets jumping to a different place when it finishes.
+     */
+    private tileBucket(half: 0 | 1, id: number): number {
+        const row = Math.floor(id / DICT.cols)
+        const col = id % DICT.cols
+        const rowIn = half === 0 ? row : DICT.rows - 1 - row
+        return rowIn * DICT.cols + col
+    }
+
+    /** Buckets that hold at least one live key, for a table of `size` buckets. */
+    private usedBuckets(size: number): Set<number> {
+        const s = new Set<number>()
+        for (const k of this.keys) if (k.live) s.add(this.bucketOf(k.i, size))
+        return s
+    }
+
+    get hashSize() {
+        return this.htSize
+    }
+
+    /**
+     * Where a key's bucket sits — the tile the lookup actually lands on.
+     *
+     * During a rehash a key can be in either table, and redis checks both in
+     * order: a key that has already been migrated is found in the new table, the
+     * rest still in the old one. So the path lands where the key really is, which
+     * is the whole reason the rehash is drawn bucket by bucket.
+     */
+    bucketTop(key: RedisKey): THREE.Vector3 {
+        let half = this.htHalf
+        let bucket = this.bucketOf(key.i, this.htSize)
+        if (this.rehashIdx >= 0) {
+            const moved = this.bucketOf(key.i, this.ht1Size)
+            if (moved < this.rehashIdx) {
+                half = this.htHalf === 0 ? 1 : 0
+                bucket = moved
+            }
+        }
+        const tile = this.tileBucket(half, bucket)
+        return new THREE.Vector3(
+            dictX(tile % DICT.cols),
+            DICT.y + 0.05,
+            dictZ(Math.floor(tile / DICT.cols)),
+        )
+    }
+
+    get rehashing() {
+        return this.rehashIdx >= 0
+    }
+
+    /**
+     * Paint the bucket array from the dict's own state.
+     *
+     * An allocated bucket is drawn dim, a bucket holding at least one key bright,
+     * and a bucket that belongs to neither table is not allocated at all and is
+     * collapsed. During a rehash the old table loses buckets from the front while
+     * the new one gains them, in exactly the order rehashStep() migrates them.
+     */
+    private paintDict() {
+        const N = DICT.cols * DICT.rows
+        const usedOld = this.usedBuckets(this.htSize)
+        const usedNew = this.ht1Size > 0 ? this.usedBuckets(this.ht1Size) : null
+        const liveHalf = this.htHalf
+        const otherHalf = (liveHalf === 0 ? 1 : 0) as 0 | 1
+        const empty = mixHex(0x0d3a48, PALETTE.cyan, 0.14)
+
+        for (let id = 0; id < N; id++) {
+            const bOld = this.tileBucket(liveHalf, id)
+            const bNew = this.tileBucket(otherHalf, id)
+            let live = false
+            let used = false
+            if (this.ht1Size > 0) {
+                // rehashing: the old table shrinks from the front, the new grows
+                if (bOld < this.htSize && bOld >= this.rehashIdx) {
+                    live = true
+                    used = usedOld.has(bOld)
+                } else if (bNew < this.rehashIdx) {
+                    live = true
+                    used = usedNew?.has(bNew) ?? false
+                }
+            } else if (bOld < this.htSize) {
+                live = true
+                used = usedOld.has(bOld)
+            }
+
+            this.tmpObj.position.set(dictX(id % DICT.cols), DICT.y, dictZ(Math.floor(id / DICT.cols)))
+            this.tmpObj.scale.setScalar(live ? 1 : 0.001)
+            this.tmpObj.updateMatrix()
+            this.dictMesh.setMatrixAt(id, this.tmpObj.matrix)
+            const hex = used
+                ? mixHex(0x0d3a48, PALETTE.cyan, 0.5 * (this.dictShade[id] ?? 0.4) + 0.25)
+                : empty
+            this.dictMesh.setColorAt(id, this.tmpColor.setHex(hex))
+        }
+        this.dictMesh.instanceMatrix.needsUpdate = true
+        if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
+
+        // the size line: what the dict is, not what it might become
+        const text =
+            this.ht1Size > 0
+                ? `ht[0] ${this.htSize} → ht[1] ${this.ht1Size} · ${this.rehashIdx}/${this.htSize}`
+                : `ht[0] ${this.htSize} buckets`
+        const el = this.dictTableLab?.element as HTMLElement | undefined
+        if (el && el.textContent !== text) el.textContent = text
+    }
+
+    /**
+     * Load factor 1: the next insert grows the table. Real dicts check this on
+     * every add; so does this one.
+     */
+    private maybeGrow() {
+        if (this.rehashIdx >= 0 || this.htSize >= HASH_MAX) return
+        if (this.liveKeys <= this.htSize) return
+        const next = HASH_SIZES.find((s) => s > this.htSize)
+        if (!next) return
+        this.ht1Size = next
+        this.rehashIdx = 0
+        this.paintDict()
+        this.trace(`dict grow · ${this.htSize} → ${next} buckets`)
+    }
+
+    /**
+     * One step of the incremental rehash.
+     *
+     * redis migrates one bucket per command, plus a cron burst of a hundred
+     * buckets per millisecond. Commands arrive here a couple per second, so a
+     * single bucket per command would take minutes on screen: the step size is
+     * raised, the RULE is not. What matters is that the table is never rebuilt in
+     * one go — both tables are live and every lookup checks both.
+     */
+    rehashStep(buckets = 1) {
+        if (this.rehashIdx < 0) return
+        this.rehashIdx = Math.min(this.htSize, this.rehashIdx + buckets)
+        if (this.rehashIdx >= this.htSize) {
+            // done: the table that was growing is now the dict
+            this.htSize = this.ht1Size
+            this.ht1Size = 0
+            this.rehashIdx = -1
+            this.htHalf = this.htHalf === 0 ? 1 : 0
+            this.trace(`dict rehashed · ht[0] ${this.htSize} buckets`)
+        }
+        this.paintDict()
+    }
+
     /** The bucket a key hashes to — shown by lighting one dict tile. */
     pulseBucket(key: RedisKey) {
-        const bucket = (key.row * KEYS.cols + key.col) % (DICT.cols * DICT.rows)
-        this.dictMesh.setColorAt(bucket, this.tmpColor.setHex(PALETTE.ice))
+        const bucket = this.bucketOf(key.i, this.htSize)
+        const tile = this.tileBucket(this.htHalf, bucket)
+        this.dictMesh.setColorAt(tile, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.4)))
         if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
-        void this.ticker.add(0.45, (k) => {
-            const base = mixHex(0x0d3a48, PALETTE.cyan, 0.35)
-            this.dictMesh.setColorAt(bucket, this.tmpColor.setHex(base).lerp(new THREE.Color(PALETTE.ice), 1 - k))
+        void this.ticker.add(PULSE_TIME, (k) => {
+            this.dictMesh.setColorAt(
+                tile,
+                this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.4)).multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
+            )
             if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
         })
+        // repaint from state rather than restoring a remembered colour
+        void this.ticker.wait(PULSE_TIME).then(() => this.paintDict())
     }
 
     flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
@@ -2149,6 +2363,15 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity +=
             (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) * Math.min(1, dt * 6)
         this.loopRing.rotation.z += dt * 0.5
+
+        // the dict's cron: while a rehash is running it migrates a burst of
+        // buckets on a timer, and once the load factor passes 1 it starts one
+        this.rehashTimer -= dt
+        if (this.rehashTimer <= 0) {
+            this.rehashTimer = 0.25
+            this.rehashStep(2)
+            this.maybeGrow()
+        }
 
         // keys cool down after being touched
         let dirtyKeys = false
