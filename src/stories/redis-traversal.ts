@@ -1,0 +1,98 @@
+import type { StoryStep } from './types'
+
+/**
+ * One deep read of a long list, followed end to end.
+ *
+ * The camera rides the packet: socket → queue → loop → bucket → page → the
+ * quicklist → node ↔ page, and back out through the socket. The point of the
+ * story is the count of stops: a list never converts, so a read of a deep
+ * element is a walk of a chain of allocations, one hop per node, and every one
+ * of those nodes is somewhere else in the heap.
+ */
+export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
+    {
+        title: 'a request arrives on a socket',
+        body: 'A client sends LINDEX. The bytes enter a connection’s input buffer, the thread reads them on its next pass over epoll, and the parsed command joins the shared queue. Nothing has been looked up yet: the server knows a key name and an index, and that is all. One thread will take this command, and while it runs, every other client waits behind it.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'list',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'a read entering the cage',
+    },
+    {
+        title: 'the key becomes a bucket, the bucket a page',
+        body: 'The key string is hashed and lands on one bucket — 8 bytes in one array. Following it gives a page, and on that page sits the dictEntry: a pointer to the key string it can compare, and a pointer to the value object. The header of that object is what says the encoding, and here it says list. That is the whole lookup: two dereferences, and the server knows what it has. Everything after this point is the value’s own problem.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'list',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0 && c.rdKeys > 40,
+        waitFor: 'a read hashing into the table',
+    },
+    {
+        title: 'a list is a chain, and the chain is on the heap',
+        body: 'A quicklist is not one buffer. It is a doubly linked chain of nodes, and each node holds one listpack — up to 128 elements in a single contiguous allocation. The dashed cage at the back is a projection of that chain so its shape can be read; it is not an address. The nodes themselves are ordinary heap allocations, one page each, so the first thing the read does is take the head node’s pointer and go there.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'list',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'the walk starting at the head node',
+    },
+    {
+        title: 'node after node, page after page',
+        body: 'The index is in the middle, so the thread walks from whichever end is nearer — one node at a time. Each step is a pointer to the next node’s allocation, and that allocation is on an unrelated page: nothing about a quicklist keeps neighbours close, so the walk is a jump per node. The elements INSIDE a node are contiguous, which is why the number of hops is the number of nodes and not the number of elements: 2.1 million elements at 128 per node is about 16,000 nodes, so a middle read is thousands of hops, not two million.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'list',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'the chain being walked, a node at a time',
+    },
+    {
+        title: 'found, and back out through the socket',
+        body: 'The element is copied out of its listpack into the reply, and the thread is finished with the value — no lock to release, no cache to update, nothing to write down. The reply climbs back to the loop, joins that connection’s output buffer, and leaves the way the request came in. The camera stops at the socket: past it, the bytes are the client’s problem. Total for the server: one hash, one entry, one walk — on one thread.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'list',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'the reply leaving the loop',
+    },
+]

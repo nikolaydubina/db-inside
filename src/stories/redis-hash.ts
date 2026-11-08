@@ -1,0 +1,86 @@
+import type { StoryStep } from './types'
+
+/**
+ * A big hash, followed: one field versus every field.
+ *
+ * A `hashtable`-encoded hash IS a dict, with its own bucket array and its own
+ * entries — a second hash table nested inside the value. HGET uses it the way a
+ * hash table is meant to be used: one field, one bucket, one chain, one page.
+ * HGETALL cannot: there is no order and no index over fields, so the only way to
+ * answer it is to walk every bucket and every chain, and that means touching
+ * every entry the value has.
+ */
+export const REDIS_HASH_STORY: StoryStep[] = [
+    {
+        title: 'the value is its own bucket array',
+        body: 'This is the big hash, and it is not a fat string: it is a dict of its own — a bucket array of pointers, more than a million buckets in the real one, with the fields hanging off it in chains. The keyspace dict found the key; everything inside this cage is inside the value. That nesting is why a huge hash is still O(1) for one field: the inner table is as ordinary as the outer one.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 12,
+        fov: 42,
+        tap: 'redis',
+        big: 'hash',
+        op: 'point',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.bigKeys >= 2 && c.rdOps > 0,
+        waitFor: 'reads against the large hash',
+    },
+    {
+        title: 'HGET: hash the field, follow the chain',
+        body: 'Watch the packet, because the whole read is five stops. One: the keyspace bucket the key hashed to. Two: the heap page the keyspace entry sits on. Three: this cage — the value’s OWN bucket array. Four: one bucket inside it, the one the field hashes to. Five: the page that field’s entry was allocated on. Then the reply turns round and goes back to the loop and out through the socket. Two hash tables, two entries, two pages — and not one of those numbers grows with how many fields the value has.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 10,
+        fov: 40,
+        tap: 'redis',
+        big: 'hash',
+        op: 'point',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'point reads against the big hash',
+    },
+    {
+        title: 'HGETALL: there is no order to jump through',
+        body: 'The skiplist is what lets a sorted set answer a range without reading everything; a hash has no equivalent, and that is the whole difference. To return every field, the thread walks all the buckets of that inner array, every chain hanging off them, and every entry in those chains is a separate allocation on its own page. Nothing can be skipped and nothing is sorted, so the route is as long as the value is big. Watch it move bucket to bucket and page to page instead of taking one hop.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'hash',
+        op: 'walk',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'a walk across every bucket',
+    },
+    {
+        title: 'why one command can stop the server',
+        body: 'Five million fields, one command, one thread. The work is not I/O — there is no disk in this path — it is dereferencing entries that are scattered through memory, so a faster disk changes nothing and more cores change nothing: the command runs where every other command runs. A hash is cheap per lookup and expensive per traversal, and HGETALL is the traversal wearing the costume of a read.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 13,
+        fov: 44,
+        tap: 'redis',
+        big: 'hash',
+        op: 'walk',
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'the walk still running on the one thread',
+    },
+]
