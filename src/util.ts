@@ -176,6 +176,34 @@ export function driftDust(points: THREE.Points, dt: number, time: number) {
   attr.needsUpdate = true
 }
 
+/**
+ * The floor lattice under a block field: one line on every cell boundary, so a
+ * slot reads as a place a block can stand whether or not one is standing there.
+ *
+ * Both disks are tiled by the same lattice at the same pitch, and it is drawn
+ * over their WHOLE footprint — not just the part with no blocks in it. A grid
+ * only under the untouched tail draws the same floor two ways, and then the
+ * holes left by a fragmented table look like bare ground rather than like space
+ * a page could be written into. Under a packed area the lines are hidden by the
+ * blocks themselves, which is the point: the blocks ARE the slots, filled.
+ */
+export function slotLattice(x0: number, x1: number, z0: number, z1: number, pitch: number) {
+  const pts: number[] = []
+  for (let x = x0; x <= x1 + 1e-3; x += pitch) pts.push(x, FLOOR_Y, z0, x, FLOOR_Y, z1)
+  for (let z = z0; z <= z1 + 1e-3; z += pitch) pts.push(x0, FLOOR_Y, z, x1, FLOOR_Y, z)
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3))
+  return new THREE.LineSegments(
+    geo,
+    new THREE.LineBasicMaterial({
+      color: 0x1d4a5e,
+      transparent: true,
+      opacity: 0.5,
+      depthWrite: false,
+    }),
+  )
+}
+
 /** Thin additive outline of a geometry. */
 export function neonEdges(geo: THREE.BufferGeometry, color: number, opacity = 0.6) {
   const eg = new THREE.EdgesGeometry(geo, 24)

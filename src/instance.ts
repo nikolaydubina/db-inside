@@ -19,6 +19,7 @@ import {
   radialTexture,
   rand,
   randInt,
+  slotLattice,
 } from './util'
 import type { PathEnd } from './flow'
 
@@ -952,30 +953,17 @@ export class PostgresInstance {
     })
     this.markSystemAreas()
 
-    // in the untouched tail, draw the slot lattice only — no pages, just room
-    const freeCols = Math.floor(cols * 0.2)
-    const fx0 = pageX(0) - PAGE_GRID.gx / 2
-    const fx1 = pageX(freeCols - 1) + PAGE_GRID.gx / 2
-    const fz0 = pageZ(0) - PAGE_GRID.gz / 2
-    const fz1 = pageZ(rows - 1) + PAGE_GRID.gz / 2
-    const slotPts: number[] = []
-    for (let x = fx0; x <= fx1 + 0.001; x += PAGE_GRID.gx) {
-      slotPts.push(x, FLOOR_Y, fz0, x, FLOOR_Y, fz1)
-    }
-    for (let z = fz0; z <= fz1 + 0.001; z += PAGE_GRID.gz) {
-      slotPts.push(fx0, FLOOR_Y, z, fx1, FLOOR_Y, z)
-    }
-    const slotGeo = new THREE.BufferGeometry()
-    slotGeo.setAttribute('position', new THREE.Float32BufferAttribute(slotPts, 3))
+    // The slot lattice, over the WHOLE field — every hole left by a fragmented
+    // table is a slot a page can be written into, so it has to be drawn on the
+    // same grid as the packed part and as the untouched tail. Under a block the
+    // lines are simply hidden by it.
     this.group.add(
-      new THREE.LineSegments(
-        slotGeo,
-        new THREE.LineBasicMaterial({
-          color: 0x1d4a5e,
-          transparent: true,
-          opacity: 0.5,
-          depthWrite: false,
-        }),
+      slotLattice(
+        pageX(0) - PAGE_GRID.gx / 2,
+        pageX(cols - 1) + PAGE_GRID.gx / 2,
+        pageZ(0) - PAGE_GRID.gz / 2,
+        pageZ(rows - 1) + PAGE_GRID.gz / 2,
+        PAGE_GRID.gx,
       ),
     )
 

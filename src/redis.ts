@@ -21,6 +21,7 @@ import {
     radialTexture,
     rand,
     randInt,
+    slotLattice,
 } from './util'
 
 /**
@@ -786,26 +787,16 @@ export class RedisInstance {
             rdbEdge,
         )
 
-        // slot lattice across the free space — the same "room to grow" texture the
-        // postgres disk uses for its untouched tail
-        const slotPts: number[] = []
-        const fx0 = xAt(0) - PITCH / 2
-        const fx1 = xAt(COLS - 1) + PITCH / 2
-        const fz0 = zAt(0) - PITCH / 2
-        const fz1 = zAt(ROWS - 1) + PITCH / 2
-        for (let x = fx0; x <= fx1 + 0.001; x += PITCH) slotPts.push(x, FLOOR_Y, fz0, x, FLOOR_Y, fz1)
-        for (let z = fz0; z <= fz1 + 0.001; z += PITCH) slotPts.push(fx0, FLOOR_Y, z, fx1, FLOOR_Y, z)
-        const slotGeo = new THREE.BufferGeometry()
-        slotGeo.setAttribute('position', new THREE.Float32BufferAttribute(slotPts, 3))
+        // The slot lattice, over the whole field and from the same builder the
+        // postgres disk uses: one grid for both disks, at one pitch, covering
+        // every place a block can be — not only the part with no blocks in it.
         this.group.add(
-            new THREE.LineSegments(
-                slotGeo,
-                new THREE.LineBasicMaterial({
-                    color: 0x1d4a5e,
-                    transparent: true,
-                    opacity: 0.5,
-                    depthWrite: false,
-                }),
+            slotLattice(
+                xAt(0) - PITCH / 2,
+                xAt(COLS - 1) + PITCH / 2,
+                zAt(0) - PITCH / 2,
+                zAt(ROWS - 1) + PITCH / 2,
+                PITCH,
             ),
         )
 
