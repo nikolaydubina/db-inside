@@ -553,7 +553,6 @@ export class EngineSim {
         this.lastArrowEnd = toBlock.clone()
         if (target) {
           this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
-          this.inst.markBlock(target, PALETTE.amber)
           this.lastOp = `read ${target.table ?? 'free'}[${target.row},${target.col}]`
         }
 
@@ -726,7 +725,7 @@ export class EngineSim {
         ])
         void travel(this.ticker, copy, curve, 0.75).then(() => {
           if (target) {
-            this.inst.markBlock(target, PALETTE.amber)
+            this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
             this.lastOp = `checkpoint write ${target.table ?? 'free'}[${target.row},${target.col}]`
           }
           this.inst.flashDisk()

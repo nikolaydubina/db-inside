@@ -18,6 +18,40 @@ export const FLOOR_Y = 0
  */
 export const BLOCK_LIFT = 0.02
 
+/**
+ * How long a block stays lit after it is touched, in seconds.
+ *
+ * One duration for every block in the scene — a page on the postgres disk, a
+ * block of the AOF, a cube of shared memory, a key in the keyspace. "This was
+ * just read or written" has to look the same everywhere, or the reader has to
+ * learn a different vocabulary per cage. One pulse, then the block is ordinary
+ * again.
+ */
+export const PULSE_TIME = 0.45
+
+/**
+ * The lit end of a pulse.
+ *
+ * Lerping a block toward a colour it is already close to (amber → a slightly
+ * different amber) is invisible at this scale, and a pale tint reads as "lighter
+ * paint", not as light. A touched block has to SHINE: the block's own tint driven
+ * past 1.0, into the range the bloom pass picks up.
+ *
+ * How far it is pushed toward white first is the difference between an amber
+ * pulse and a white flash. Whiten it a little and the yellow survives the tone
+ * mapping; whiten it half-way and every channel saturates, which turns the pulse
+ * into a white blob that no longer says what touched it. So: barely whitened,
+ * driven hard. The ratio between the channels is what keeps the colour.
+ */
+export const PULSE_WHITEN = 0.15
+
+export function pulseHex(base: number, up = PULSE_WHITEN) {
+  return new THREE.Color(base).lerp(new THREE.Color(0xffffff), up).getHex()
+}
+
+/** How far past 1.0 a pulse drives a block's colour at its peak. */
+export const PULSE_GAIN = 2.4
+
 export const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
 export const easeInOutCubic = (t: number) =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2

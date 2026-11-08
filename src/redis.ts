@@ -6,12 +6,15 @@ import {
     BLOCK_LIFT,
     FLOOR_Y,
     OutlineBox,
+    PULSE_GAIN,
+    PULSE_TIME,
     Ticker,
     breathe,
     floorLabel,
     halo,
     label,
     neonEdges,
+    pulseHex,
     radialTexture,
     rand,
     randInt,
@@ -244,8 +247,8 @@ export class RedisInstance {
     private keysMesh!: THREE.InstancedMesh
     /** base albedo per instance, so a flash can be undone */
     private diskBase: number[] = []
-    /** decaying flash boost per disk instance */
-    private diskBoost = new Map<number, number>()
+    /** decaying pulse per disk instance — the one marker for "this block was touched" */
+    private diskBoost = new Map<number, { v: number; hex: number }>()
 
     /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
@@ -329,19 +332,8 @@ export class RedisInstance {
     /** True while bgrewriteaof is running — the agent drives itself then. */
     rewriting = false
 
-    private markGeo = new THREE.TorusGeometry(0.34, 0.025, 4, 28)
-    /** Smaller ring for a disk block, so the pulse never spills onto its neighbour. */
-    private blockMarkGeo = new THREE.TorusGeometry(0.3, 0.02, 4, 24)
-    private markMat = new THREE.MeshBasicMaterial({
-        color: PALETTE.amber,
-        transparent: true,
-        opacity: 0.85,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-    })
-
     private tmpColor = new THREE.Color()
-    private amberColor = new THREE.Color(PALETTE.amber)
+    private pulseColor = new THREE.Color()
     private tmpObj = new THREE.Object3D()
     private tmpBox = new THREE.Box3()
 
@@ -1306,30 +1298,14 @@ export class RedisInstance {
         })
     }
 
-    flashKey(key: RedisKey, hex: number, dur = 0.5) {
-        this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(hex))
+    flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
+        this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(pulseHex(hex)))
         if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
         void this.ticker.add(dur, (k) => {
             if (k < 1) return
             const base = mixHex(0x06222c, KIND_COLOR[key.kind], 0.55 * key.shade)
             this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(base))
             if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
-        })
-    }
-
-    /** An expanding ring on a key: "the lookup landed here". */
-    markKey(key: RedisKey, hex = PALETTE.ice) {
-        const ring = new THREE.Mesh(this.markGeo, this.markMat.clone())
-        const mat = ring.material as THREE.MeshBasicMaterial
-        mat.color.setHex(hex)
-        ring.rotation.x = -Math.PI / 2
-        ring.position.copy(this.keyTop(key))
-        ring.scale.setScalar(0.5)
-        this.group.add(ring)
-        void this.ticker.add(0.55, (k) => {
-            ring.scale.setScalar(0.5 + k * 1.1)
-            mat.opacity = 0.85 * (1 - k)
-            if (k >= 1) this.group.remove(ring)
         })
     }
 
@@ -1408,7 +1384,7 @@ export class RedisInstance {
         this.aofBuffered = Math.min(1, this.aofBuffered + bytes / BLOCK_BYTES)
         const mat = this.aofBufMats[this.bufferCubeIndex()]
         if (mat) {
-            void this.ticker.add(0.5, (k) => {
+            void this.ticker.add(PULSE_TIME, (k) => {
                 mat.emissiveIntensity = 1.3 - 0.8 * k
             })
         }
@@ -1442,12 +1418,9 @@ export class RedisInstance {
         const block = this.aofBlockPos(this.aofHead)
 
         // One pulse per block written, on the one block that changed — the same
-        // pulse an edited page gets on the postgres disk. No frame, no standing
-        // second colour: after ~0.4 s it is an ordinary block again.
-        this.diskBoost.set(i, 1)
-        this.disk.setColorAt(i, this.tmpColor.setHex(PALETTE.amber))
-        if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
-        this.markBlockTop(block)
+        // pulse an edited page gets on the postgres disk, and the same pulse a
+        // cube of aof_buf gets when a record lands in it.
+        this.pulseDiskBlock(i, PALETTE.amber)
 
         return block.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
     }
@@ -1500,24 +1473,15 @@ export class RedisInstance {
         REDIS_ANCHOR.aof.set((x0 + x1) / 2, BLOCK_TOP, (z0 + z1) / 2).add(REDIS_ORIGIN)
     }
 
-    /** Expanding ring over one block: "this is the block the record went into". */
-    private markBlockTop(block: THREE.Vector3, hex = PALETTE.amber) {
-        const ring = new THREE.Mesh(this.blockMarkGeo, this.markMat.clone())
-        const mat = ring.material as THREE.MeshBasicMaterial
-        mat.color.setHex(hex)
-        ring.rotation.x = -Math.PI / 2
-        ring.position.set(block.x, PAGE_Y + BLOCK.h / 2 + 0.02, block.z)
-        ring.scale.setScalar(0.3)
-        this.group.add(ring)
-        void this.ticker
-            .add(0.55, (k) => {
-                ring.scale.setScalar(0.3 + k * 0.85)
-                mat.opacity = 0.9 * (1 - k)
-            })
-            .then(() => {
-                this.group.remove(ring)
-                mat.dispose()
-            })
+    /**
+     * One block was touched: it lights for PULSE_TIME and settles back.
+     *
+     * The same pulse as a page on the postgres disk and a cube of either buffer —
+     * there is no per-container marker in this scene, because "this was just read
+     * or written" is the same statement everywhere.
+     */
+    private pulseDiskBlock(id: number, hex: number) {
+        this.diskBoost.set(id, { v: 1, hex: pulseHex(hex) })
     }
 
     aofHeadTop(): THREE.Vector3 {
@@ -1759,7 +1723,7 @@ export class RedisInstance {
             this.rdbLen = upto
             this.rdbTail = upto === n ? tail : 1
             this.layoutRdb()
-            for (let b = shown; b < upto; b++) this.markBlockTop(this.rdbBlockPos(b), PALETTE.teal)
+            for (let b = shown; b < upto; b++) this.pulseDiskBlock(this.rdbOrder[b], PALETTE.teal)
             shown = Math.max(shown, upto)
             this.rdbAim.copy(this.rdbBlockPos(upto - 1))
         })
@@ -1797,7 +1761,7 @@ export class RedisInstance {
             await this.ticker.add(Math.max(0.4, n * RDB_BLOCK_TIME), (k) => {
                 const upto = Math.max(1, Math.min(n, Math.ceil(k * n)))
                 for (let b = shown; b < upto; b++) {
-                    this.markBlockTop(this.rdbBlockPos(b), PALETTE.teal)
+                    this.pulseDiskBlock(this.rdbOrder[b], PALETTE.teal)
                     // a block comes back whole — but only the keys that were still
                     // in the dataset when the process stopped. The rest were
                     // deleted later in the log and are never replayed.
@@ -1821,7 +1785,7 @@ export class RedisInstance {
             await this.ticker.add(Math.max(0.35, m * AOF_RECORD_TIME), (k) => {
                 const upto = Math.max(1, Math.min(m, Math.ceil(k * m)))
                 for (let r = replayed; r < upto; r++) {
-                    this.markBlockTop(this.aofBlockPos(r), PALETTE.amber)
+                    this.pulseDiskBlock(this.aofOrder[r], PALETTE.amber)
                     if (restored < tail.length) this.reviveKey(tail[restored++])
                 }
                 replayed = Math.max(replayed, upto)
@@ -1918,7 +1882,7 @@ export class RedisInstance {
             const upto = Math.max(1, Math.min(target, Math.round(k * target)))
             for (let j = staged; j < upto; j++) {
                 this.setStaged(j, true)
-                this.markBlockTop(this.stagingSlot(j), PALETTE.amber)
+                this.pulseDiskBlock(this.stagingId(j), PALETTE.amber)
             }
             staged = Math.max(staged, upto)
             this.rewriteAim.copy(this.stagingSlot(upto - 1)).setY(1.4)
@@ -1971,7 +1935,7 @@ export class RedisInstance {
         this.aofFull = false
         this.layoutAof()
         this.trace(`rewrite swap · head ${oldHead} → ${this.aofHead}, ${staged} blocks became the file`)
-        this.markBlockTop(this.aofBlockPos(this.aofHead))
+        this.pulseDiskBlock(this.aofOrder[this.aofHead], PALETTE.amber)
         this.pulseAgent(this.rewriteDrone)
         this.rewriting = false
         this.assertInvariants('bgrewriteaof')
@@ -2163,23 +2127,26 @@ export class RedisInstance {
         }
         if (dirtyKeys && this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
 
-        // AOF blocks settle back after a flash
+        // A block that was just touched settles back over PULSE_TIME. One marker
+        // for every block in the scene: lit once, then ordinary again.
         if (this.diskBoost.size > 0) {
             let dirty = false
-            for (const [i, v] of this.diskBoost) {
-                // quick enough to read as a pulse rather than a state: the block
-                // is lit on the write and back to its own colour in ~0.4 s
-                const next = v - dt * 2.6
+            for (const [i, pulse] of this.diskBoost) {
+                const next = pulse.v - dt / PULSE_TIME
                 if (next <= 0) {
                     this.diskBoost.delete(i)
                     this.disk.setColorAt(i, this.tmpColor.setHex(this.diskBase[i] || 0x000000))
                 } else {
-                    this.diskBoost.set(i, next)
+                    pulse.v = next
                     this.disk.setColorAt(
                         i,
                         this.tmpColor
                             .setHex(this.diskBase[i] || 0x000000)
-                            .lerp(this.amberColor, next),
+                            .lerp(this.pulseColor.setHex(pulse.hex), next)
+                            // and past white: the bloom pass only picks up what is
+                            // over 1.0, which is what makes a pulse look like
+                            // light rather than like lighter paint
+                            .multiplyScalar(1 + (PULSE_GAIN - 1) * next),
                     )
                 }
                 dirty = true

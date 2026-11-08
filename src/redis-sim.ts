@@ -283,7 +283,7 @@ export class RedisSim {
                 // be rewritten to get shorter.
                 this.redis.aofFull = true
                 this.refused++
-                this.redis.markKey(key, PALETTE.magenta)
+                this.redis.flashKey(key, PALETTE.magenta, 0.6)
                 this.note = `${cmd.name} · MISCONF errors writing to the AOF file — refused, reads still served`
             } else if (cmd.write) {
                 if (!key.live) this.redis.setKeyLive(key, true)
@@ -314,7 +314,6 @@ export class RedisSim {
                 this.note = `${cmd.name} · ${bytes} B into aof_buf — durable at the next fsync`
                 toBuf.fadeOut(this.ticker, 0.6)
             } else {
-                this.redis.markKey(key, PALETTE.ice)
                 this.redis.flashKey(key, PALETTE.ice, 0.45)
                 this.note = hit ? `${cmd.name} · hash hit, no disk` : `${cmd.name} · miss`
                 if (hit) this.hits++

@@ -5,12 +5,15 @@ import {
   FLOOR_Y,
   Ticker,
   OutlineBox,
+  PULSE_GAIN,
+  PULSE_TIME,
   breathe,
   easeInOutCubic,
   floorLabel,
   halo,
   label,
   neonEdges,
+  pulseHex,
   radialTexture,
   rand,
   randInt,
@@ -438,8 +441,6 @@ export class PostgresInstance {
     1,
     0.02,
   )
-  private markGeo!: THREE.TorusGeometry
-  private markMat!: THREE.MeshBasicMaterial
   /** One port per client connection, sitting on the top boundary of the box. */
   readonly backends: BackendPod[] = []
   readonly scanner: THREE.Mesh
@@ -988,15 +989,6 @@ export class PostgresInstance {
       ),
     )
 
-    this.markGeo = new THREE.TorusGeometry(0.34, 0.025, 4, 28)
-    this.markMat = new THREE.MeshBasicMaterial({
-      color: PALETTE.amber,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    })
-
     // one reusable mesh carries a page while it is being read into RAM
     this.liftMesh = new THREE.Mesh(
       geo.clone(),
@@ -1018,6 +1010,22 @@ export class PostgresInstance {
     const field = this.pageField
     if (!field) return
     field.setColorAt(p.i, this.tmpColor.setHex(hex))
+    if (field.instanceColor) field.instanceColor.needsUpdate = true
+  }
+
+  /**
+   * Paint a page for a pulse: the same write, but the colour is allowed past 1.0
+   * so the bloom pass turns it into light. `paintBlock` takes a hex, and a hex
+   * cannot be over-range — which is why a pulse needs its own door in.
+   */
+  private paintPageLit(p: Page8K, base: number, v: number) {
+    const field = this.pageField
+    if (!field) return
+    const c = this.tmpColorA
+      .setHex(base)
+      .lerp(this.tmpColorB.setHex(pulseHex(base)), Math.min(1, v))
+      .multiplyScalar(1 + (PULSE_GAIN - 1) * Math.min(1, v))
+    field.setColorAt(p.i, c)
     if (field.instanceColor) field.instanceColor.needsUpdate = true
   }
 
@@ -1202,12 +1210,16 @@ export class PostgresInstance {
    * Flash the pages a statement touched, then settle back to their fill colour.
    * This is how you see which blocks the query actually rewrote.
    */
-  touchBlocks(blocks: Page8K[], hex: number, dur = 0.55, lift = 1.35) {
-    for (const p of blocks) this.paintBlock(p, hex)
+  touchBlocks(blocks: Page8K[], hex: number, dur = PULSE_TIME, lift = 1.35) {
+    // Lit by luminance, not by a paler tint: the block is driven over 1.0 into
+    // the range the bloom pass picks up, then falls back to its own colour.
+    for (const p of blocks) this.paintPageLit(p, hex, 1)
     for (const p of blocks) {
       const liftBy = this.blockScale(p.fill) * lift
       this.applyTransform(p, 1, liftBy)
-      void this.ticker.add(dur, () => { }).then(() => {
+      void this.ticker.add(dur, (k) => {
+        this.paintPageLit(p, hex, 1 - k)
+      }).then(() => {
         if (p.busy) return
         this.paintBlock(p, this.fillHex(p))
         this.showBlock(p)
@@ -1285,26 +1297,6 @@ export class PostgresInstance {
     this.group.add(lab)
   }
 
-  /** Expanding ring on top of one page: "the arrow landed exactly here". */
-  markBlock(p: Page8K, hex: number) {
-    const ring = new THREE.Mesh(this.markGeo, this.markMat.clone())
-    const mat = ring.material as THREE.MeshBasicMaterial
-    mat.color.setHex(hex)
-    ring.rotation.x = -Math.PI / 2
-    ring.position.copy(this.blockTop(p))
-    ring.scale.setScalar(0.35)
-    this.group.add(ring)
-    void this.ticker
-      .add(0.6, (k) => {
-        ring.scale.setScalar(0.35 + k * 0.9)
-        mat.opacity = 0.85 * (1 - k)
-      })
-      .then(() => {
-        this.group.remove(ring)
-        mat.dispose()
-      })
-  }
-
   /** A page in some table that a read is about to touch. */
   pickBlockForRead(): Page8K | null {
     const filled = this.tableBlocks.filter((b) => b.fill > 0.001 && !b.busy)
@@ -1335,7 +1327,7 @@ export class PostgresInstance {
         this.setFill(b, before[i] + (after[i] - before[i]) * easeInOutCubic(stagger))
       })
     })
-    this.touchBlocks(blocks, 0x9be8ff, 0.5, 1.15)
+    this.touchBlocks(blocks, 0x9be8ff, PULSE_TIME, 1.15)
     await this.ticker.wait(0.3)
     return { table: region.label, pages: packed.length }
   }
@@ -2195,7 +2187,7 @@ export class PostgresInstance {
     this.walBuffered = Math.min(1, this.walBuffered + fraction)
     const mat = this.walBufferMats[this.bufferCubeIndex()]
     if (mat) {
-      void this.ticker.add(0.5, (k) => {
+      void this.ticker.add(PULSE_TIME, (k) => {
         // a gentle lift only: these cubes are already emissive, and anything
         // brighter blooms into a white slab that hides the thing it marks
         mat.emissiveIntensity = 1.25 - 0.75 * k
@@ -2293,7 +2285,7 @@ export class PostgresInstance {
     for (const { p } of chosen) {
       if (p.dirty && p.block) {
         this.setFill(p.block, p.fill)
-        this.markBlock(p.block, PALETTE.amber)
+        this.touchBlocks([p.block], PALETTE.amber)
       }
       p.dirty = false
       p.base.set(PALETTE.cyan)
