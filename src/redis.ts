@@ -104,6 +104,21 @@ const RDB_CENTRE = new THREE.Vector3(
     (zAt(RDB.r0) + zAt(RDB.r1)) / 2,
 )
 
+/**
+ * Fill ramp for the blocks on this floor. A filesystem block is all-or-nothing:
+ * it either holds its 4 kB or it does not exist at all. So 4 kB is the TOP of
+ * this ramp — a block that is present is a full block, and is drawn at the bright
+ * end, the way a packed 8 kB page is drawn bright in the postgres cage.
+ *
+ * The one exception is the last block of a file, which is as full as the file's
+ * length left it (see layoutRdb): that one gets the dimmer end of the ramp, so
+ * "brightness is how full" still means something here.
+ */
+const AOF_FILL_DARK = 0x2a1a04
+const AOF_FILL_BRIGHT = 0xe09a2e
+const RDB_FILL_DARK = 0x06222c
+const RDB_FILL_BRIGHT = 0x23c9a6
+
 /** Kind tints stay in the legend's family: RAM is cyan, disk is amber. */
 const KIND_COLOR: Record<KeyKind, number> = {
     string: PALETTE.cyan,
@@ -221,6 +236,8 @@ export class RedisInstance {
     private rdbTail = 1
     /** which keys landed in each block — the encoder is sequential, not aligned */
     private rdbBlocks: number[][] = []
+    /** the outline around the base file, regrown as the file's length changes */
+    private rdbEdge!: OutlineBox
     /** per-instance base tint, so the RDB keeps its own shade across relayouts */
     private rdbBase: number[] = []
     /** true while a save or a load is walking the file */
@@ -254,7 +271,7 @@ export class RedisInstance {
      * the thing it is responsible for, so it patrols an ellipse around that run —
      * the same deal the rewrite agent has with the log.
      */
-    private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 1.55, RDB_CENTRE.z)
+    private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 1.45, RDB_CENTRE.z)
     private readonly rdbIdle = new THREE.Vector3()
     /** where its work currently aims it */
     private readonly rdbAim = new THREE.Vector3().copy(this.rdbHome)
@@ -403,17 +420,16 @@ export class RedisInstance {
                 field.setMatrixAt(i, this.tmpObj.matrix)
 
                 // The RDB blocks get their colour from layoutRdb() once the keys
-                // are known — the file's length is a function of the data.
-                const hex = onAof
-                    ? mixHex(0x8a5c10, PALETTE.amber, 0.72)
-                    : 0x000000
+                // are known — the file's length is a function of the data. A
+                // block that is in the file is a FULL block: 4 kB is the whole
+                // unit here, so it sits at the bright end of the ramp. Small
+                // shade variation only, because the records in a block are not
+                // all the same size.
+                const hex = onAof ? mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1) : 0x000000
                 this.diskBase[i] = hex
                 if (onAof) field.setColorAt(i, this.tmpColor.setHex(hex))
                 if (onRdb) {
-                    // small shade variation: the encoder's records are not all the
-                    // same size, so neighbouring blocks do not look stamped out.
-                    // The block SIZE is uniform — a filesystem only has 4 kB blocks.
-                    this.rdbBase[i] = mixHex(0x0e3342, PALETTE.teal, 0.62 * rand(0.94, 1.04))
+                    this.rdbBase[i] = mixHex(RDB_FILL_DARK, RDB_FILL_BRIGHT, rand(0.94, 1.04))
                 }
                 if (onAof) this.aofOrder.push(i)
                 i++
@@ -471,6 +487,38 @@ export class RedisInstance {
                 meta: 'appendonlydir · byte stream on a filesystem · fsync per appendfsync',
             },
             aofEdge,
+        )
+
+        // The base file gets the same treatment as the log: an extent outline, so
+        // the file is a thing you can point at and read about rather than a patch
+        // of blocks you have to guess the meaning of. Unlike the log, this file's
+        // length IS a property of the data — it is rewritten from scratch by every
+        // save — so the cage is regrown to hug whatever the file currently covers
+        // (see fitRdbEdge).
+        const rdbW = (RDB.c1 - RDB.c0 + 1) * PITCH
+        const rdbD = (RDB.r1 - RDB.r0 + 1) * PITCH
+        const rdbEdge = new OutlineBox(rdbW, 0.5, rdbD, PALETTE.teal, 0.7).centre(
+            RDB_CENTRE.x,
+            PAGE_Y + 0.1,
+            RDB_CENTRE.z,
+        )
+        this.group.add(rdbEdge)
+        this.rdbEdge = rdbEdge
+
+        const rdbPick = new THREE.Mesh(
+            new THREE.BoxGeometry(rdbW, 1.4, rdbD),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        rdbPick.position.set(RDB_CENTRE.x, PAGE_Y + 0.5, RDB_CENTRE.z)
+        this.group.add(rdbPick)
+        this.register(
+            rdbPick,
+            {
+                title: 'RDB — the base file, on disk',
+                body: 'This is a dump, not a log: the keyspace is walked once and every key and value is written out as it stands, so loading it rebuilds the data structures rather than replaying commands. That is why it loads fast, why it only knows about the instant it was taken, and why everything after it comes from the AOF. It is written by the forked child (bgsave) and read back at start-up before the log is replayed on top. Its blocks are the same 4 kB the filesystem always hands out, packed tight with no gaps — the file is written fresh every time, so unlike a table file it has no holes to defragment. What varies is its length: that is the size of your data. Writes cost memory, not time: the child needs a copy-on-write view of the whole dataset, so a big instance briefly needs close to twice its size to save.',
+                meta: 'dump.rdb · state, not history · written by bgsave, read on start',
+            },
+            rdbEdge,
         )
 
         // slot lattice across the free space — the same "room to grow" texture the
@@ -536,7 +584,7 @@ export class RedisInstance {
             platePick,
             {
                 title: 'Disk — persistence only',
-                body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back.',
+                body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 kB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
                 meta: 'appendonlydir · base rdb + incr aof · the rest is unused',
             },
         )
@@ -1232,7 +1280,7 @@ export class RedisInstance {
      * sliver behind, which reads as a block that is there but switched off.
      */
     private layoutAof() {
-        const hex = mixHex(0x8a5c10, PALETTE.amber, 0.72)
+        const hex = mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1)
         this.aofOrder.forEach((i, k) => {
             const on = k <= this.aofHead
             this.disk.getMatrixAt(i, this.tmpObj.matrix)
@@ -1418,11 +1466,51 @@ export class RedisInstance {
             this.tmpObj.scale.set(on ? 1 : 0.001, on ? fill : 0.001, on ? 1 : 0.001)
             this.tmpObj.updateMatrix()
             this.disk.setMatrixAt(id, this.tmpObj.matrix)
-            const base = on ? (this.rdbBase[id] ?? mixHex(0x0e3342, PALETTE.teal, 0.62)) : 0x000000
+            const base = on
+                ? seq === this.rdbLen - 1
+                    ? // the tail block is the only one that is not full, and it is
+                    // the only one that should look it
+                    mixHex(RDB_FILL_DARK, this.rdbBase[id] ?? RDB_FILL_BRIGHT, fill)
+                    : (this.rdbBase[id] ?? RDB_FILL_BRIGHT)
+                : 0x000000
             this.disk.setColorAt(id, this.tmpColor.setHex(base))
         })
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+        this.fitRdbEdge()
+    }
+
+    /**
+     * Regrow the cage around the base file to exactly the blocks it covers now.
+     *
+     * The file is written in whole rows of ten (see rdbOrder), so the used blocks
+     * are the first `len` of that order: whole rows plus a partial last one. The
+     * cage is fitted to the blocks that are actually in the file and grows and
+     * shrinks with it — a cage over the whole region would claim space the file
+     * does not occupy, which is the one thing a dump's length is not free to do.
+     */
+    private fitRdbEdge() {
+        const cols = RDB.c1 - RDB.c0 + 1
+        const full = Math.floor(this.rdbLen / cols)
+        const rem = this.rdbLen % cols
+        const rows = full + (rem > 0 ? 1 : 0)
+        if (rows === 0) {
+            this.rdbEdge.visible = false
+            return
+        }
+        this.rdbEdge.visible = true
+        // the first row of the file always runs left to right, so a file shorter
+        // than one row covers a prefix of that row
+        let x0 = RDB.c0
+        let x1 = RDB.c1
+        if (full === 0) x1 = RDB.c0 + rem - 1
+        const bx0 = xAt(x0) - PITCH / 2
+        const bx1 = xAt(x1) + PITCH / 2
+        const bz0 = zAt(RDB.r0) - PITCH / 2
+        const bz1 = zAt(RDB.r0 + rows - 1) + PITCH / 2
+        this.rdbEdge
+            .resize(bx1 - bx0, 0.5, bz1 - bz0)
+            .centre((bx0 + bx1) / 2, PAGE_Y + 0.1, (bz0 + bz1) / 2)
     }
 
     /** How many blocks the base file occupies right now — the panel shows it. */
@@ -1780,9 +1868,9 @@ export class RedisInstance {
             // hand-off between patrolling and working is one continuous flight
             const a = time * 0.34
             this.rdbIdle.set(
-                this.rdbHome.x + Math.cos(a) * 3.9,
-                this.rdbHome.y + Math.sin(time * 0.75) * 0.22,
-                this.rdbHome.z + Math.sin(a) * 2.7,
+                this.rdbHome.x + Math.cos(a) * 3.2,
+                this.rdbHome.y + Math.sin(time * 0.75) * 0.2,
+                this.rdbHome.z + Math.sin(a) * 1.9,
             )
             this.bgsaveDrone.position.lerp(this.rdbIdle, Math.min(1, dt * 1.2))
             this.bgsaveDrone.rotation.y += dt * 0.6

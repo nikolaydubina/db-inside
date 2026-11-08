@@ -398,9 +398,10 @@ export class RedisSim {
     save() {
         if (this.saving || this.blocked || this.loading) return
         this.blocked = true
-        this.note = 'save · the command thread is writing dump.rdb: nothing is served'
+        this.lockedNote = 'save · the command thread is writing dump.rdb: nothing is served'
         void this.redis.runRdbSave().then(() => {
             this.blocked = false
+            this.lockedNote = null
             this.note = `save · done, ${this.rdbKb()} kB; the queue drains again`
         })
     }

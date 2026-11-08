@@ -173,9 +173,11 @@ export class OutlineBox extends THREE.Group {
   private glowMat: LineMaterial
   private baseColor: number
   private baseOpacity: number
-  readonly w: number
-  readonly h: number
-  readonly d: number
+  private glow!: LineSegments2
+  private picker!: THREE.LineSegments
+  w: number
+  h: number
+  d: number
 
   constructor(w: number, h: number, d: number, color: number, opacity = 0.7) {
     super()
@@ -206,6 +208,7 @@ export class OutlineBox extends THREE.Group {
     )
     glow.frustumCulled = false
     glow.scale.set(w, h, d)
+    this.glow = glow
     this.add(glow)
 
     const pick = new THREE.LineSegments(
@@ -217,7 +220,21 @@ export class OutlineBox extends THREE.Group {
     // threshold by the object's own scale, and a unit-scaled line inside a
     // scaled group would get a pick radius 20x too fat
     pick.scale.set(w, h, d)
+    this.picker = pick
     this.add(pick)
+  }
+
+  /**
+   * Regrow the box in place. Same box, new bounds — used by anything that marks
+   * a file whose length is a property of the data rather than a constant.
+   */
+  resize(w: number, h: number, d: number) {
+    this.w = w
+    this.h = h
+    this.d = d
+    this.glow.scale.set(w, h, d)
+    this.picker.scale.set(w, h, d)
+    return this
   }
 
   /** Place by centre point. */
