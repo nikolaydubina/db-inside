@@ -14,10 +14,13 @@ export interface RedisStats {
     latency: number
     evictions: number
     aofBytes: number
+    rdbBytes: number
     note: string
     connections: number
     busy: boolean
     saving: boolean
+    savingSync: boolean
+    loading: boolean
     rewriting: boolean
 }
 
@@ -115,13 +118,30 @@ export class RedisSim {
     /** Log size right after the last rewrite — the baseline the growth is measured from. */
     private blocksAtLastRewrite = 0
     saving = false
+    /** SAVE holds the one thread; BGSAVE does not. */
+    blocked = false
+    /** Start-up: the base file, then the log, and no listener until both are in. */
+    loading = false
     rewriting = false
     ambient = true
 
     constructor(
         private redis: RedisInstance,
         private ticker: Ticker,
-    ) { }
+    ) {
+        // A process that has just been started: the files are on the floor, the
+        // memory is empty, the ports are not open. The load is what turns that
+        // into a server, and starting from here rather than from a running
+        // instance is what makes the restart honest.
+        this.blocksAtLastRewrite = this.redis.aofUsed
+        this.bootDataset = this.redis.dataset
+        this.redis.shutPorts()
+        this.redis.wipeMemory()
+        this.note = 'starting · files on disk, nothing in memory, no listener'
+    }
+
+    /** What the instance held before the first load emptied it. */
+    private bootDataset: boolean[] = []
 
     get stats(): RedisStats {
         const recent = this.recent.filter((t) => this.clock - t <= OPS_WINDOW)
@@ -137,15 +157,20 @@ export class RedisSim {
             latency: this.latency,
             evictions: this.redis.evictions,
             aofBytes: this.redis.aofBytes,
-            note: this.note,
+            rdbBytes: this.redis.rdbBytes,
+            note: this.lockedNote ?? this.note,
             connections: this.redis.ports.filter((p) => p.active).length,
             busy: this.redis.ports.some((p) => p.busy),
             saving: this.saving,
+            savingSync: this.blocked,
+            loading: this.loading,
             rewriting: this.rewriting,
         }
     }
 
     private note = 'idle'
+    /** A note that owns the status line while a blocking job runs. */
+    private lockedNote: string | null = null
 
     /* --------------------------------- traffic ------------------------------- */
 
@@ -158,6 +183,8 @@ export class RedisSim {
 
     /** One command: request down, execution, reply back up the same socket. */
     private async runOp() {
+        // nothing is served while the files are being read back
+        if (this.loading) return
         const pod = this.pickPort()
         if (!pod) return
         const cmd = pickCommand()
@@ -217,6 +244,14 @@ export class RedisSim {
         // socket must not silt the scene up with permanent lines
         void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
 
+        // a load that started while this command was in flight takes the thread:
+        // the packet is dropped, because the connection it belongs to is gone
+        if (this.loading) {
+            despawn(this.ticker, packet)
+            this.inFlight--
+            return
+        }
+
         // the whole way down is one thread: queue → loop → the key itself
         const chain = new QueryChain(cage)
         const target = key ? this.redis.keyTop(key) : loop.clone()
@@ -228,6 +263,10 @@ export class RedisSim {
         despawn(this.ticker, packet)
 
         await this.ticker.wait(0.22)
+        // SAVE writes the dump on this very thread, so a command that arrives
+        // meanwhile is parsed, queued — and then waits. It is not a lock: the
+        // queue is simply not being drained by anyone.
+        while (this.blocked) await this.ticker.wait(0.1)
         this.redis.pulseLoop()
         // the thread takes the head of the queue now — everything behind it moves up
         this.redis.queuePop()
@@ -339,23 +378,79 @@ export class RedisSim {
     }
 
     bgsave() {
-        if (this.saving) return
+        if (this.saving || this.blocked || this.loading) return
         this.saving = true
-        this.redis.bgsave()
-        this.note = `bgsave · ${this.redis.liveKeys} keys forked into dump.rdb`
-        void this.ticker.wait(1.6).then(() => {
+        const keys = this.redis.liveKeys
+        this.note = `bgsave · fork, ${keys} keys to dump.rdb — nothing is locked`
+        // the parent keeps serving throughout: the queue is still drained, the
+        // ports still answer. Only the child is busy.
+        void this.redis.runRdbSave().then(() => {
             this.saving = false
+            this.note = `bgsave · dump.rdb written, ${this.rdbKb()} kB in ${this.redis.rdbBlocksUsed} blocks`
         })
+    }
+
+    /**
+     * SAVE, the other half of the pair: the same file, written by the same
+     * thread that executes commands. Everything stops for the duration — this is
+     * the only way a snapshot costs latency, and the reason BGSAVE exists.
+     */
+    save() {
+        if (this.saving || this.blocked || this.loading) return
+        this.blocked = true
+        this.note = 'save · the command thread is writing dump.rdb: nothing is served'
+        void this.redis.runRdbSave().then(() => {
+            this.blocked = false
+            this.note = `save · done, ${this.rdbKb()} kB; the queue drains again`
+        })
+    }
+
+    /**
+     * A restart, with the files kept: everything in memory is gone, and it all has
+     * to come back off the disk — the base first, then the log replayed on top —
+     * before a single connection is accepted.
+     */
+    private async reload(target: boolean[]) {
+        if (this.loading) return
+        this.loading = true
+        const had = target.filter(Boolean).length
+        this.redis.shutPorts()
+        this.lockedNote = `load · reading dump.rdb, then replaying ${this.redis.aofUsed} AOF records — not listening`
+        await this.redis.runLoad(target)
+        this.redis.openPorts(4)
+        this.loading = false
+        this.lockedNote = null
+        this.nextArrival = 0.2
+        this.note = `ready · ${this.redis.liveKeys} keys loaded from disk (${had} were in memory)`
+    }
+
+    /** The first start, from the state the page was built in. */
+    boot() {
+        return this.reload(this.bootDataset)
+    }
+
+    /** A restart on demand, from whatever is in memory right now. */
+    loadFromDisk() {
+        return this.reload(this.redis.dataset)
+    }
+
+    /** The dump's size as the panel should read it. */
+    private rdbKb() {
+        return (this.redis.rdbBytes / 1024).toFixed(1)
     }
 
     /** One command by hand, straight down the socket — the panel's run button. */
     runCommand() {
+        if (this.loading) {
+            this.note = 'load · not listening yet, the connection is refused'
+            return
+        }
         if (this.inFlight >= 6) return
         void this.runOp()
     }
 
     rewriteAof() {
-        if (this.rewriting) return
+        if (this.rewriting || this.loading) return
         this.rewriting = true
         const before = this.redis.aofUsed
         this.note = `bgrewriteaof · child scanning the keyspace (log is ${before} blocks)`
@@ -384,7 +479,7 @@ export class RedisSim {
     update(dt: number) {
         this.clock += dt
 
-        if (this.ambient) {
+        if (this.ambient && !this.loading) {
             this.nextArrival -= dt
             if (this.nextArrival <= 0 && this.inFlight < 5) {
                 this.nextArrival = rand(0.22, 0.62)
@@ -393,7 +488,7 @@ export class RedisSim {
         }
 
         // the expire cycle is a background chore, not a command
-        this.expireCycle()
+        if (!this.loading) this.expireCycle()
 
         // appendfsync everysec: whatever is in aof_buf goes to the file
         this.fsyncTimer -= dt
@@ -402,7 +497,7 @@ export class RedisSim {
             this.redis.flushAofBuffer()
         }
 
-        if (this.ambient) {
+        if (this.ambient && !this.loading) {
             this.saveTimer -= dt
             if (this.saveTimer <= 0) {
                 this.saveTimer = 24

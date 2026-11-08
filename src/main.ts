@@ -387,9 +387,11 @@ const hud = initHud({
     void sim.compact()
   },
   // redis has no statements and no planner: one command, executed by the one
-  // thread, plus the two background jobs it can start
+  // thread, plus the background jobs it can start
   runCommand: () => redisSim.runCommand(),
+  save: () => redisSim.save(),
   bgsave: () => redisSim.bgsave(),
+  load: () => void redisSim.loadFromDisk(),
   rewriteAof: () => redisSim.rewriteAof(),
   setSpeed: (v) => {
     speed = v
@@ -918,6 +920,7 @@ const rd = {
   mem: document.getElementById('rd-mem')!,
   evict: document.getElementById('rd-evict')!,
   aof: document.getElementById('rd-aof')!,
+  rdb: document.getElementById('rd-rdb')!,
   bar: document.getElementById('rd-bar')!,
   note: document.getElementById('rd-note')!,
 }
@@ -938,9 +941,10 @@ function updateRedisCard(s: RedisStats) {
   rd.mem.textContent = `${s.memPct.toFixed(0)}%`
   rd.evict.textContent = String(s.evictions)
   rd.aof.textContent = fmtBytes(s.aofBytes)
+  rd.rdb.textContent = fmtBytes(s.rdbBytes)
   rd.bar.style.width = `${Math.min(100, s.memPct)}%`
   if (rd.note.textContent !== s.note) rd.note.textContent = s.note
-  hud.setRedisBusy(s.saving, s.rewriting)
+  hud.setRedisBusy(s)
 }
 
 /* --------------------------------- ambient -------------------------------- */
@@ -1058,4 +1062,16 @@ function frame() {
 window.addEventListener('resize', () => {
   world.resize()
 })
+
+/* ----------------------------------- boot --------------------------------- */
+
+// Every redis on the planet starts the same way: the process has files and no
+// data, so it reads the base dump, replays the log on top of it, and only then
+// opens its ports. Starting the page in the middle of that is the honest
+// picture of a running server, and it makes "the dataset came off the disk"
+// something you have watched rather than something you were told.
+window.setTimeout(() => {
+  void redisSim.boot()
+}, 300)
+
 requestAnimationFrame(frame)

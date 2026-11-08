@@ -11,8 +11,12 @@ export interface HudHandlers {
   compact(): void
   /** redis: send one command by hand */
   runCommand(): void
-  /** redis: fork a child that writes the RDB */
+  /** redis: SAVE — the dump is written on the one thread, nothing is served */
+  save(): void
+  /** redis: BGSAVE — a forked child writes the dump, nothing is locked */
   bgsave(): void
+  /** redis: start-up, base file then log replay, no listener until done */
+  load(): void
   /** redis: bgrewriteaof */
   rewriteAof(): void
   setSpeed(v: number): void
@@ -114,15 +118,44 @@ export function initHud(handlers: HudHandlers) {
   const rdRewriteRow = makeRow('rewrite child')
   rdProcsEl.append(rdThread, rdSave, rdRewriteRow)
 
-  const syncRedisProcs = (saving: boolean, rewriting: boolean) => {
-    rdSave.querySelector('i')!.classList.toggle('on', saving)
-    rdSave.querySelector('b')!.textContent = saving ? 'writing' : '—'
-    rdRewriteRow.querySelector('i')!.classList.toggle('on', rewriting)
-    rdRewriteRow.querySelector('b')!.textContent = rewriting ? 'rewriting' : '—'
+  const syncRedisProcs = (s: {
+    saving: boolean
+    savingSync: boolean
+    loading: boolean
+    rewriting: boolean
+  }) => {
+    // The point of this list: SAVE and LOAD light up the command thread, BGSAVE
+    // lights up a child and leaves the thread running. That is the whole answer
+    // to "does it lock everything".
+    const own = s.loading ? 'loading' : s.savingSync ? 'writing dump' : 'running'
+    rdThread.querySelector('i')!.classList.toggle('on', true)
+    rdThread.querySelector('b')!.textContent = own
+    rdThread.classList.toggle('busy', s.loading || s.savingSync)
+
+    rdSave.querySelector('i')!.classList.toggle('on', s.saving)
+    rdSave.querySelector('b')!.textContent = s.saving ? 'writing' : '—'
+    rdRewriteRow.querySelector('i')!.classList.toggle('on', s.rewriting)
+    rdRewriteRow.querySelector('b')!.textContent = s.rewriting ? 'rewriting' : '—'
   }
   const btnCommand = $<HTMLButtonElement>('#btn-command')
-  const btnBgsave = $<HTMLButtonElement>('#btn-bgsave')
   const btnRewrite = $<HTMLButtonElement>('#btn-rewrite')
+
+  // the dump chips are actions, not a mode: mark the one in flight, clear it when
+  // it comes back
+  const rdbChips = Array.from(document.querySelectorAll<HTMLButtonElement>('#rdb-ops .regime'))
+  const markRdb = (busy: string | null) => {
+    for (const b of rdbChips) b.setAttribute('aria-pressed', String(b.dataset.rdb === busy))
+  }
+  for (const b of rdbChips) {
+    b.addEventListener('click', () => {
+      markRdb(b.dataset.rdb ?? null)
+      const op = b.dataset.rdb
+      if (op === 'save') handlers.save()
+      else if (op === 'bgsave') handlers.bgsave()
+      else if (op === 'load') handlers.load()
+      window.setTimeout(() => markRdb(null), 1600)
+    })
+  }
 
   const inspector = $<HTMLElement>('#inspector')
   const insTitle = $<HTMLElement>('#ins-title')
@@ -141,7 +174,6 @@ export function initHud(handlers: HudHandlers) {
   btnVacuum.addEventListener('click', () => handlers.vacuum())
   btnCompact.addEventListener('click', () => handlers.compact())
   btnCommand.addEventListener('click', () => handlers.runCommand())
-  btnBgsave.addEventListener('click', () => handlers.bgsave())
   btnRewrite.addEventListener('click', () => handlers.rewriteAof())
   speedIn.addEventListener('input', () => {
     const v = Number(speedIn.value)
@@ -198,8 +230,13 @@ export function initHud(handlers: HudHandlers) {
     get db() {
       return db
     },
-    setRedisBusy(saving: boolean, rewriting: boolean) {
-      syncRedisProcs(saving, rewriting)
+    setRedisBusy(s: {
+      saving: boolean
+      savingSync: boolean
+      loading: boolean
+      rewriting: boolean
+    }) {
+      syncRedisProcs(s)
     },
     setQueryBusy(on: boolean) {
       busy(btnQuery, on)

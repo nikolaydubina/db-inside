@@ -649,6 +649,12 @@ h2::after {
   box-shadow: 0 0 9px var(--teal);
 }
 
+/* a thread that is inside a blocking job: the one thing that stops the server */
+.procs li.busy b {
+  color: #c9a45a;
+  letter-spacing: 0.12em;
+}
+
 .procs li b {
   margin-left: auto;
   font-weight: 400;

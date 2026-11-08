@@ -67,6 +67,14 @@ const AOF_C0 = 22
 const AOF_LEN = 22
 const RDB = { c0: 4, c1: 13, r0: 2, r1: 8 }
 
+/**
+ * How long one block takes to read or write during a load or a save, in
+ * simulated seconds. A real 4 kB block is microseconds; this is the scale at
+ * which a human can watch a file being written without it lying about the order.
+ */
+const RDB_BLOCK_TIME = 0.035
+const AOF_RECORD_TIME = 0.055
+
 /** The keyspace: a bucket array, and the entries it points at, both floating. */
 const DICT = { cols: 32, rows: 7, y: 3.9, cz: -2.2 }
 const KEYS = { cols: 26, rows: 7, y: 7.0, cz: -2.2 }
@@ -104,6 +112,18 @@ const KIND_COLOR: Record<KeyKind, number> = {
     set: PALETTE.magenta,
     zset: PALETTE.ice,
 }
+/**
+ * Bytes a key and its value take in the dump. Strings are small, collections are
+ * not: this is why an RDB block holds a different number of keys every time, and
+ * why the file's length tracks the dataset rather than the key count.
+ */
+const VALUE_BYTES: Record<KeyKind, [number, number]> = {
+    string: [48, 700],
+    list: [200, 2600],
+    hash: [180, 3200],
+    set: [140, 2000],
+    zset: [220, 2800],
+}
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
 export interface RedisKey {
@@ -117,6 +137,13 @@ export interface RedisKey {
     ttl: number
     heat: number
     shade: number
+    /**
+     * What this key and its value cost when the RDB encoder writes them, in
+     * bytes. Values are not all the same size, so a block holds a different
+     * number of keys depending on what happens to be next in the walk — that is
+     * the only variation a dense file has.
+     */
+    bytes: number
 }
 
 export interface RedisPort {
@@ -184,6 +211,29 @@ export class RedisInstance {
     /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
     private aofHead = 0
+
+    /** The base file's blocks in the order the encoder writes them. */
+    private rdbOrder: number[] = []
+    /** instance id → position in the file */
+    private rdbIndex = new Map<number, number>()
+    /** blocks the base file currently occupies, and how full the last one is */
+    private rdbLen = 0
+    private rdbTail = 1
+    /** which keys landed in each block — the encoder is sequential, not aligned */
+    private rdbBlocks: number[][] = []
+    /** per-instance base tint, so the RDB keeps its own shade across relayouts */
+    private rdbBase: number[] = []
+    /** true while a save or a load is walking the file */
+    savingRdb = false
+    loading = false
+    /**
+     * What memory holds right now. The files are older than this: the dump is a
+     * past state and the log is the difference, and together they have to
+     * reproduce exactly this — that is what durable means.
+     */
+    get dataset(): boolean[] {
+        return this.keys.map((k) => k.live)
+    }
     /** aof_buf: the cubes hover above wherever the end of the file is. */
     private aofBufGroup!: THREE.Group
     private aofBufCells: THREE.Mesh[] = []
@@ -199,6 +249,15 @@ export class RedisInstance {
     private loopRing!: THREE.Mesh
     private bgsaveDrone!: THREE.Group
     private rewriteDrone!: THREE.Group
+    /**
+     * The saving agent belongs to the base file, not to the keyspace: the dump is
+     * the thing it is responsible for, so it patrols an ellipse around that run —
+     * the same deal the rewrite agent has with the log.
+     */
+    private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 2.6, RDB_CENTRE.z)
+    private readonly rdbIdle = new THREE.Vector3()
+    /** where its work currently aims it */
+    private readonly rdbAim = new THREE.Vector3().copy(this.rdbHome)
     /**
      * Where the rewrite agent patrols while idle: the middle of the log it is
      * responsible for, not some abstract home point. Its idle orbit and its work
@@ -236,6 +295,7 @@ export class RedisInstance {
     evictions = 0
     saves = 0
     aofBytes = 0
+    rdbBytes = 0
     rewrites = 0
 
     constructor(private ticker: Ticker) {
@@ -246,6 +306,10 @@ export class RedisInstance {
         this.buildPorts()
         this.buildPipeline()
         this.buildAgents()
+
+        // the base file is whatever the keyspace encodes to: its length comes
+        // from the data, not from a constant
+        this.writeRdbNow()
 
         this.openPort()
         this.openPort()
@@ -323,10 +387,9 @@ export class RedisInstance {
                 const home = new THREE.Vector3(xAt(c), PAGE_Y, zAt(r))
                 const onAof = r === AOF_ROW && c >= AOF_C0 && c < AOF_C0 + AOF_LEN
                 const onRdb = r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1
-                const used = onAof || onRdb
 
                 this.tmpObj.position.copy(home)
-                if (used) {
+                if (onAof) {
                     // One shape for every block in this scene, the same one the page
                     // field uses. A file is written in whole filesystem blocks, so
                     // nothing here is a short plate or a half-height block.
@@ -339,13 +402,19 @@ export class RedisInstance {
                 this.tmpObj.updateMatrix()
                 field.setMatrixAt(i, this.tmpObj.matrix)
 
-                const hex = onRdb
-                    ? mixHex(0x123a4a, PALETTE.teal, 0.62)
-                    : onAof
-                        ? mixHex(0x8a5c10, PALETTE.amber, 0.72)
-                        : 0x000000
+                // The RDB blocks get their colour from layoutRdb() once the keys
+                // are known — the file's length is a function of the data.
+                const hex = onAof
+                    ? mixHex(0x8a5c10, PALETTE.amber, 0.72)
+                    : 0x000000
                 this.diskBase[i] = hex
-                if (used) field.setColorAt(i, this.tmpColor.setHex(hex))
+                if (onAof) field.setColorAt(i, this.tmpColor.setHex(hex))
+                if (onRdb) {
+                    // small shade variation: the encoder's records are not all the
+                    // same size, so neighbouring blocks do not look stamped out.
+                    // The block SIZE is uniform — a filesystem only has 4 kB blocks.
+                    this.rdbBase[i] = mixHex(0x0e3342, PALETTE.teal, 0.62 * rand(0.94, 1.04))
+                }
                 if (onAof) this.aofOrder.push(i)
                 i++
             }
@@ -356,6 +425,20 @@ export class RedisInstance {
         // these blocks, and the rest are not drawn at all (see layoutAof).
         this.aofHead = Math.round(AOF_LEN * 0.6)
         this.layoutAof()
+
+        // The base file is one sequential write, so its blocks are laid out in the
+        // order the encoder emits them — left to right, then right to left. A file
+        // is a stream: it does not jump back to the left edge at every row.
+        this.rdbOrder = []
+        for (let r = RDB.r0; r <= RDB.r1; r++) {
+            const row: number[] = []
+            for (let c = RDB.c0; c <= RDB.c1; c++) row.push(r * COLS + c)
+            if ((r - RDB.r0) % 2 === 1) row.reverse()
+            for (const id of row) {
+                this.rdbIndex.set(id, this.rdbOrder.length)
+                this.rdbOrder.push(id)
+            }
+        }
 
         // The AOF run gets an extent outline, exactly the way the WAL run does
         // next door: a cage marks where the file LIVES on the floor, not what
@@ -530,6 +613,7 @@ export class RedisInstance {
                 const live = Math.random() < 0.74
                 const kinds: KeyKind[] = ['string', 'string', 'string', 'hash', 'list', 'set', 'zset']
                 const kind = kinds[randInt(0, kinds.length - 1)]
+                const size = VALUE_BYTES[kind]
                 const key: RedisKey = {
                     i,
                     row: r,
@@ -540,6 +624,7 @@ export class RedisInstance {
                     ttl: Math.random() < 0.18 ? rand(4, 30) : 0,
                     heat: 0,
                     shade: rand(0.86, 1.1),
+                    bytes: randInt(size[0], size[1]),
                 }
                 this.tmpObj.position.copy(home)
                 this.tmpObj.scale.setScalar(live ? 1 : 0.001)
@@ -782,12 +867,12 @@ export class RedisInstance {
 
     private buildAgents() {
         this.bgsaveDrone = this.makeAgent(
-            new THREE.Vector3(7.6, 8.3, KEYS.cz + 0.2),
+            this.rdbHome.clone(),
             PALETTE.teal,
             'BGSAVE',
             {
-                title: 'BGSAVE — a forked copy writes the RDB',
-                body: 'A snapshot is taken by forking: the child gets a copy-on-write view of the whole keyspace and writes it to a new RDB file while the parent keeps serving. Nothing is locked. The cost is memory — pages the parent modifies while the child is writing are duplicated — and that is why a big instance can need much more than its dataset size to save.',
+                title: 'BGSAVE — a forked child writes the dump',
+                body: 'The snapshot is taken by forking: the child gets a copy-on-write view of the whole keyspace and writes it to a new RDB file while the parent keeps serving. Nothing is locked, not even for an instant, and the queue keeps draining — watch it while this runs. The cost is memory, not time: every page the parent modifies before the child has written it gets duplicated, so a big instance can briefly need close to twice its dataset. SAVE is the same work without the fork, and that one does stop the server.',
                 meta: 'fork() · copy-on-write · no locking, extra memory',
             },
         )
@@ -870,7 +955,8 @@ export class RedisInstance {
         const r = Math.floor(i / COLS)
         const c = i % COLS
         const onAof = r === AOF_ROW && c >= AOF_C0 && c < AOF_C0 + AOF_LEN
-        const onRdb = r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1
+        const rdbSeq = this.rdbIndex.get(i)
+        const onRdb = rdbSeq !== undefined && rdbSeq < this.rdbLen
         if (!onAof && !onRdb) return null
 
         const home = new THREE.Vector3(xAt(c), PAGE_Y, zAt(r))
@@ -885,8 +971,8 @@ export class RedisInstance {
                 meta: 'appendonly.aof · replayed in order on start',
             }
             : {
-                title: 'RDB — one dense copy of the keyspace',
-                body: 'A binary snapshot: the whole dataset, compacted into one file. Fast to load, much smaller than the AOF, but it only knows about the moment it was taken — everything after it comes from the incremental AOF. These blocks are packed, because unlike the AOF this file is a state, not a history.',
+                title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
+                body: 'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' + `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` + 'The block size never varies, only how much of the file is used.',
                 meta: 'dump.rdb · state, not history · loaded on start',
             }
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
@@ -938,6 +1024,24 @@ export class RedisInstance {
     pulsePort(pod: RedisPort) {
         pod.pulse = 1
         pod.busy = true
+    }
+
+    /**
+     * No listener at all. A process that has not finished loading is not
+     * accepting connections, and that is the whole visible difference between a
+     * start (nothing runs until the files are in) and a save (nothing stops).
+     */
+    shutPorts() {
+        for (const pod of this.ports) {
+            pod.active = false
+            pod.busy = false
+            pod.pulse = 0
+            pod.group.visible = false
+        }
+    }
+
+    openPorts(n: number) {
+        for (let i = 0; i < n; i++) this.openPort()
     }
 
     portTop(pod: RedisPort): THREE.Vector3 {
@@ -1178,10 +1282,10 @@ export class RedisInstance {
     }
 
     /** Expanding ring over one block: "this is the block the record went into". */
-    private markBlockTop(block: THREE.Vector3) {
+    private markBlockTop(block: THREE.Vector3, hex = PALETTE.amber) {
         const ring = new THREE.Mesh(this.blockMarkGeo, this.markMat.clone())
         const mat = ring.material as THREE.MeshBasicMaterial
-        mat.color.setHex(PALETTE.amber)
+        mat.color.setHex(hex)
         ring.rotation.x = -Math.PI / 2
         ring.position.set(block.x, PAGE_Y + BLOCK.h / 2 + 0.02, block.z)
         ring.scale.setScalar(0.3)
@@ -1249,6 +1353,244 @@ export class RedisInstance {
 
     rdbCentre(): THREE.Vector3 {
         return RDB_CENTRE.clone()
+    }
+
+    /* ------------------------------ base file (RDB) --------------------------- */
+
+    /**
+     * The encoder is one sequential pass over the keyspace: each record is
+     * written directly after the last, with no padding and no alignment. So every
+     * 4 kB block but the last is completely full, and which keys land in a block
+     * depends on the size of the values in front of them.
+     *
+     * This is the whole answer to "different block sizes or uniform": the blocks
+     * are uniform — a filesystem only stores 4 kB — the file is densely packed
+     * (it is written fresh each time, so there is nothing to defragment, unlike a
+     * database file with free space inside it), and what varies is the file's
+     * LENGTH, because it tracks the data and not the key count.
+     */
+    private packRdb(live: boolean[]): { blocks: number[][]; tail: number } {
+        const blocks: number[][] = []
+        let cur: number[] = []
+        let used = 0
+        this.keys.forEach((key) => {
+            if (!live[key.i]) return
+            if (used + key.bytes > BLOCK_BYTES && cur.length > 0) {
+                blocks.push(cur)
+                cur = []
+                used = 0
+            }
+            cur.push(key.i)
+            used += key.bytes
+        })
+        if (cur.length > 0) blocks.push(cur)
+        return { blocks, tail: used / BLOCK_BYTES }
+    }
+
+    /** Write the base file from the current dataset, with no animation (boot). */
+    private writeRdbNow() {
+        const live = this.keys.map((k) => k.live)
+        const { blocks, tail } = this.packRdb(live)
+        this.rdbBlocks = blocks.slice(0, this.rdbOrder.length)
+        this.rdbLen = this.rdbBlocks.length
+        this.rdbTail = tail
+        this.rdbBytes = this.keys.reduce((n, k) => n + (k.live ? k.bytes : 0), 0)
+        this.layoutRdb()
+    }
+
+    /**
+     * Only the blocks the file has reached are drawn, and the last one is drawn
+     * part-full: that is the one place a block is not the whole 4 kB. A block
+     * past the end of the file does not exist, so it is collapsed on all three
+     * axes — the same rule as the log.
+     */
+    private layoutRdb() {
+        this.rdbOrder.forEach((id, seq) => {
+            const on = seq < this.rdbLen
+            const fill = on && seq === this.rdbLen - 1 ? Math.max(0.12, this.rdbTail) : 1
+            const row = Math.floor(id / COLS)
+            const col = id % COLS
+            this.tmpObj.position.set(
+                xAt(col),
+                FLOOR_Y + BLOCK_LIFT + (BLOCK.h * fill) / 2,
+                zAt(row),
+            )
+            this.tmpObj.scale.set(on ? 1 : 0.001, on ? fill : 0.001, on ? 1 : 0.001)
+            this.tmpObj.updateMatrix()
+            this.disk.setMatrixAt(id, this.tmpObj.matrix)
+            const base = on ? (this.rdbBase[id] ?? mixHex(0x0e3342, PALETTE.teal, 0.62)) : 0x000000
+            this.disk.setColorAt(id, this.tmpColor.setHex(base))
+        })
+        this.disk.instanceMatrix.needsUpdate = true
+        if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
+    }
+
+    /** How many blocks the base file occupies right now — the panel shows it. */
+    get rdbBlocksUsed() {
+        return this.rdbLen
+    }
+
+    /** Where a block of the base file sits, by its position in the file. */
+    private rdbBlockPos(seq: number): THREE.Vector3 {
+        const id = this.rdbOrder[Math.max(0, Math.min(this.rdbOrder.length - 1, seq))]
+        const row = Math.floor(id / COLS)
+        const col = id % COLS
+        return new THREE.Vector3(xAt(col), PAGE_Y, zAt(row))
+    }
+
+    /**
+     * SAVE and BGSAVE, in the shape they actually have:
+     *
+     *   1. the keyspace is walked and encoded, in one pass
+     *   2. a new file is written from its first block, replacing the old one
+     *
+     * BGSAVE does this in a forked child: the parent keeps serving the whole
+     * time and nothing is locked. What it costs is memory — every page the parent
+     * modifies while the child writes has to be copied. SAVE does the same work
+     * on the only thread there is, so nothing is served until it finishes. The
+     * shape on screen is identical; what differs is whether the loop is still
+     * draining the queue, and the panel is where that shows.
+     */
+    async runRdbSave(): Promise<void> {
+        if (this.savingRdb) return
+        this.savingRdb = true
+        // the snapshot is the keyspace at fork time, not at completion
+        const base = this.keys.map((k) => k.live)
+        const { blocks, tail } = this.packRdb(base)
+        this.pulseAgent(this.bgsaveDrone)
+
+        // 1. read the keyspace
+        this.rdbAim.set(keyX(0), KEYS.y + 0.8, KEYS.cz)
+        await this.ticker.wait(0.28)
+        await this.ticker.add(1.0, (k) => {
+            const col = Math.min(KEYS.cols - 1, Math.floor(k * KEYS.cols))
+            for (const key of this.keys) {
+                if (base[key.i] && Math.abs(key.col - col) <= 1) {
+                    key.heat = Math.max(key.heat, 0.85)
+                }
+            }
+            this.rdbAim.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
+        })
+
+        // 2. write the new file: it starts empty and fills block by block
+        const n = Math.min(blocks.length, this.rdbOrder.length)
+        this.rdbBlocks = blocks.slice(0, n)
+        this.rdbLen = 0
+        this.rdbTail = 1
+        this.layoutRdb()
+        this.rdbAim.copy(this.rdbBlockPos(0))
+        await this.ticker.wait(0.3)
+
+        let shown = 0
+        await this.ticker.add(Math.max(0.5, n * RDB_BLOCK_TIME), (k) => {
+            const upto = Math.max(1, Math.min(n, Math.ceil(k * n)))
+            this.rdbLen = upto
+            this.rdbTail = upto === n ? tail : 1
+            this.layoutRdb()
+            for (let b = shown; b < upto; b++) this.markBlockTop(this.rdbBlockPos(b), PALETTE.teal)
+            shown = Math.max(shown, upto)
+            this.rdbAim.copy(this.rdbBlockPos(upto - 1))
+        })
+
+        this.rdbBytes = this.keys.reduce((sum, k) => sum + (base[k.i] ? k.bytes : 0), 0)
+        this.saves++
+        this.pulseAgent(this.bgsaveDrone)
+        this.savingRdb = false
+    }
+
+    /**
+     * Startup, in the order redis does it:
+     *
+     *   1. the base dump is read into memory, one sequential pass over the file
+     *   2. the AOF is replayed after it, record by record, re-executing each one
+     *   3. only then does it listen
+     *
+     * All of it runs on the thread that would otherwise serve commands, so no
+     * connection is accepted until the last record is in. This is the one
+     * operation here that really does block everything — a save blocks nothing.
+     */
+    async runLoad(target: boolean[]): Promise<void> {
+        if (this.loading) return
+        this.loading = true
+        // the process starts with nothing in memory; the files are the only copy
+        this.wipeMemory()
+        this.pulseAgent(this.bgsaveDrone)
+
+        // 1. the base file, block by block: each block brings back exactly the
+        //    keys the encoder put in it
+        const n = this.rdbLen
+        let shown = 0
+        if (n > 0) {
+            await this.ticker.add(Math.max(0.4, n * RDB_BLOCK_TIME), (k) => {
+                const upto = Math.max(1, Math.min(n, Math.ceil(k * n)))
+                for (let b = shown; b < upto; b++) {
+                    this.markBlockTop(this.rdbBlockPos(b), PALETTE.teal)
+                    // a block comes back whole — but only the keys that were still
+                    // in the dataset when the process stopped. The rest were
+                    // deleted later in the log and are never replayed.
+                    for (const i of this.rdbBlocks[b] ?? []) if (target[i]) this.reviveKey(i)
+                }
+                shown = Math.max(shown, upto)
+            })
+        }
+
+        // 2. the log after it: every record re-executed in order, which is why a
+        //    long log is slow to start and why the records must be deterministic
+        const m = this.aofUsed
+        // the keys the log has that the dump did not: the writes since the save
+        const tail: number[] = []
+        target.forEach((on, i) => {
+            if (on && !this.keys[i].live) tail.push(i)
+        })
+        let replayed = 0
+        let restored = 0
+        if (m > 0) {
+            await this.ticker.add(Math.max(0.35, m * AOF_RECORD_TIME), (k) => {
+                const upto = Math.max(1, Math.min(m, Math.ceil(k * m)))
+                for (let r = replayed; r < upto; r++) {
+                    this.markBlockTop(
+                        new THREE.Vector3(xAt(AOF_C0 + r), PAGE_Y, zAt(AOF_ROW)),
+                        PALETTE.amber,
+                    )
+                    if (restored < tail.length) this.reviveKey(tail[restored++])
+                }
+                replayed = Math.max(replayed, upto)
+            })
+        }
+        while (restored < tail.length) this.reviveKey(tail[restored++])
+
+        this.loading = false
+    }
+
+    /** Nothing is in memory yet: a process that has not loaded has no data. */
+    wipeMemory() {
+        this.hideAllKeys()
+    }
+
+    private hideAllKeys() {
+        for (const key of this.keys) {
+            if (!key.live) continue
+            key.live = false
+            key.heat = 0
+            this.tmpObj.position.copy(key.home)
+            this.tmpObj.scale.setScalar(0.001)
+            this.tmpObj.updateMatrix()
+            this.keysMesh.setMatrixAt(key.i, this.tmpObj.matrix)
+        }
+        this.keysMesh.instanceMatrix.needsUpdate = true
+    }
+
+    /** One key comes back from the files — no flash, it was never "written". */
+    private reviveKey(i: number) {
+        const key = this.keys[i]
+        if (!key || key.live) return
+        key.live = true
+        key.heat = 0.9
+        this.tmpObj.position.copy(key.home)
+        this.tmpObj.scale.setScalar(1)
+        this.tmpObj.updateMatrix()
+        this.keysMesh.setMatrixAt(i, this.tmpObj.matrix)
+        this.keysMesh.instanceMatrix.needsUpdate = true
     }
 
     /**
@@ -1333,21 +1675,6 @@ export class RedisInstance {
         void this.ticker.add(0.6, (k) => {
             const f = 1 + 0.35 * Math.sin(k * Math.PI)
             g.scale.setScalar(s * f)
-        })
-    }
-
-    bgsave(): void {
-        this.saves++
-        this.pulseAgent(this.bgsaveDrone)
-        // the child walks the keyspace and writes it as one dense blob
-        this.keys.forEach((key) => {
-            if (!key.live) return
-            key.heat = 1
-        })
-        const mat = this.disk.material as THREE.MeshStandardMaterial
-        mat.emissiveIntensity = 1.2
-        void this.ticker.add(1.4, (k) => {
-            mat.emissiveIntensity = 1.2 - 1.06 * k
         })
     }
 
@@ -1438,9 +1765,28 @@ export class RedisInstance {
             REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)
         }
 
-        // bgsave keeps its own small bob: it is a fork of the whole process, and
-        // it holds one position while the child walks the keyspace
-        this.bgsaveDrone.position.y = 8.3 + Math.sin(time * 0.9) * 0.12
+        // bgsave orbits the base file it is responsible for when it has nothing
+        // to do; while it is working it flies to the keyspace and then along the
+        // file it is writing, at a bounded speed so the walk stays followable
+        if (this.savingRdb) {
+            this.rewriteStep.copy(this.rdbAim).sub(this.bgsaveDrone.position)
+            const dist = this.rewriteStep.length()
+            if (dist > 1e-4) {
+                const step = Math.min(dist, AGENT_SPEED * dt)
+                this.bgsaveDrone.position.addScaledVector(this.rewriteStep.multiplyScalar(1 / dist), step)
+            }
+        } else {
+            // same slow ellipse as the rewrite agent, and the same lerp, so the
+            // hand-off between patrolling and working is one continuous flight
+            const a = time * 0.34
+            this.rdbIdle.set(
+                this.rdbHome.x + Math.cos(a) * 3.4,
+                this.rdbHome.y + Math.sin(time * 0.75) * 0.34,
+                this.rdbHome.z + Math.sin(a) * 2.8,
+            )
+            this.bgsaveDrone.position.lerp(this.rdbIdle, Math.min(1, dt * 1.2))
+            this.bgsaveDrone.rotation.y += dt * 0.6
+        }
 
         // the agent patrols the log when it has nothing to do, exactly the way the
         // autovacuum drone patrols the disk: a slow ellipse, fed through a lerp so

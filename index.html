@@ -123,12 +123,18 @@
             <span class="glyph">↵</span> send command
             <kbd>space</kbd>
           </button>
-          <button id="btn-bgsave" class="btn">
-            <span class="glyph">⇩</span> bgsave
-          </button>
           <button id="btn-rewrite" class="btn">
             <span class="glyph">✳</span> aof rewrite
           </button>
+        </div>
+        <!-- the three things that touch the base file: two writes and a read -->
+        <div class="regimes">
+          <span class="regime-label">dump</span>
+          <div class="regime-opts" id="rdb-ops">
+            <button class="regime" data-rdb="save">save</button>
+            <button class="regime" data-rdb="bgsave">bgsave</button>
+            <button class="regime" data-rdb="load">load</button>
+          </div>
         </div>
         <dl class="stats">
           <div>
@@ -158,6 +164,10 @@
           <div>
             <dt>aof bytes</dt>
             <dd id="rd-aof">0</dd>
+          </div>
+          <div>
+            <dt>rdb bytes</dt>
+            <dd id="rd-rdb">0</dd>
           </div>
         </dl>
         <div class="bar"><i id="rd-bar"></i></div>
