@@ -254,7 +254,7 @@ export class RedisInstance {
      * the thing it is responsible for, so it patrols an ellipse around that run —
      * the same deal the rewrite agent has with the log.
      */
-    private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 2.6, RDB_CENTRE.z)
+    private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 1.55, RDB_CENTRE.z)
     private readonly rdbIdle = new THREE.Vector3()
     /** where its work currently aims it */
     private readonly rdbAim = new THREE.Vector3().copy(this.rdbHome)
@@ -1780,9 +1780,9 @@ export class RedisInstance {
             // hand-off between patrolling and working is one continuous flight
             const a = time * 0.34
             this.rdbIdle.set(
-                this.rdbHome.x + Math.cos(a) * 3.4,
-                this.rdbHome.y + Math.sin(time * 0.75) * 0.34,
-                this.rdbHome.z + Math.sin(a) * 2.8,
+                this.rdbHome.x + Math.cos(a) * 3.9,
+                this.rdbHome.y + Math.sin(time * 0.75) * 0.22,
+                this.rdbHome.z + Math.sin(a) * 2.7,
             )
             this.bgsaveDrone.position.lerp(this.rdbIdle, Math.min(1, dt * 1.2))
             this.bgsaveDrone.rotation.y += dt * 0.6
