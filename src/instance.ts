@@ -1,6 +1,8 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
 import {
+  BLOCK_LIFT,
+  FLOOR_Y,
   Ticker,
   OutlineBox,
   breathe,
@@ -228,7 +230,8 @@ export { bufferSlotX, bufferSlotZ }
 /** Leftmost slot of the run — the free space it grows into sits just below. */
 const WAL_C0 = 10
 const WAL_LEN = 12
-const PAGE_Y = 0.25
+/** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
+const PAGE_Y = FLOOR_Y + BLOCK_LIFT + PAGE_GRID.bh / 2
 export const pageX = (col: number) => -11.75 + col * PAGE_GRID.gx
 export const pageZ = (row: number) => -0.75 + row * PAGE_GRID.gz
 const PAGE_W = PAGE_GRID.cols * PAGE_GRID.gx
@@ -237,13 +240,11 @@ const PAGE_D = PAGE_GRID.rows * PAGE_GRID.gz
 const PAGE_Z0 = pageZ(0) - PAGE_GRID.gz / 2
 
 /**
- * The plate under the page blocks: same footprint as the field, zero padding.
- * The plates used to be a hand-picked size slightly larger than the blocks, so
- * its edge sat a random distance off the outermost row and nothing that lined
- * up against "the disk" was actually lining up with the blocks. Derived from
- * the lattice now, so the only gap at the edge is the block spacing.
+ * Where the block field begins and ends. There is no plate under it: the blocks
+ * stand on the global floor grid, so this only describes the footprint —
+ * derived from the lattice, zero padding. Same rectangle as the redis disk.
  */
-export const DISK_PLATE = { w: PAGE_W, d: PAGE_D, cz: PAGE_Z0 + PAGE_D / 2, top: 0.09 }
+export const DISK_FIELD = { w: PAGE_W, d: PAGE_D, cz: PAGE_Z0 + PAGE_D / 2 }
 
 /**
  * World Y of the top face of a resting block, on disk and in RAM. Every arrow
@@ -253,11 +254,10 @@ export const PAGE_TOP_Y = PAGE_Y + PAGE_GRID.bh / 2
 export const BUFFER_TOP_Y = BUFFER_Y + PAGE_GRID.bh / 2
 
 /**
- * Floor text sits *on* the ground: the floor grid is drawn at 0.09 and the
- * plate's top face at 0.08, so this is a hair above both — enough to avoid
- * z-fighting, not enough to read as a floating sign.
+ * Floor text sits ON the ground: the same plane as the floor grid, a few
+ * millimetres above it so the grid lines do not cut through the glyphs.
  */
-const FLOOR_LABEL_Y = 0.1
+const FLOOR_LABEL_Y = FLOOR_Y + 0.003
 
 /** Albedo of a free (unassigned) page block. */
 const BLOCK_FREE = 0x6b4a1c
@@ -502,55 +502,29 @@ export class PostgresInstance {
 
     // There is deliberately no pedestal here: the instance stands on the same
     // global floor grid as everything else, so the disk field is not sitting on
-    // a slab of its own. The plate under the blocks is the only local surface.
+    // a slab of its own.
 
     /* -------------------------------------------------------------------- disk */
-    // The disk is only the field of page blocks. This plate is deliberately
-    // colourless — it just gives the blocks a bed and marks their footprint.
-    const plate = new THREE.Mesh(
-      new RoundedBoxGeometry(DISK_PLATE.w, 0.04, DISK_PLATE.d, 2, 0.02),
-      new THREE.MeshStandardMaterial({
-        color: 0x060a0f,
-        emissive: 0x081820,
-        emissiveIntensity: 0.8,
-        roughness: 0.92,
-        metalness: 0.2,
-      }),
-    )
-    plate.position.set(0, 0.06, DISK_PLATE.cz)
-    plate.receiveShadow = true
-    this.group.add(plate)
-
-    const plateEdge = new OutlineBox(
-      DISK_PLATE.w,
-      0.04,
-      DISK_PLATE.d,
-      0x2f9fbf,
-      0.55,
-    ).centre(0, 0.06, DISK_PLATE.cz)
-    this.group.add(plateEdge)
-
+    // No plate and no slab either: the page blocks stand on the floor grid, in
+    // the same plane as the redis blocks next door, so a rotated camera shows
+    // both lattices lying on the world grid rather than near it.
     const diskFloorPick = new THREE.Mesh(
-      new THREE.BoxGeometry(DISK_PLATE.w, 0.3, DISK_PLATE.d),
+      new THREE.BoxGeometry(DISK_FIELD.w, 0.3, DISK_FIELD.d),
       new THREE.MeshBasicMaterial({ visible: false }),
     )
-    diskFloorPick.position.set(0, 0.12, DISK_PLATE.cz)
+    diskFloorPick.position.set(0, 0.15, DISK_FIELD.cz)
     this.group.add(diskFloorPick)
-    this.register(
-      diskFloorPick,
-      {
-        title: 'Disk — a field of 8 kB pages',
-        body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
-        meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
-      },
-      plateEdge,
-    )
+    this.register(diskFloorPick, {
+      title: 'Disk — a field of 8 kB pages',
+      body: 'Every block is one 8 kB page; brighter and taller means fuller. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
+      meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
+    })
 
-    // On the floor and off the plate, along the short axis, starting at the
-    // front corner past the metrics run. Same treatment as FREE SPACE: it is
-    // painted on the ground, so it foreshortens and goes away with the surface.
-    // Placement is on the ink, not the quad (the quad carries padding), so the
-    // first glyph begins on the corner and the text sits just off the edge.
+    // On the floor, along the short axis, starting at the front corner past the
+    // metrics run. Same treatment as FREE SPACE: painted on the ground, so it
+    // foreshortens and goes away with the surface. Placement is on the ink, not
+    // the quad (the quad carries padding), so the first glyph begins on the
+    // corner and the text sits just off the edge.
     const floorLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
     floorLab.rotation.z = Math.PI / 2
     const ink = floorLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
@@ -559,9 +533,9 @@ export class PostgresInstance {
     // -x, so the ink's left edge sets the start along the field edge and its
     // top edge sits on that edge
     floorLab.position.set(
-      DISK_PLATE.w / 2 + ink.y1,
+      DISK_FIELD.w / 2 + ink.y1,
       FLOOR_LABEL_Y,
-      DISK_PLATE.cz + DISK_PLATE.d / 2 + ink.x0,
+      DISK_FIELD.cz + DISK_FIELD.d / 2 + ink.x0,
     )
     this.group.add(floorLab)
 
@@ -989,10 +963,10 @@ export class PostgresInstance {
     const fz1 = pageZ(rows - 1) + PAGE_GRID.gz / 2
     const slotPts: number[] = []
     for (let x = fx0; x <= fx1 + 0.001; x += PAGE_GRID.gx) {
-      slotPts.push(x, PAGE_Y - 0.12, fz0, x, PAGE_Y - 0.12, fz1)
+      slotPts.push(x, FLOOR_Y, fz0, x, FLOOR_Y, fz1)
     }
     for (let z = fz0; z <= fz1 + 0.001; z += PAGE_GRID.gz) {
-      slotPts.push(fx0, PAGE_Y - 0.12, z, fx1, PAGE_Y - 0.12, z)
+      slotPts.push(fx0, FLOOR_Y, z, fx1, FLOOR_Y, z)
     }
     const slotGeo = new THREE.BufferGeometry()
     slotGeo.setAttribute('position', new THREE.Float32BufferAttribute(slotPts, 3))
@@ -1399,7 +1373,7 @@ export class PostgresInstance {
 
       const edges = new OutlineBox(w, h, d, region.color, 0.85).centre(
         cx,
-        PAGE_Y - 0.12 + h / 2,
+        FLOOR_Y + BLOCK_LIFT + h / 2,
         cz,
       )
       this.group.add(edges)
@@ -2049,7 +2023,7 @@ export class PostgresInstance {
         blending: THREE.AdditiveBlending,
       }),
     )
-    beam.position.set(pageX(0), 1.15, DISK_PLATE.cz)
+    beam.position.set(pageX(0), 1.15, DISK_FIELD.cz)
     // only shown while a scan is actually sweeping the heap
     beam.visible = false
     this.group.add(beam)
@@ -2070,7 +2044,7 @@ export class PostgresInstance {
     ring.rotation.x = Math.PI / 2
     drone.add(ring)
     drone.add(halo(0xc7ff5a, 2.4, 0.4))
-    drone.position.set(-8.5, 2.9, DISK_PLATE.cz)
+    drone.position.set(-8.5, 2.9, DISK_FIELD.cz)
     const lab = label('AUTOVACUUM')
     lab.position.set(0.6, 0.95, 0)
     drone.add(lab)
@@ -2575,7 +2549,7 @@ export class PostgresInstance {
       const target = new THREE.Vector3(
         Math.cos(a) * 8.6,
         2.9 + Math.sin(time * 0.9) * 0.35,
-        DISK_PLATE.cz + Math.sin(a) * 3.1,
+        DISK_FIELD.cz + Math.sin(a) * 3.1,
       )
       this.vacuumDrone.position.lerp(target, Math.min(1, dt * 1.2))
       this.vacuumDrone.rotation.y += dt * 0.8

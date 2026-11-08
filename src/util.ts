@@ -4,6 +4,20 @@ import { LineSegments2 } from 'three/addons/lines/LineSegments2.js'
 import { LineSegmentsGeometry } from 'three/addons/lines/LineSegmentsGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 
+/**
+ * The one floor plane: y = 0. The world grid is drawn exactly here, and so is
+ * every label painted on the ground, so the disk lattice can be checked against
+ * the grid by eye instead of "which of the two is 2 cm higher".
+ */
+export const FLOOR_Y = 0
+
+/**
+ * Blocks rest a hair above the floor rather than on it. A solid sitting in the
+ * same plane as the grid draws the grid line through its base — this is small
+ * enough to be invisible and just large enough to avoid that.
+ */
+export const BLOCK_LIFT = 0.02
+
 export const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
 export const easeInOutCubic = (t: number) =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2

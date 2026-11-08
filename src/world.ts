@@ -5,7 +5,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js'
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js'
 import { CSS2DRenderer } from 'three/addons/renderers/CSS2DRenderer.js'
-import { rand, setLineResolution } from './util'
+import { FLOOR_Y, rand, setLineResolution } from './util'
 
 export interface World {
   renderer: THREE.WebGLRenderer
@@ -223,9 +223,9 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.add(sea)
 
   const grid = new THREE.GridHelper(600, 300, 0x2a7f9e, 0x123a4a)
-  // The grid is the floor everything stands on, so it sits at the island's own
-  // level rather than down on the sea: one continuous floor, no pedestal.
-  grid.position.y = -0.02
+  // The grid IS the floor: y = 0, the same plane the cages stand on and the same
+  // one the disk lattices are drawn in, so alignment is checkable, not implied.
+  grid.position.y = FLOOR_Y
   const gm = grid.material as THREE.Material
   gm.transparent = true
   gm.opacity = 0.42
@@ -233,7 +233,7 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   scene.add(grid)
 
   const grid2 = new THREE.GridHelper(600, 60, 0x3aa2c4, 0x19546a)
-  grid2.position.y = -0.01
+  grid2.position.y = FLOOR_Y + 0.01
   const gm2 = grid2.material as THREE.Material
   gm2.transparent = true
   gm2.opacity = 0.40

@@ -753,6 +753,11 @@ h2::after {
   border-top-color: var(--cyan);
 }
 
+/* folded, the triangle points at the thing it would open */
+.legend.collapsed .chev {
+  transform: rotate(-90deg);
+}
+
 /* A two-column glossary: what you are looking at, then what it means. Columns
    are what keeps the meanings readable — a list of "x = y" lines drifts out of
    alignment as soon as one term is longer than the others. */

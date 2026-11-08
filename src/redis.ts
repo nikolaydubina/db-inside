@@ -3,6 +3,8 @@ import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.j
 import { BACKEND_ORIGIN, BACKEND_SLOTS, PALETTE } from './instance'
 import type { Info } from './instance'
 import {
+    BLOCK_LIFT,
+    FLOOR_Y,
     OutlineBox,
     Ticker,
     breathe,
@@ -31,14 +33,20 @@ export const REDIS_ORIGIN = new THREE.Vector3(-13, 0, -34)
 /** Identical shell to the postgres cage: the two read as the same species. */
 const SHELL = { w: 26.0, h: 9.8, d: 16.0 }
 
-/** Identical plate: same footprint as the block field, same lattice. */
-const PLATE = { w: 24, d: 8.5, cz: 3.25, top: 0.09 }
+/**
+ * The footprint of the block field. There is no platform under it: the blocks
+ * stand on the global floor grid, so this only says where the field begins and
+ * ends. Same rectangle as the postgres disk.
+ */
+const FIELD = { w: 24, d: 8.5, cz: 3.25 }
 
 const PITCH = 0.5
 const BLOCK = { w: 0.46, h: 0.28, d: 0.46 }
-const PAGE_Y = 0.25
+/** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
+const PAGE_Y = FLOOR_Y + BLOCK_LIFT + BLOCK.h / 2
 const BLOCK_TOP = PAGE_Y + BLOCK.h / 2
-const FLOOR_LABEL_Y = 0.1
+/** Labels are painted on the floor: the same plane as the grid, +3 mm for the glyphs. */
+const FLOOR_LABEL_Y = FLOOR_Y + 0.003
 
 const COLS = 48
 const ROWS = 17
@@ -252,26 +260,16 @@ export class RedisInstance {
     }
 
     private buildDisk() {
-        const plate = new THREE.Mesh(
-            new RoundedBoxGeometry(PLATE.w, 0.04, PLATE.d, 2, 0.02),
-            new THREE.MeshStandardMaterial({
-                color: 0x060a0f,
-                emissive: 0x081820,
-                emissiveIntensity: 0.8,
-                roughness: 0.92,
-                metalness: 0.2,
-            }),
+        // No platform and no slab: the blocks are the disk, and the global floor
+        // grid is the only surface under them. Anything raised here would put the
+        // file on a pedestal and leave the DISK label floating above the grid it
+        // is supposed to be painted on.
+        const platePick = new THREE.Mesh(
+            new THREE.BoxGeometry(FIELD.w, 0.3, FIELD.d),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
-        plate.position.set(0, 0.06, PLATE.cz)
-        plate.receiveShadow = true
-        this.group.add(plate)
-
-        const plateEdge = new OutlineBox(PLATE.w, 0.04, PLATE.d, 0x2f9fbf, 0.55).centre(
-            0,
-            0.06,
-            PLATE.cz,
-        )
-        this.group.add(plateEdge)
+        platePick.position.set(0, 0.15, FIELD.cz)
+        this.group.add(platePick)
 
         const mat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
@@ -371,8 +369,8 @@ export class RedisInstance {
         const fx1 = xAt(COLS - 1) + PITCH / 2
         const fz0 = zAt(0) - PITCH / 2
         const fz1 = zAt(ROWS - 1) + PITCH / 2
-        for (let x = fx0; x <= fx1 + 0.001; x += PITCH) slotPts.push(x, PAGE_Y - 0.12, fz0, x, PAGE_Y - 0.12, fz1)
-        for (let z = fz0; z <= fz1 + 0.001; z += PITCH) slotPts.push(fx0, PAGE_Y - 0.12, z, fx1, PAGE_Y - 0.12, z)
+        for (let x = fx0; x <= fx1 + 0.001; x += PITCH) slotPts.push(x, FLOOR_Y, fz0, x, FLOOR_Y, fz1)
+        for (let z = fz0; z <= fz1 + 0.001; z += PITCH) slotPts.push(fx0, FLOOR_Y, z, fx1, FLOOR_Y, z)
         const slotGeo = new THREE.BufferGeometry()
         slotGeo.setAttribute('position', new THREE.Float32BufferAttribute(slotPts, 3))
         this.group.add(
@@ -400,7 +398,7 @@ export class RedisInstance {
         const diskLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
         diskLab.rotation.z = Math.PI / 2
         const ink = diskLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
-        diskLab.position.set(PLATE.w / 2 + ink.y1, FLOOR_LABEL_Y, PLATE.cz + PLATE.d / 2 + ink.x0)
+        diskLab.position.set(FIELD.w / 2 + ink.y1, FLOOR_LABEL_Y, FIELD.cz + FIELD.d / 2 + ink.x0)
         this.group.add(diskLab)
 
         const aofLab = floorLabel('AOF', { height: 0.42, color: 'rgba(255, 190, 110, 0.9)' })
@@ -420,7 +418,7 @@ export class RedisInstance {
         this.group.add(freeLab)
 
         this.register(
-            plateEdge,
+            platePick,
             {
                 title: 'Disk — persistence only',
                 body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back.',
