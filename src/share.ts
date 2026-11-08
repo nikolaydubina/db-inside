@@ -1,56 +1,65 @@
 import * as THREE from 'three'
 
 /**
- * Shareable links.
+ * Addressing. The URL is the thing you share, so it says WHAT you are looking at
+ * and never from where.
  *
- *   /postgresql        the postgres cage, from the shot that view defines
- *   /redis             the same for redis
- *   /redis?cam=…       a camera captured from a real orbit, reproducible
+ *   /postgresql         the postgres cage, from the shot that cage keeps for itself
+ *   /postgresql/wal     the same cage, framed on the WAL run
+ *   /redis/keys         redis, framed on the keyspace
  *
- * The pose is stored RELATIVE TO THE CAGE'S MIN CORNER, not in world space. That
- * is the whole point: a cage can be dragged somewhere else on the floor, and a
- * link made before the move still frames the same part of the same machine when
- * it opens after. World coordinates would break the moment anything moves, and
- * the default layout is only a default.
+ * Every target that has a named shot has a path (see views.ts), and a shot is a
+ * function of the scene — anchored to the structures themselves — so the same
+ * address frames the same thing at any window size, and still frames it after a
+ * cage has been dragged somewhere else on the floor. An angle in the URL would be
+ * true only for the machine that made it.
  *
- * The min corner is the cage's origin — both instances place their group at the
- * floor with the shell starting there, so `group.position` IS min(x, y, z).
- *
- * Encoding is deliberately readable: `cam=px,py,pz~tx,ty,tz~fov`, two decimals.
- * No base64, because a link someone pastes into a chat should be inspectable and
- * hand-editable.
+ * `?cam=` survives as a precise override, and is the one part of this file that is
+ * not meant to be read by a person: `pos~target~fov`, comma triples, relative to
+ * the CAGE ORIGIN — the point each instance stands its group at, which is the
+ * middle of the cage's footprint on the floor. It is for pinning a camera while
+ * authoring; nothing links to one by hand.
  */
 export type ShareDb = 'postgres' | 'redis'
 
-export interface ShareTarget {
+/** Where a path points: a cage, and a shot in it. `''` is the cage's own shot. */
+export interface Address {
     db: ShareDb
-    /** camera position, relative to the cage's min corner */
-    pos: THREE.Vector3
-    /** aim point, relative to the same corner */
-    target: THREE.Vector3
-    fov: number
+    /** view slug, e.g. 'wal'; '' for the cage's default */
+    slug: string
 }
 
-const DBS: ShareDb[] = ['postgres', 'redis']
-
-/** `/postgresql` and `/redis` (plus the short forms) name a cage; anything else does not. */
-export function dbFromPath(pathname: string): ShareDb | null {
-    const seg = pathname.replace(/\/+$/, '').split('/').pop()?.toLowerCase() ?? ''
+const dbOf = (seg: string): ShareDb | null => {
     if (seg === 'postgresql' || seg === 'postgres' || seg === 'psql') return 'postgres'
     if (seg === 'redis') return 'redis'
     return null
 }
 
-/** What the address bar should say for a database, with or without a pose. */
-export function pathFor(db: ShareDb): string {
-    return db === 'postgres' ? '/postgresql' : '/redis'
+/**
+ * Read a path. `/` is the landing page and nothing else is addressable, so a
+ * segment that is not a cage — or a path deeper than cage/shot — is not an
+ * address, and the caller boots normally.
+ */
+export function addressFromPath(pathname: string): Address | null {
+    const segs = pathname.split('/').filter(Boolean).map((s) => s.toLowerCase())
+    if (segs.length === 0 || segs.length > 2) return null
+    const db = dbOf(segs[0])
+    if (!db) return null
+    return { db, slug: segs[1] ?? '' }
+}
+
+/** The address for a cage and a shot in it. */
+export function pathFor(db: ShareDb, slug = ''): string {
+    const base = db === 'postgres' ? '/postgresql' : '/redis'
+    return slug ? `${base}/${slug}` : base
 }
 
 const round = (n: number) => Math.round(n * 100) / 100
 const triple = (v: THREE.Vector3) => `${round(v.x)},${round(v.y)},${round(v.z)}`
 
-export function encodePose(cam: THREE.Vector3, target: THREE.Vector3, fov: number): string {
-    return `${triple(cam)}~${triple(target)}~${round(fov)}`
+/** A pose as `?cam=` writes it — both points relative to the cage's origin. */
+export function encodePose(pos: THREE.Vector3, target: THREE.Vector3, fov: number): string {
+    return `${triple(pos)}~${triple(target)}~${round(fov)}`
 }
 
 /**
@@ -78,32 +87,3 @@ export function decodePose(raw: string | null): { pos: THREE.Vector3; target: TH
     }
 }
 
-/**
- * Capture the camera as a link. The cage's min corner is the anchor, so the
- * numbers say "12 left of the corner, 9 up, 21 in front of it" — which is also
- * the number that survives the cage being moved.
- */
-export function shareUrl(
-    db: ShareDb,
-    cageMin: THREE.Vector3,
-    cam: THREE.Vector3,
-    target: THREE.Vector3,
-    fov: number,
-): string {
-    const rel = cam.clone().sub(cageMin)
-    const aim = target.clone().sub(cageMin)
-    const url = new URL(location.href)
-    url.pathname = pathFor(db)
-    url.hash = ''
-    url.searchParams.set('cam', encodePose(rel, aim, fov))
-    // the cache-busting parameters this page is opened with (?v=) stay: they are
-    // how a deploy is pinned, and dropping them would silently change the shot
-    return url.toString()
-}
-
-/** The database a URL path names, if it names one. */
-export function isSharePath(pathname: string): boolean {
-    return dbFromPath(pathname) !== null
-}
-
-export const SHARE_DBS = DBS

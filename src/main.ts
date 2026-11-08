@@ -12,11 +12,12 @@ import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import type { Regime } from './sim'
 import { installTelemetry } from './debug'
-import { createCameraRig, viewsFor } from './views'
+import { createCameraRig, defaultView, slugOf, viewBySlug, viewForBox, viewsFor } from './views'
+import type { ViewDef } from './views'
 import { createStory } from './story'
 import { PLANNED_STORIES, STORIES } from './story'
 import type { StoryScene } from './story'
-import { dbFromPath, decodePose, shareUrl } from './share'
+import { addressFromPath, decodePose, encodePose, pathFor } from './share'
 import type { ShareDb } from './share'
 import { initCredits } from './credits'
 import { initHud } from './ui'
@@ -371,11 +372,11 @@ if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
 // back to the link's pose would look like the camera being dragged out from
 // under them. The deep link only decides where you START.
 const startView = new URLSearchParams(location.search).get('view')
-// `/postgresql` and `/redis` are share links: the path names the cage and the
-// camera comes from `?cam=` (or from that cage's own default shot). Handled
-// below, once the rig exists.
-const shareDbAtBoot = dbFromPath(location.pathname)
-if (startView && !shareDbAtBoot)
+// `/postgresql` and `/redis` are the addresses: the path names a cage and, after
+// a second segment, one of that cage's named shots. Handled below, once the rig
+// exists.
+const bootAddress = addressFromPath(location.pathname)
+if (startView && !bootAddress)
   window.setTimeout(() => {
     if (userTookCamera) return
     rig.snap(startView)
@@ -412,7 +413,7 @@ const hud = initHud({
   },
   setRegime: (r) => sim.setRegime(r),
   setMove: (on) => setMove(on),
-  share: () => shareNow(),
+  onDbPanel: (open) => setPanelParam(open),
   unpin: () => {
     pinned = null
     hud.unpin()
@@ -489,10 +490,13 @@ const rig = createCameraRig({
 })
   ; (window as unknown as Record<string, unknown>).__psqlViews = rig
 
-/* ------------------------------- share links ------------------------------ */
+/* -------------------------------- addressing ------------------------------- */
 
-/** Which cage a link should describe: the open panel's, else the one in frame. */
-function shareDb(): ShareDb {
+/**
+ * Which cage an address should name: the open panel's, else whichever cage the
+ * camera is pointing at.
+ */
+function dbInFrame(): ShareDb {
   if (hud.db) return hud.db
   const aim = world.controls.target
   const centreOf = (g: THREE.Object3D) => new THREE.Box3().setFromObject(g).getCenter(new THREE.Vector3())
@@ -502,41 +506,151 @@ function shareDb(): ShareDb {
 }
 
 /**
- * The anchor a shared pose is measured from: the cage's min corner, which is the
- * cage's own origin — both shells are built from the floor up at (0, 0, 0).
- * Relative coordinates are why a link still frames the same machine after a cage
- * has been dragged somewhere else on the floor.
+ * The point a pinned pose is measured from: the cage's origin, which is where the
+ * instance stands its group — the middle of the cage's footprint on the floor.
+ *
+ * Only `?cam=` needs this. A named shot does not: it is built from the structures
+ * themselves, so it moves when they do.
  */
-function cageMin(db: ShareDb): THREE.Vector3 {
+function cageOrigin(db: ShareDb): THREE.Vector3 {
   return (db === 'postgres' ? instance.group : redis.group).position.clone()
 }
 
-/** The link for the camera as it stands right now. */
-function shareNow(): string {
-  const db = shareDb()
-  return shareUrl(db, cageMin(db), camera.position, world.controls.target, camera.fov)
+/**
+ * Write the address of what is on screen.
+ *
+ * Two independent things, so two independent places in the URL:
+ *
+ *   the PATH names the cage and the shot — `/postgresql/wal`, `/redis/keys`
+ *   `?db-panel=` says which database card is expanded
+ *
+ * They are deliberately not the same statement. Looking at the WAL run is not a
+ * request for the whole postgres card, and having the redis card open does not
+ * mean the camera is on the redis cage. Splitting them is also what makes a path
+ * shareable on its own: `/postgresql/wal` opens the same shot for everyone, with
+ * whatever cards they have open.
+ *
+ * `replaceState`, not `pushState`: every double-tap would otherwise leave a
+ * history entry, and back would rewind the camera through a session instead of
+ * leaving the page.
+ */
+function setAddress(db: ShareDb, view: ViewDef | null) {
+  const q = new URLSearchParams(location.search)
+  // a named shot is reproducible; the pinned pose it replaced is not needed
+  q.delete('cam')
+  q.delete('view')
+  const path = pathFor(db, view ? slugOf(view) : '')
+  const rest = q.toString()
+  history.replaceState(null, '', rest ? `${path}?${rest}` : path)
 }
 
-if (shareDbAtBoot) {
-  hud.setDb(shareDbAtBoot)
+/** Which card the address asks to have open, if any. */
+function panelFromQuery(): ShareDb | null {
+  const v = new URLSearchParams(location.search).get('db-panel')
+  if (v === 'redis') return 'redis'
+  if (v === 'postgresql' || v === 'postgres') return 'postgres'
+  return null
+}
+
+/** Keep `?db-panel=` in step with the switches, and drop it when nothing is open. */
+function setPanelParam(open: ShareDb | null) {
+  const q = new URLSearchParams(location.search)
+  if (open) q.set('db-panel', open === 'postgres' ? 'postgresql' : 'redis')
+  else q.delete('db-panel')
+  const rest = q.toString()
+  history.replaceState(null, '', rest ? `${location.pathname}?${rest}` : location.pathname)
+}
+
+/** Authoring aid: the camera right now as a `?cam=` value, relative to its cage. */
+; (window as unknown as Record<string, unknown>).__psqlCam = () => {
+  const db = dbInFrame()
+  const origin = cageOrigin(db)
+  return encodePose(
+    camera.position.clone().sub(origin),
+    world.controls.target.clone().sub(origin),
+    camera.fov,
+  )
+}
+
+/**
+ * Pin whatever the current shot is aimed at — the card a click in the middle of
+ * the frame would give. A path that names a shot names a THING, so the thing
+ * comes with its description; `/postgresql` alone names the whole cage and has
+ * nothing extra to say, so it opens no card.
+ */
+/**
+ * Pin the card of the thing a shot is about.
+ *
+ * Not "whatever is under the middle of the frame": a shot looks PAST things — the
+ * big sorted set is framed from above the keyspace plane, the clients shot has the
+ * RAM deck behind the ports, the backend shot has an index tree further along the
+ * ray — and a card taken from the middle pixel would describe a machine part that
+ * the shot is not about.
+ *
+ * So the rule is self-consistent instead: walk the hits from the middle outwards
+ * and take the first one that THIS shot is about, using the same test a double-tap
+ * uses (viewForBox). That makes the subject true by construction — the card and
+ * the path cannot disagree about what is being shown.
+ */
+function pinShotSubject(db: ShareDb, view: ViewDef) {
+  // The camera was just snapped into place, and a camera's world matrix only
+  // catches up at render time. Cast with an updated one, or the rays come from
+  // where the camera used to be.
+  camera.updateMatrixWorld()
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera)
+  for (const hit of raycaster.intersectObjects(pickables, true)) {
+    let picked: PickInfo | null = null
+    const provider = infoForRoot(hit.object)
+    if (provider) {
+      const res = provider(hit)
+      if (res) picked = { root: hit.object, key: res.key, info: res.info, box: res.box }
+    }
+    if (!picked) {
+      const root = infoRoot(hit.object)
+      if (root?.userData.info) {
+        picked = { root, key: root.userData.info.title, info: root.userData.info }
+      }
+    }
+    if (!picked) continue
+    const box = picked.box ?? new THREE.Box3().setFromObject(picked.root)
+    if (viewForBox(db, box)?.id !== view.id) continue
+    pinned = picked
+    hud.inspect(picked.info)
+    return
+  }
+}
+
+// The card is the query's business, never the path's: `/redis` is the cage from
+// its own shot, with whatever cards you happen to have open.
+const bootPanel = panelFromQuery()
+if (bootPanel) hud.setDb(bootPanel)
+
+if (bootAddress) {
+  // `?cam=` is a precise override, so it wins over whatever the path names
   const pose = decodePose(new URLSearchParams(location.search).get('cam'))
-  // after the first frames: the boot tween and any layout move have settled, so
-  // the corner the pose is relative to is the corner it was captured against
+  // after the first frames: the boot tween and any layout move have settled
   window.setTimeout(() => {
     if (userTookCamera) return
-    if (!pose) {
-      rig.snap(shareDbAtBoot === 'postgres' ? 'postgres' : 'redis')
+    if (pose) {
+      const origin = cageOrigin(bootAddress.db)
+      rig.release()
+      camera.position.copy(origin.clone().add(pose.pos))
+      camera.fov = pose.fov
+      camera.updateProjectionMatrix()
+      world.controls.target.copy(origin.clone().add(pose.target))
+      world.controls.update()
+      userTookCamera = true
+      lastInteraction = performance.now()
       return
     }
-    const min = cageMin(shareDbAtBoot)
-    rig.release()
-    camera.position.copy(min.clone().add(pose.pos))
-    camera.fov = pose.fov
-    camera.updateProjectionMatrix()
-    world.controls.target.copy(min.clone().add(pose.target))
-    world.controls.update()
-    userTookCamera = true
-    lastInteraction = performance.now()
+    // A path that names nothing (a typo, or `/postgres` for `/postgresql`) still
+    // lands on the cage, and the address is rewritten to say what it shows.
+    const view = viewBySlug(bootAddress.db, bootAddress.slug) ?? defaultView(bootAddress.db)
+    rig.snap(view.id)
+    markView(view.id)
+    setAddress(bootAddress.db, view)
+    // only an explicit shot brings a card; snapping the whole cage does not
+    if (bootAddress.slug) pinShotSubject(bootAddress.db, view)
   }, 1500)
 }
 
@@ -693,6 +807,12 @@ for (const host of viewHosts) {
       rig.go(v.id)
       lastInteraction = performance.now()
       markView(v.id)
+      // the button and the path are the same statement: this shot, in this cage
+      setAddress(host.db, v)
+      // a pinned card describes a block somebody picked; asking for a shot is
+      // asking for something else, so the card goes rather than start lying
+      pinned = null
+      hud.unpin()
     })
     host.el.appendChild(b)
     viewButtons.push({ el: b, id: v.id })
@@ -704,12 +824,19 @@ window.addEventListener('keydown', (e) => {
   if (e.key >= '0' && e.key <= '9') {
     // numbered within the panel you are looking at, so "3" means the third
     // button on screen and not the third button in some other cage's list
-    const ids = viewsFor(hud.db ?? 'postgres').map((v) => v.id)
-    const idx = e.key === '0' ? (ids.indexOf(rig.current() ?? '') + 1) % ids.length : Number(e.key) - 1
-    const id = ids[idx]
-    if (id) {
-      rig.go(id)
-      markView(id)
+    const db = hud.db ?? 'postgres'
+    const list = viewsFor(db)
+    const idx =
+      e.key === '0'
+        ? (list.findIndex((v) => v.id === rig.current()) + 1) % list.length
+        : Number(e.key) - 1
+    const view = list[idx]
+    if (view) {
+      rig.go(view.id)
+      markView(view.id)
+      setAddress(db, view)
+      pinned = null
+      hud.unpin()
     }
   }
 })
@@ -896,7 +1023,13 @@ function setFly(on: boolean) {
 /* ------------------------------ double click ------------------------------ */
 
 // Double-click frames whatever is under the cursor and hands the orbit to it.
-// Empty space frames the whole instance, which doubles as "zoom out".
+//
+// If what was tapped has a NAMED shot, that is where the camera goes, and the
+// path becomes its address (/postgresql/wal, /redis/keys). Predefined, because a
+// path has to be reproducible: an arbitrary box framed from wherever you happened
+// to be standing is not something a URL can honestly name. A tap on something
+// with no named shot is still framed, and the address then says only which cage
+// you are in — which is true, where inventing a name would not be.
 canvas.addEventListener('dblclick', (e) => {
   if (moveMode) return
   const ndc = new THREE.Vector2(
@@ -914,14 +1047,29 @@ canvas.addEventListener('dblclick', (e) => {
   }
   // flying moves the camera and its target together, which fights a fixed orbit
   if (flyMode) setFly(false)
-  void rig.focus(
-    root
-      ? (root.box ?? root.root)
-      : new THREE.Box3().setFromObject(instance.group).union(new THREE.Box3().setFromObject(redis.group)),
-  ).then(() => {
-    // the fly-to is camera movement: the drift stays off until the cooldown
-    noteCameraMove()
-  })
+
+  const db = root ? ownerCage(root.root) : null
+  const box = root ? (root.box ?? new THREE.Box3().setFromObject(root.root)) : null
+  const view = db && box ? viewForBox(db, box) : null
+
+  if (view && db) {
+    rig.go(view.id)
+    markView(view.id)
+    setAddress(db, view)
+  } else if (box) {
+    void rig.focus(box)
+    setAddress(db ?? dbInFrame(), null)
+  } else {
+    // nothing under the cursor: that is "zoom out", which is the floor's shot
+    const near = dbInFrame()
+    const ov = viewBySlug(near, 'overview')
+    if (ov) {
+      rig.go(ov.id)
+      markView(ov.id)
+      setAddress(near, ov)
+    }
+  }
+  // the fly-to is camera movement: the drift stays off until the cooldown
   noteCameraMove()
 })
 

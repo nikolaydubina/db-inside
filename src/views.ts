@@ -24,6 +24,11 @@ export interface CameraPose {
 export interface ViewDef {
     id: string
     label: string
+    /**
+     * Path segment: this shot lives at /postgresql/<slug>, /redis/<slug>. Left
+     * out, it is derived from the id — see slugOf().
+     */
+    slug?: string
     /** Scene entity this shot is about. */
     entity: string
     hint: string
@@ -32,6 +37,12 @@ export interface ViewDef {
      * 'both' is listed under each — the floor is shared, the panels are not.
      */
     db?: 'postgres' | 'redis' | 'both'
+    /**
+     * A shot of a whole cage, or of the floor. These are reachable by path and by
+     * button, but they are never the answer to "what did I just tap" — a tap is
+     * about one thing, and zooming out is the opposite of that.
+     */
+    whole?: boolean
     pose(): CameraPose
 }
 
@@ -59,6 +70,7 @@ export const VIEWS: ViewDef[] = [
         id: 'overview',
         label: 'overview',
         db: 'both',
+        whole: true,
         entity: 'the floor',
         hint: 'both databases on the same floor, each in its own cage',
         // midway between the two cages, so rearranging them keeps both in frame
@@ -73,14 +85,21 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'postgres',
         label: 'postgres',
+        whole: true,
         entity: 'instance',
         hint: 'the whole postgres instance: disk plate, RAM deck, pipeline',
-        pose: () => shot(POSTGRES_ORIGIN.clone(), [29.2, 19, 34.5], 40, [3.4, 6.6, 1.0]),
+        // The house shot, and the one `/postgresql` opens on: from the front-right
+        // and high enough to read the RAM deck as a deck, with the aim point out in
+        // front of the cage so the machine sits above the caption strip instead of
+        // behind it. cage-relative: corner at the origin, so these are the numbers a
+        // ?cam= override prints.
+        pose: () => shot(POSTGRES_ORIGIN.clone(), [29.29, 14.65, 15.15], 40, [-5.58, 0.06, -5.55]),
     },
     {
         id: 'redis',
         label: 'redis',
         db: 'redis',
+        whole: true,
         entity: 'redis cage',
         hint: 'the redis instance: almost nothing on the disk, everything in the air',
         pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 1)), [-19, 11, 23], 38, [0, 5.2, 0]),
@@ -105,6 +124,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'big-zset',
         label: 'sorted set · big',
+        slug: 'zset',
         db: 'redis',
         entity: 'a big sorted set',
         hint: 'a skiplist with the dict beside it — one key, 1.4 M members',
@@ -115,6 +135,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'big-hash',
         label: 'hash · big',
+        slug: 'hash',
         db: 'redis',
         entity: 'a big hash',
         hint: 'a bucket array with chains — one key, 5.3 M fields',
@@ -123,6 +144,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'big-list',
         label: 'list · big',
+        slug: 'list',
         db: 'redis',
         entity: 'a big list',
         hint: 'a chain of quicklist nodes — one key, 2.1 M elements',
@@ -206,6 +228,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'free',
         label: 'free space',
+        slug: 'free-space',
         entity: 'unallocated tail',
         hint: 'the empty tail of the disk: slot lattice, no pages',
         pose: () => shot(L(pageX(4), 0, pageZ(8)), [-6.0, 5.5, 11.0], 34),
@@ -237,6 +260,7 @@ export const VIEWS: ViewDef[] = [
 
 export const tableView = (name: keyof typeof TABLE_ANCHOR): ViewDef => ({
     id: `table-${name}`,
+    slug: `table-${name}`,
     label: `table: ${name}`,
     entity: `table:${name}`,
     hint: `close-up of the ${name} page run`,
@@ -256,6 +280,9 @@ export const backendView = (i: number): ViewDef => {
     const mid = L(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
     return {
         id: `backend-${i}`,
+        // 1-based, because the label says "backend 1" and a path that disagrees
+        // with the thing on screen is worse than no path
+        slug: `backend-${i + 1}`,
         label: `backend ${i + 1}`,
         entity: `backend ${i + 1}`,
         hint: 'one connection close up: port, input buffer, what it is running',
@@ -282,6 +309,79 @@ export const ALL_VIEWS = [
  */
 export const viewsFor = (db: 'postgres' | 'redis') =>
     ALL_VIEWS.filter((v) => v.db === 'both' || (v.db ?? 'postgres') === db)
+
+/**
+ * The path segment of a shot — `/postgresql/wal`, `/redis/keys`.
+ *
+ * Two shots ARE their cage, so they are the path with nothing after it. The rest
+ * is the id, minus a `redis-` prefix that would only repeat what the path already
+ * says: `/redis/keys`, not `/redis/redis-keys`.
+ */
+export function slugOf(v: ViewDef): string {
+    if (v.slug !== undefined) return v.slug
+    if (v.id === 'postgres' || v.id === 'redis') return ''
+    return v.db === 'redis' ? v.id.replace(/^redis-/, '') : v.id
+}
+
+/** The shot a cage opens on when its path names nothing else. */
+export function defaultView(db: 'postgres' | 'redis'): ViewDef {
+    const v = ALL_VIEWS.find((x) => x.id === db)
+    if (!v) throw new Error(`[views] no default shot for ${db}`)
+    return v
+}
+
+/** The shot a path names. An empty slug is the cage's own shot. */
+export function viewBySlug(db: 'postgres' | 'redis', slug: string): ViewDef | null {
+    if (!slug) return defaultView(db)
+    return viewsFor(db).find((v) => slugOf(v) === slug) ?? null
+}
+
+/**
+ * Which named shot is ABOUT this box — what a double-tap should turn into.
+ *
+ * A view's pose target is the point its shot aims at, so it sits inside the thing
+ * the shot is about. That is the first test, and it is why this needs no table of
+ * names: tap the WAL run and the shot aimed into the WAL run is the one that
+ * matches. A small pad covers the shots aimed deliberately just under their
+ * subject — both buffer strips look past their cubes at the blocks below.
+ *
+ * Not everything has an aim point inside it, though. A shot can be about a
+ * CLUSTER — the floating index structures are one view of four separate trees —
+ * and then tapping any one tree should still find it. So a shot also matches when
+ * what you tapped is within its own reach: the frame at the subject is about
+ * `2·tan(fov/2)·dist` wide, and a third of the camera-to-subject distance is a
+ * fair bracket for "the sort of thing this shot is showing".
+ *
+ * Where several shots match, the nearest aim point wins: that is the tightest
+ * reading of the tap, so a page inside a table run picks the page's shot over the
+ * table's. Whole-cage and floor shots are excluded — tapping one thing is never a
+ * request to zoom out.
+ */
+export function viewForBox(db: 'postgres' | 'redis', box: THREE.Box3, pad = 1.5): ViewDef | null {
+    if (box.isEmpty()) return null
+    const centre = box.getCenter(new THREE.Vector3())
+    let best: ViewDef | null = null
+    let bestDist = Infinity
+    for (const v of viewsFor(db)) {
+        if (v.whole) continue
+        const pose = v.pose()
+        const aim = pose.target
+        const inside =
+            aim.x >= box.min.x - pad &&
+            aim.x <= box.max.x + pad &&
+            aim.y >= box.min.y - pad &&
+            aim.y <= box.max.y + pad &&
+            aim.z >= box.min.z - pad &&
+            aim.z <= box.max.z + pad
+        const d = aim.distanceTo(centre)
+        if (!inside && d > 0.35 * pose.pos.distanceTo(aim)) continue
+        if (d < bestDist) {
+            best = v
+            bestDist = d
+        }
+    }
+    return best
+}
 
 export interface RigOptions {
     camera: THREE.PerspectiveCamera
