@@ -259,6 +259,9 @@ export const BUFFER_TOP_Y = BUFFER_Y + PAGE_GRID.bh / 2
  */
 const FLOOR_LABEL_Y = FLOOR_Y + 0.003
 
+/** Gap between the block field's edge and the first glyph of the DISK label. */
+const DISK_LABEL_PAD = 0.21
+
 /** Albedo of a free (unassigned) page block. */
 const BLOCK_FREE = 0x6b4a1c
 /** Page fill ramp: empty slot → packed page. */
@@ -528,12 +531,14 @@ export class PostgresInstance {
     const floorLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
     floorLab.rotation.z = Math.PI / 2
     const ink = floorLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
-    // Line the first glyph up with the corner of the block field itself.
+    // Line the first glyph up with the corner of the block field itself, plus a
+    // little daylight: butted straight against the lattice, the word reads as
+    // part of the grid rather than a label for it.
     // rotation.z of +90° maps plane +x onto world -z and plane +y onto world
     // -x, so the ink's left edge sets the start along the field edge and its
     // top edge sits on that edge
     floorLab.position.set(
-      DISK_FIELD.w / 2 + ink.y1,
+      DISK_FIELD.w / 2 + DISK_LABEL_PAD + ink.y1,
       FLOOR_LABEL_Y,
       DISK_FIELD.cz + DISK_FIELD.d / 2 + ink.x0,
     )

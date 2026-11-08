@@ -47,6 +47,8 @@ const PAGE_Y = FLOOR_Y + BLOCK_LIFT + BLOCK.h / 2
 const BLOCK_TOP = PAGE_Y + BLOCK.h / 2
 /** Labels are painted on the floor: the same plane as the grid, +3 mm for the glyphs. */
 const FLOOR_LABEL_Y = FLOOR_Y + 0.003
+/** Gap between the block field's edge and the first glyph of the DISK label. */
+const DISK_LABEL_PAD = 0.21
 
 const COLS = 48
 const ROWS = 17
@@ -398,7 +400,11 @@ export class RedisInstance {
         const diskLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
         diskLab.rotation.z = Math.PI / 2
         const ink = diskLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
-        diskLab.position.set(FIELD.w / 2 + ink.y1, FLOOR_LABEL_Y, FIELD.cz + FIELD.d / 2 + ink.x0)
+        diskLab.position.set(
+            FIELD.w / 2 + DISK_LABEL_PAD + ink.y1,
+            FLOOR_LABEL_Y,
+            FIELD.cz + FIELD.d / 2 + ink.x0,
+        )
         this.group.add(diskLab)
 
         const aofLab = floorLabel('AOF', { height: 0.42, color: 'rgba(255, 190, 110, 0.9)' })

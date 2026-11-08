@@ -34,6 +34,23 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* Nothing here is a document to be selected: every drag on this page belongs to
+   the camera or to a cage, and a stray text selection from a double-click on a
+   label just gets in the way of both. Copyable prose opts back in below. */
+body {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The inspector is the one place worth quoting from — choosing the text there
+   does not conflict with any gesture. */
+.inspector p,
+.inspector h2,
+.inspector .ins-meta {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 #app {
   position: fixed;
   inset: 0;

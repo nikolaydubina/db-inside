@@ -354,8 +354,18 @@ const telemetry = installTelemetry({
   ; (window as unknown as Record<string, unknown>).__psqlDebug = telemetry.api
 if (new URLSearchParams(location.search).has('debug')) telemetry.api.on(2)
 // deep link straight into a walkthrough view: ?view=wal
+//
+// This fires on a delay so the scene is built before the camera cuts. The delay
+// is also why it is guarded: if the user has already taken the camera by hand —
+// flying, orbiting, zooming — the pose they landed on is theirs, and cutting
+// back to the link's pose would look like the camera being dragged out from
+// under them. The deep link only decides where you START.
 const startView = new URLSearchParams(location.search).get('view')
-if (startView) window.setTimeout(() => rig.snap(startView), 1500)
+if (startView)
+  window.setTimeout(() => {
+    if (userTookCamera) return
+    rig.snap(startView)
+  }, 1500)
 else
   console.info(
     '%cpsql%c telemetry available: __psqlDebug.on() · .snapshot() · .history() · .table("users")',
@@ -389,8 +399,12 @@ const hud = initHud({
     flyKeys.clear()
     flyVel.set(0, 0, 0)
     if (!on) looking = false
-    // flying is driving the camera by hand: it lets go of any selected view
-    if (on) rig.release()
+    // flying is driving the camera by hand: it lets go of any selected view, and
+    // it means a delayed ?view= pose must not fire later
+    if (on) {
+      userTookCamera = true
+      rig.release()
+    }
     // while flying, a drag looks around instead of orbiting the scene
     world.controls.enableRotate = !on
     // cursor stays visible; it is only swapped for the crosshair while dragging
@@ -408,6 +422,13 @@ const hud = initHud({
 })
 
 let lastInteraction = performance.now()
+
+/**
+ * True once the user has driven the camera themselves: orbit drag, wheel, a fly
+ * key, or a click on the canvas. Anything on a delay (the ?view= pose) checks
+ * this and stands down.
+ */
+let userTookCamera = false
 
 /**
  * The drift pauses whenever the CAMERA is moved by hand, and comes back only
@@ -439,11 +460,23 @@ function noteCameraMove() {
 }
 
 world.controls.addEventListener('start', () => {
+  userTookCamera = true
   noteCameraMove()
   // A hand-driven camera takes over from whatever view was selected: ?view= sets
   // where you start, it is not a lock. Re-navigating to a view re-arms it.
   rig.release()
 })
+
+// any click on the canvas is the user taking the camera, whether or not it turns
+// into a drag (and whatever mode the controls are in)
+canvas.addEventListener(
+  'pointerdown',
+  () => {
+    userTookCamera = true
+  },
+  { capture: true },
+)
+canvas.addEventListener('wheel', () => (userTookCamera = true), { passive: true })
 
 /* --------------------------------- views ---------------------------------- */
 
@@ -809,6 +842,7 @@ window.addEventListener('keydown', (e) => {
   if (isTyping(e.target)) return
   // pressing a movement key is itself the request to enter fly mode
   if (!flyMode && FLY_CODES.has(e.code)) {
+    userTookCamera = true
     flyToggle.checked = true
     flyToggle.dispatchEvent(new Event('change'))
   }
