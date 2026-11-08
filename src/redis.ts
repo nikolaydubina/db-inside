@@ -246,7 +246,6 @@ export class RedisInstance {
     private dictMesh!: THREE.InstancedMesh
     private keysMesh!: THREE.InstancedMesh
     /** base albedo per instance, so a flash can be undone */
-    private diskBase: number[] = []
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
 
@@ -442,13 +441,11 @@ export class RedisInstance {
                 this.tmpObj.scale.setScalar(0.001)
                 this.tmpObj.updateMatrix()
                 field.setMatrixAt(i, this.tmpObj.matrix)
-
                 // The file blocks get their colour from layoutAof()/layoutRdb(),
                 // which know which of them the file has reached. A block that is
                 // IN a file is a FULL block: 4 kB is the whole unit here, so it
                 // sits at the bright end of the ramp. Small shade variation only,
                 // because the records in a block are not all the same size.
-                this.diskBase[i] = 0x000000
                 if (onRdb) {
                     this.rdbBase[i] = mixHex(RDB_FILL_DARK, RDB_FILL_BRIGHT, rand(0.94, 1.04))
                 }
@@ -1359,9 +1356,7 @@ export class RedisInstance {
             this.tmpObj.scale.set(s, s, s)
             this.tmpObj.updateMatrix()
             this.disk.setMatrixAt(i, this.tmpObj.matrix)
-            const base = on ? hex : 0x000000
-            this.diskBase[i] = base
-            this.disk.setColorAt(i, this.tmpColor.setHex(base))
+            this.disk.setColorAt(i, this.tmpColor.setHex(on ? hex : 0x000000))
         }
         this.aofDrawn = drawTo
         this.disk.instanceMatrix.needsUpdate = true
@@ -1614,18 +1609,38 @@ export class RedisInstance {
             this.tmpObj.scale.set(on ? 1 : 0.001, on ? fill : 0.001, on ? 1 : 0.001)
             this.tmpObj.updateMatrix()
             this.disk.setMatrixAt(id, this.tmpObj.matrix)
-            const base = on
-                ? seq === this.rdbLen - 1
-                    ? // the tail block is the only one that is not full, and it is
-                    // the only one that should look it
-                    mixHex(RDB_FILL_DARK, this.rdbBase[id] ?? RDB_FILL_BRIGHT, fill)
-                    : (this.rdbBase[id] ?? RDB_FILL_BRIGHT)
-                : 0x000000
+            const base = on ? this.rdbHexAt(id, seq) : 0x000000
             this.disk.setColorAt(id, this.tmpColor.setHex(base))
         })
         this.disk.instanceMatrix.needsUpdate = true
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
         this.fitRdbEdge()
+    }
+
+    /** The colour of one block of the base file: bright, except the partial tail. */
+    private rdbHexAt(id: number, seq: number): number {
+        const tint = this.rdbBase[id] ?? RDB_FILL_BRIGHT
+        return seq === this.rdbLen - 1
+            ? mixHex(RDB_FILL_DARK, tint, Math.max(0.12, this.rdbTail))
+            : tint
+    }
+
+    /**
+     * The colour a block has when nothing is pulsing on it — the file decides.
+     *
+     * This is DERIVED, never remembered. A remembered copy of "the colour this
+     * block should fall back to" only stays true for the file that wrote it: the
+     * disk's blocks belong to two files whose lengths both change, so a pulse that
+     * decays toward a remembered colour leaves the other file's blocks black.
+     */
+    private restingHex(id: number): number {
+        const aofSeq = this.aofIndex.get(id)
+        if (aofSeq !== undefined && aofSeq <= this.aofHead) {
+            return mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1)
+        }
+        const rdbSeq = this.rdbIndex.get(id)
+        if (rdbSeq !== undefined && rdbSeq < this.rdbLen) return this.rdbHexAt(id, rdbSeq)
+        return 0x000000
     }
 
     /**
@@ -2032,6 +2047,26 @@ export class RedisInstance {
         for (let k = 0; k < this.rdbLen; k++) {
             if (aofDrawn.has(this.rdbOrder[k])) bad.push(`block ${k} of the base file is also in the log`)
         }
+        // 5. a drawn block is never black. Black is "no file here", so a block that
+        //    is in a file and painted black is a block the scene says exists and
+        //    shows as absent — which is what a pulse decaying toward a stale colour
+        //    did to the whole base file.
+        const col = this.disk.instanceColor?.array
+        if (col) {
+            const lit = (id: number) => col[id * 3] + col[id * 3 + 1] + col[id * 3 + 2]
+            let blackAof = 0
+            let blackRdb = 0
+            for (let k = 0; k <= this.aofHead; k++) {
+                const id = this.aofOrder[k]
+                if (id !== undefined && scale(id) > 0.5 && lit(id) < 1e-4) blackAof++
+            }
+            for (let k = 0; k < this.rdbLen; k++) {
+                const id = this.rdbOrder[k]
+                if (scale(id) > 0.1 && lit(id) < 1e-4) blackRdb++
+            }
+            if (blackAof > 0) bad.push(`${blackAof} block(s) of the log are drawn but black`)
+            if (blackRdb > 0) bad.push(`${blackRdb} block(s) of the base file are drawn but black`)
+        }
         // 5. the log's cage is the log's footprint
         if (this.aofHead >= 0 && this.aofOrder.length > 0) {
             let minC = COLS
@@ -2135,13 +2170,13 @@ export class RedisInstance {
                 const next = pulse.v - dt / PULSE_TIME
                 if (next <= 0) {
                     this.diskBoost.delete(i)
-                    this.disk.setColorAt(i, this.tmpColor.setHex(this.diskBase[i] || 0x000000))
+                    this.disk.setColorAt(i, this.tmpColor.setHex(this.restingHex(i)))
                 } else {
                     pulse.v = next
                     this.disk.setColorAt(
                         i,
                         this.tmpColor
-                            .setHex(this.diskBase[i] || 0x000000)
+                            .setHex(this.restingHex(i))
                             .lerp(this.pulseColor.setHex(pulse.hex), next)
                             // and past white: the bloom pass only picks up what is
                             // over 1.0, which is what makes a pulse look like
