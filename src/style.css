@@ -768,6 +768,19 @@ h2::after {
   max-height: calc(100% - 210px);
   pointer-events: auto;
   transition: right 0.18s ease;
+  /* one line of a card title — the × measures itself against this */
+  --title-line: 13px;
+}
+
+/* The title is a label here, not a collapse control: the × is the way out */
+#inspector h2 {
+  cursor: default;
+  line-height: var(--title-line);
+}
+
+/* and no rule running under it, so the × can float to the edge cleanly */
+#inspector h2::after {
+  display: none;
 }
 
 /* a database panel owns the right edge while it is open; the inspector moves in */
@@ -832,9 +845,52 @@ body.db-open #inspector {
   color: #4d6a80;
 }
 
-.inspector.pinned {
-  border-color: rgba(53, 224, 255, 0.3);
-  box-shadow: 0 0 40px -18px rgba(53, 224, 255, 0.55), inset 0 1px 0 rgba(160, 220, 255, 0.08);
+/*
+ * The × is the inspector's way out. It is not a control with a box of its own: it
+ * sits in the title row the way a header control does on iOS — same line, same
+ * scale as the text — and floats to the trailing edge. Only the mark answers the
+ * pointer; the title is a label.
+ *
+ * It rides the FIRST line of the title, not the middle of the title block. One
+ * line of a card title is `--title-line` tall and the mark is measured against
+ * that box, top-aligned, so a title that wraps moves the body down and leaves the
+ * × where it was: the same place on every card.
+ *
+ * Two hairlines rather than the × character: a glyph is as thick as its font, and
+ * every font that has a light enough weight is one more thing that can fail to
+ * load. A pair of 1px lines is thin at any weight, matches the wireframe the rest
+ * of the scene is drawn in, and takes its colour from `currentColor`.
+ */
+.xmark {
+  position: relative;
+  align-self: flex-start;
+  margin-left: auto;
+  flex: none;
+  width: 15px;
+  height: var(--title-line);
+  color: #4d6a80;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+
+.xmark::before,
+.xmark::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 100%;
+  height: 1px;
+  background: currentColor;
+  transform: translateY(-50%) rotate(45deg);
+}
+
+.xmark::after {
+  transform: translateY(-50%) rotate(-45deg);
+}
+
+.xmark:hover {
+  color: var(--cyan);
 }
 
 /* ---------- legend ---------- */

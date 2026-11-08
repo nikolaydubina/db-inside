@@ -196,7 +196,10 @@ export function initHud(handlers: HudHandlers) {
   }
 
   const inspector = $<HTMLElement>('#inspector')
-  const insTitle = $<HTMLElement>('#ins-title')
+  // the title row carries the ×, so the text is written into its own node —
+  // setting textContent on the heading would delete the mark
+  const insTitleText = $<HTMLElement>('#ins-title-text')
+  const insClose = $<HTMLElement>('#ins-close')
   const insBody = $<HTMLElement>('#ins-body')
   const insMeta = $<HTMLElement>('#ins-meta')
   const tooltip = $<HTMLElement>('#tooltip')
@@ -204,8 +207,9 @@ export function initHud(handlers: HudHandlers) {
 
   setupCards()
 
-  // the inspector is contextual: tapping its title dismisses the selection
-  insTitle.addEventListener('click', () => handlers.unpin())
+  // The × is the way out, and the only thing in this card that answers the
+  // pointer: the title is a label, not a collapse control.
+  insClose.addEventListener('click', () => handlers.unpin())
 
   btnQuery.addEventListener('click', () => handlers.runQuery())
   btnCheckpoint.addEventListener('click', () => handlers.checkpoint())
@@ -332,8 +336,7 @@ export function initHud(handlers: HudHandlers) {
     inspect(info: Info) {
       inspector.hidden = false
       inspector.classList.remove('collapsed')
-      inspector.classList.add('pinned')
-      insTitle.textContent = info.title
+      insTitleText.textContent = info.title
       insBody.textContent = info.body
       insMeta.textContent = info.meta ?? ''
       // the card may be below the fold of a tall column; bring it into view
@@ -342,7 +345,6 @@ export function initHud(handlers: HudHandlers) {
     },
     unpin() {
       inspector.hidden = true
-      inspector.classList.remove('pinned')
     },
     hover(info: Info | null, x: number, y: number) {
       if (!info) {
