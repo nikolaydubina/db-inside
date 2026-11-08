@@ -348,6 +348,30 @@ export const ANCHOR = {
   resultSky: V(10.6, 24, 1.2),
 }
 
+/**
+ * Where the postgres cage's own origin sits in the world. Everything inside the
+ * class is built in cage-local units; ANCHOR and this vector are what the rest
+ * of the app reads, so moving the cage means moving both together. Set through
+ * PostgresInstance.setOrigin().
+ */
+export const POSTGRES_ORIGIN = new THREE.Vector3(0, 0, 0)
+
+/**
+ * World copies of ANCHOR, recomputed whenever the cage moves. ANCHOR stays
+ * cage-local because that is what the geometry is built from; anything that
+ * frames the instance from outside — camera views, the axes marks — reads these.
+ */
+export const WORLD_ANCHOR = Object.fromEntries(
+  Object.entries(ANCHOR).map(([k, v]) => [k, v.clone()]),
+) as typeof ANCHOR
+
+function rebaseAnchors() {
+  for (const k of Object.keys(ANCHOR) as (keyof typeof ANCHOR)[]) {
+    WORLD_ANCHOR[k].copy(ANCHOR[k]).add(POSTGRES_ORIGIN)
+  }
+}
+rebaseAnchors()
+
 const glowMat = (
   color: number,
   emissive: number,
@@ -435,6 +459,9 @@ export class PostgresInstance {
     this.openBackend()
     this.openBackend()
     this.openBackend()
+
+    // buildTableRegions() derives some anchors while it builds; publish them
+    rebaseAnchors()
   }
 
   /* --------------------------------- building ------------------------------- */
@@ -450,7 +477,9 @@ export class PostgresInstance {
 
   private buildShell() {
     const shellH = 9.8
-    const shellW = 25.2
+    // whole units on purpose: the cage is positioned by its far corner, and a
+    // 25.2-wide box puts that corner on a fraction of a grid unit
+    const shellW = 26.0
     const shellD = 16.0
 
     // The process boundary is one outline box — the same primitive the table
@@ -1084,10 +1113,12 @@ export class PostgresInstance {
     const half = PAGE_GRID.bh / 2
     const h = PAGE_GRID.bh * this.blockScale(p.fill)
     const y0 = p.home.y - half
+    // cage-local, because that is where blocks live; every consumer outlines
+    // and flies in world space, so it is lifted here rather than everywhere
     return new THREE.Box3(
       new THREE.Vector3(p.home.x - PAGE_GRID.bw / 2, y0, p.home.z - PAGE_GRID.bd / 2),
       new THREE.Vector3(p.home.x + PAGE_GRID.bw / 2, y0 + h, p.home.z + PAGE_GRID.bd / 2),
-    )
+    ).translate(POSTGRES_ORIGIN)
   }
 
   blockInfo(p: Page8K): Info {
@@ -2341,7 +2372,7 @@ export class PostgresInstance {
   walRunBox() {
     const box = new THREE.Box3()
     for (let i = 0; i < this.walBlocks.length; i++) box.expandByPoint(this.walSlot(i))
-    return box.isEmpty() ? box : box.expandByScalar(PAGE_GRID.bh)
+    return box.isEmpty() ? box : box.expandByScalar(PAGE_GRID.bh).translate(POSTGRES_ORIGIN)
   }
 
   /** Box around the floating wal_buffers cubes. */
@@ -2359,7 +2390,7 @@ export class PostgresInstance {
   walHeadBox() {
     const c = this.walSlot(this.walHeadIndex)
     const r = new THREE.Vector3(PAGE_GRID.bw / 2, PAGE_GRID.bh / 2, PAGE_GRID.bd / 2)
-    return new THREE.Box3(c.clone().sub(r), c.clone().add(r))
+    return new THREE.Box3(c.clone().sub(r), c.clone().add(r)).translate(POSTGRES_ORIGIN)
   }
 
   /** Segments currently holding data: the run fills up, then stays full forever. */
@@ -2379,6 +2410,21 @@ export class PostgresInstance {
   recycleWal() {
     this.walWritten = 1
     this.walProgress = 0
+  }
+
+  /**
+   * Slide the whole instance across the floor. The group carries the geometry;
+   * ANCHOR carries every world-space point that aims at it from outside (query
+   * paths, camera views, story framing), and the geometry helpers below report
+   * cage-local points that callers lift with world(). All three have to agree.
+   */
+  setOrigin(pos: THREE.Vector3): THREE.Vector3 {
+    const delta = pos.clone().sub(this.group.position)
+    if (delta.lengthSq() === 0) return delta
+    this.group.position.copy(pos)
+    POSTGRES_ORIGIN.copy(pos)
+    rebaseAnchors()
+    return delta
   }
 
   update(dt: number, time: number) {

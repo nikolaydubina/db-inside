@@ -1,5 +1,6 @@
 import * as THREE from 'three'
-import { ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, pageX, pageZ } from './instance'
+import { WORLD_ANCHOR as ANCHOR, BACKEND_ORIGIN, BACKEND_SLOTS, PAGE_GRID, POSTGRES_ORIGIN, pageX, pageZ } from './instance'
+import { REDIS_ANCHOR, REDIS_ORIGIN } from './redis'
 import type { Ticker } from './util'
 import { easeInOutCubic } from './util'
 
@@ -31,6 +32,9 @@ export interface ViewDef {
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 
+/** Cage-local point → world. ANCHOR is already world; the literals below are not. */
+const L = (x: number, y: number, z: number) => V(x, y, z).add(POSTGRES_ORIGIN)
+
 /** Look at `at` from `offset` relative to it. */
 const shot = (
     anchor: THREE.Vector3,
@@ -49,9 +53,44 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'overview',
         label: 'overview',
+        entity: 'the floor',
+        hint: 'both databases on the same floor, each in its own cage',
+        // midway between the two cages, so rearranging them keeps both in frame
+        pose: () =>
+            shot(
+                POSTGRES_ORIGIN.clone().add(REDIS_ORIGIN).multiplyScalar(0.5),
+                [-38, 24, 54],
+                46,
+                [0, 6.5, 0],
+            ),
+    },
+    {
+        id: 'postgres',
+        label: 'postgres',
         entity: 'instance',
-        hint: 'the whole instance: disk plate, RAM deck, pipeline',
-        pose: () => shot(V(0, 0, 0), [29.2, 19, 34.5], 40, [3.4, 6.6, 1.0]),
+        hint: 'the whole postgres instance: disk plate, RAM deck, pipeline',
+        pose: () => shot(POSTGRES_ORIGIN.clone(), [29.2, 19, 34.5], 40, [3.4, 6.6, 1.0]),
+    },
+    {
+        id: 'redis',
+        label: 'redis',
+        entity: 'redis cage',
+        hint: 'the redis instance: almost nothing on the disk, everything in the air',
+        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 1)), [-19, 11, 23], 38, [0, 5.2, 0]),
+    },
+    {
+        id: 'redis-keys',
+        label: 'redis keys',
+        entity: 'keyspace',
+        hint: 'the keyspace: bucket array below, entries floating above it',
+        pose: () => shot(REDIS_ANCHOR.keys, [-3.4, 5.4, 8.6], 34, [0, -0.5, 0]),
+    },
+    {
+        id: 'redis-disk',
+        label: 'redis disk',
+        entity: 'persistence',
+        hint: 'only two files are here: the incremental AOF and the base RDB',
+        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-4.5, 8.5, 12.5], 36),
     },
     {
         id: 'disk',
@@ -94,14 +133,14 @@ export const VIEWS: ViewDef[] = [
         label: 'indexes',
         entity: 'index structures',
         hint: 'b-tree, BRIN, GIN and hash floating as they sit in RAM',
-        pose: () => shot(V(5.0, 2.4, -2.6), [7.5, 5.0, 12.5], 36),
+        pose: () => shot(L(5.0, 2.4, -2.6), [7.5, 5.0, 12.5], 36),
     },
     {
         id: 'free',
         label: 'free space',
         entity: 'unallocated tail',
         hint: 'the empty tail of the disk: slot lattice, no pages',
-        pose: () => shot(V(pageX(4), 0, pageZ(8)), [-6.0, 5.5, 11.0], 34),
+        pose: () => shot(L(pageX(4), 0, pageZ(8)), [-6.0, 5.5, 11.0], 34),
     },
     {
         id: 'clients',
@@ -112,7 +151,7 @@ export const VIEWS: ViewDef[] = [
         // x offset swings the view and silently cropped the outer two
         pose: () =>
             shot(
-                V(0, BACKEND_ORIGIN.y - 0.9, BACKEND_ORIGIN.z),
+                L(0, BACKEND_ORIGIN.y - 0.9, BACKEND_ORIGIN.z),
                 [0, 6.4, 20.5],
                 36,
                 [0, -1.3, 0],
@@ -124,7 +163,7 @@ export const VIEWS: ViewDef[] = [
         entity: 'page blocks',
         hint: 'down at block level: individual 8 kB pages of a table run',
         pose: () =>
-            shot(V(pageX(24), 0.25, pageZ(7)), [1.6, 1.1, 2.4], 30, [0, 0.1, 0]),
+            shot(L(pageX(24), 0.25, pageZ(7)), [1.6, 1.1, 2.4], 30, [0, 0.1, 0]),
     },
 ]
 
@@ -146,7 +185,7 @@ export const backendView = (i: number): ViewDef => {
     const x = BACKEND_SLOTS[i] ?? 0
     // aim a little below the middle of port + shaft so the subject sits above
     // centre, clear of the caption panel along the bottom
-    const mid = V(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
+    const mid = L(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
     return {
         id: `backend-${i}`,
         label: `backend ${i + 1}`,
@@ -457,7 +496,7 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
             )
         },
         /** Grid helpers so new views can refer to the page lattice. */
-        page: (col: number, row: number, y = 0.25) => V(pageX(col), y, pageZ(row)),
+        page: (col: number, row: number, y = 0.25) => L(pageX(col), y, pageZ(row)),
         grid: PAGE_GRID,
     }
 }

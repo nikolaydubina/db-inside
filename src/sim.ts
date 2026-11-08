@@ -43,7 +43,7 @@ export interface SimStats {
 /** window for the throughput figure, in simulated seconds */
 const RPS_WINDOW = 2
 
-function makePacket(color: number, size: number, scene: THREE.Scene) {
+function makePacket(color: number, size: number, parent: THREE.Object3D) {
   const g = new THREE.Group()
   const core = new THREE.Mesh(
     new THREE.BoxGeometry(size, size, size),
@@ -57,17 +57,17 @@ function makePacket(color: number, size: number, scene: THREE.Scene) {
   )
   g.add(core)
   g.add(halo(color, size * 5.2, 0.6))
-  scene.add(g)
+  parent.add(g)
   return g
 }
 
-const despawn = (ticker: Ticker, scene: THREE.Scene, obj: THREE.Object3D, dur = 0.3) => {
+const despawn = (ticker: Ticker, parent: THREE.Object3D, obj: THREE.Object3D, dur = 0.3) => {
   void ticker
     .add(dur, (k) => {
       obj.scale.setScalar(Math.max(0.001, 1 - k))
       obj.rotation.y += 0.2
     })
-    .then(() => scene.remove(obj))
+    .then(() => parent.remove(obj))
 }
 
 /**
@@ -160,10 +160,20 @@ export class EngineSim {
   constructor(
     private inst: PostgresInstance,
     private ticker: Ticker,
-    private scene: THREE.Scene,
+    /** Kept for the signature; traffic belongs to the cage, not the scene. */
+    _scene: THREE.Scene,
     private paths: Paths,
     private flows: FlowSet,
   ) { }
+
+  /**
+   * Where packets and query paths are parented. The cage, not the scene: a
+   * path drawn for this instance is part of the instance and has to move with
+   * it, exactly like the redis command paths.
+   */
+  private get scene(): THREE.Object3D {
+    return this.inst.group
+  }
 
   get activeChains() {
     return this.chains.length

@@ -93,7 +93,13 @@
             <span class="track"></span>
             <span class="label">fly · wasd</span>
           </label>
+          <label class="switch">
+            <input type="checkbox" id="chk-move" />
+            <span class="track"></span>
+            <span class="label">move · drag</span>
+          </label>
         </div>
+        <p class="hint" id="move-hint" hidden>drag a cage · snaps to the 2-unit floor grid</p>
       </section>
 
       <section class="card" id="stories-card">
@@ -141,6 +147,42 @@
         </dl>
         <div class="bar"><i id="st-bar"></i></div>
         <p class="hint" id="st-note">shared_buffers · 8 kB pages</p>
+      </section>
+
+      <section class="card" id="redis-card">
+        <h2>Redis</h2>
+        <dl class="stats">
+          <div>
+            <dt>keys</dt>
+            <dd id="rd-keys">0</dd>
+          </div>
+          <div>
+            <dt>throughput</dt>
+            <dd id="rd-ops" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>hash hit</dt>
+            <dd id="rd-hit" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>latency</dt>
+            <dd id="rd-lat">—</dd>
+          </div>
+          <div>
+            <dt>memory</dt>
+            <dd id="rd-mem">0%</dd>
+          </div>
+          <div>
+            <dt>evictions</dt>
+            <dd id="rd-evict">0</dd>
+          </div>
+          <div>
+            <dt>aof bytes</dt>
+            <dd id="rd-aof">0</dd>
+          </div>
+        </dl>
+        <div class="bar"><i id="rd-bar"></i></div>
+        <p class="hint" id="rd-note">one thread · dataset in RAM</p>
       </section>
 
       <section class="card">

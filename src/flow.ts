@@ -40,6 +40,8 @@ const curve = (pts: THREE.Vector3[]) =>
 export const pathCurve = (pts: THREE.Vector3[]) => curve(pts)
 
 export function makePaths(): Paths {
+  // Everything here is cage-local: the paths are parented to the cage, so when
+  // the cage moves they move with it without being rebuilt.
   // both anchors sit on a real block's top face, not in the air above it
   const bufferTop = V(bufferSlotX(6), BUFFER_TOP_Y, bufferSlotZ(3))
   const diskTop = V(ANCHOR.disk.x, PAGE_TOP_Y, ANCHOR.disk.z)
@@ -197,10 +199,10 @@ export interface FlowSet {
   all: FlowLine[]
 }
 
-export function makeFlows(scene: THREE.Scene, paths: Paths): FlowSet {
+export function makeFlows(parent: THREE.Object3D, paths: Paths): FlowSet {
   const add = (points: THREE.Vector3[], color: number, opts?: FlowOptions) => {
     const f = new FlowLine(points, color, opts)
-    scene.add(f.group)
+    parent.add(f.group)
     return f
   }
 
@@ -242,8 +244,14 @@ export class QueryChain {
   private flows: FlowLine[] = []
   disposed = false
 
-  constructor(private scene: THREE.Scene) {
-    scene.add(this.group)
+  /**
+   * `parent` is usually the scene, but an instance that can be moved passes its
+   * own cage group and builds points in that cage's local space — then the path
+   * is part of the box and follows it, instead of being stranded where it was
+   * drawn.
+   */
+  constructor(parent: THREE.Object3D) {
+    parent.add(this.group)
   }
 
   add(points: THREE.Vector3[], color: number, opts: FlowOptions = {}) {
@@ -280,6 +288,6 @@ export class QueryChain {
     this.disposed = true
     for (const f of this.flows) f.dispose()
     this.flows = []
-    this.scene.remove(this.group)
+    this.group.parent?.remove(this.group)
   }
 }

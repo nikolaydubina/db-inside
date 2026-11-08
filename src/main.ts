@@ -2,7 +2,12 @@ import './style.css'
 import * as THREE from 'three'
 import { createWorld } from './world'
 import { PostgresInstance } from './instance'
+import { POSTGRES_ORIGIN } from './instance'
 import type { BlockPick } from './instance'
+import { RedisInstance } from './redis'
+import { RedisSim } from './redis-sim'
+import type { RedisStats } from './redis-sim'
+import { createAxes } from './axes'
 import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import type { Regime } from './sim'
@@ -32,12 +37,290 @@ bufferLabel.position.copy(instance.bufferCorners.farLeft).add(new THREE.Vector3(
 instance.group.add(bufferLabel)
 
 const paths = makePaths()
-const flows = makeFlows(scene, paths)
+// both instances own their own traffic: paths and packets are parented to the
+// cage, so moving a cage takes them with it
+const flows = makeFlows(instance.group, paths)
 
 const sim = new EngineSim(instance, ticker, scene, paths, flows)
 
+// the second database, on the same floor
+const redis = new RedisInstance(ticker)
+scene.add(redis.group)
+const redisSim = new RedisSim(redis, ticker)
+
+/** Both instances answer the pointer the same way. */
+const pickables: THREE.Object3D[] = [...instance.pickables, ...redis.pickables]
+
+// measuring aid: __axes.on() / .off() / .toggle(), or open the page with ?axes
+const axes = createAxes(scene)
+const markPostgres = axes.mark('postgres', new THREE.Vector3(0, 0, 0))
+const markRedis = axes.mark('redis', new THREE.Vector3(-36, 0, 0))
+
   // handy for debugging in the browser console
   ; (window as unknown as Record<string, unknown>).__psql = { scene, world, instance, sim, paths, flows }
+  ; (window as unknown as Record<string, unknown>).__redis = { redis, redisSim }
+  ; (window as unknown as Record<string, unknown>).__axes = axes
+if (new URLSearchParams(location.search).has('axes')) axes.on()
+console.info(
+  '%caxes%c __axes.on() · .off() · .toggle() — or open the page with ?axes',
+  'color:#ff6b6b',
+  'color:inherit',
+)
+
+/* ------------------------------- layout mode ------------------------------ */
+// Dragging a cage is an authoring tool, not part of the machine: you slide it
+// across the floor in floor-grid steps, the coordinates print in the console,
+// and __layout.export() gives you the numbers to paste back into the source.
+// The arrangement also lives in localStorage, so a reload mid-session keeps it.
+
+const LAYOUT_KEY = 'db-inside.layout.v1'
+/** one floor grid cell */
+const MOVE_STEP = 2
+const GROUND = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
+
+/**
+ * Cages are anchored by their FAR corner — max x, max z — the corner the axes
+ * marks sit on. Both cages are the same size, so one half-extent fits both.
+ */
+const CAGE = { halfX: 13, halfZ: 8 }
+type CageName = 'postgres' | 'redis'
+/** Authored anchors: postgres at the origin, redis behind it on the same x. */
+const CAGE_HOME: Record<CageName, [number, number]> = { postgres: [0, 0], redis: [0, -26] }
+
+const cageGroup = (c: CageName) => (c === 'postgres' ? instance.group : redis.group)
+const anchorOf = (c: CageName): [number, number] => {
+  const p = cageGroup(c).position
+  return [Math.round(p.x + CAGE.halfX), Math.round(p.z + CAGE.halfZ)]
+}
+
+const moveToggle = document.querySelector<HTMLInputElement>('#chk-move')!
+const moveHint = document.getElementById('move-hint')!
+let moveMode = false
+
+interface DragState {
+  cage: CageName
+  corner0: [number, number]
+  start: THREE.Vector3
+  /**
+   * Locked after the first real movement: from this 3/4 camera a sideways drag
+   * moves mostly along z, so a free drag makes x impossible to land by hand.
+   */
+  axis: 'x' | 'z' | null
+}
+let drag: DragState | null = null
+
+/** Anchor coordinates as { x, y, z }; y is the floor, so it is always 0. */
+type AnchorOut = { x: number; y: number; z: number }
+type AnchorIn = { x: number; z: number } | [number, number]
+const pairOf = (a: AnchorIn): [number, number] => (Array.isArray(a) ? [a[0], a[1]] : [a.x, a.z])
+const anchorOut = (c: CageName): AnchorOut => {
+  const [x, z] = anchorOf(c)
+  return { x, y: 0, z }
+}
+
+const layoutNow = () => ({ postgres: anchorOut('postgres'), redis: anchorOut('redis') })
+
+function updateMoveHint() {
+  const p = anchorOf('postgres')
+  const r = anchorOf('redis')
+  const axis = drag?.axis ? ` · locked to ${drag.axis}` : ''
+  moveHint.textContent =
+    `postgres ${p[0]},${p[1]} · redis ${r[0]},${r[1]} · step ${MOVE_STEP} · arrows nudge · shift = free${axis}`
+  console.info(
+    `%clayout%c postgres anchor (${p[0]}, ${p[1]}) · redis anchor (${r[0]}, ${r[1]})`,
+    'color:#ff6b6b',
+    'color:inherit',
+  )
+}
+
+function moveCageTo(c: CageName, anchor: [number, number]) {
+  const pos = new THREE.Vector3(anchor[0] - CAGE.halfX, 0, anchor[1] - CAGE.halfZ)
+  const at = new THREE.Vector3(anchor[0], 0, anchor[1])
+  if (c === 'postgres') {
+    if (instance.setOrigin(pos).lengthSq() === 0) return
+    markPostgres(at)
+  } else {
+    redis.setOrigin(pos)
+    markRedis(at)
+  }
+  updateMoveHint()
+}
+
+const saveLayout = () => {
+  try {
+    localStorage.setItem(LAYOUT_KEY, JSON.stringify(layoutNow()))
+  } catch {
+    /* private mode */
+  }
+}
+
+function applyLayout(l: { postgres?: AnchorIn; redis?: AnchorIn }) {
+  if (l.postgres) moveCageTo('postgres', pairOf(l.postgres))
+  if (l.redis) moveCageTo('redis', pairOf(l.redis))
+}
+
+// authored default: postgres at the origin corner, redis one cage-gap to the left
+applyLayout(CAGE_HOME)
+try {
+  const raw = localStorage.getItem(LAYOUT_KEY)
+  // v1 stored cage centres, not corners; only reuse it if it looks like corners
+  if (raw) applyLayout(JSON.parse(raw) as { postgres?: AnchorIn; redis?: AnchorIn })
+} catch {
+  /* a corrupt layout is not worth breaking boot over */
+}
+; (window as unknown as Record<string, unknown>).__layout = {
+  get: layoutNow,
+  set: (l: { postgres?: AnchorIn; redis?: AnchorIn }) => {
+    applyLayout(l)
+    saveLayout()
+  },
+  reset: () => {
+    applyLayout(CAGE_HOME)
+    try {
+      localStorage.removeItem(LAYOUT_KEY)
+    } catch {
+      /* private mode */
+    }
+  },
+  export: () => JSON.stringify(layoutNow()),
+  step: MOVE_STEP,
+}
+; (window as unknown as Record<string, unknown>).__move = {
+  get mode() {
+    return moveMode
+  },
+  get cage() {
+    return hoverCage ?? lastCage
+  },
+  get axis() {
+    return drag?.axis ?? null
+  },
+}
+
+moveToggle.addEventListener('change', () => {
+  moveMode = moveToggle.checked
+  moveHint.hidden = !moveMode
+  if (moveMode) {
+    axes.on()
+    // flying and dragging want the same gesture; dragging wins
+    if (flyToggle.checked) {
+      flyToggle.checked = false
+      flyToggle.dispatchEvent(new Event('change'))
+    }
+  } else {
+    // the ruler exists for this mode; leaving it on after a drag is clutter
+    axes.off()
+  }
+  updateMoveHint()
+})
+
+const dragPlanePoint = new THREE.Vector3()
+/** The cage arrows nudge: whatever is under the pointer, else the last one dragged. */
+let lastCage: CageName | null = null
+let hoverCage: CageName | null = null
+
+function ownerCage(o: THREE.Object3D): CageName | null {
+  let cur: THREE.Object3D | null = o
+  while (cur) {
+    if (cur === instance.group) return 'postgres'
+    if (cur === redis.group) return 'redis'
+    cur = cur.parent
+  }
+  return null
+}
+
+const ndcOf = (e: { clientX: number; clientY: number }) =>
+  new THREE.Vector2(
+    (e.clientX / window.innerWidth) * 2 - 1,
+    -(e.clientY / window.innerHeight) * 2 + 1,
+  )
+
+function groundAt(ndc: THREE.Vector2): THREE.Vector3 | null {
+  raycaster.setFromCamera(ndc, camera)
+  return raycaster.ray.intersectPlane(GROUND, dragPlanePoint) ? dragPlanePoint.clone() : null
+}
+
+/** Fallback for a grab that missed every pickable: whichever cage footprint covers the point. */
+function cageUnder(p: THREE.Vector3): CageName | null {
+  const covers = (c: CageName) => {
+    const box = new THREE.Box3().setFromObject(cageGroup(c))
+    return p.x >= box.min.x - 1 && p.x <= box.max.x + 1 && p.z >= box.min.z - 1 && p.z <= box.max.z + 1
+  }
+  if (covers('redis')) return 'redis'
+  if (covers('postgres')) return 'postgres'
+  return null
+}
+
+canvas.addEventListener('pointerdown', (e) => {
+  if (!moveMode || e.button !== 0) return
+  const ndc = ndcOf(e)
+  const ground = groundAt(ndc)
+  if (!ground) return
+  const hit = pick(ndc)
+  const cage = (hit ? ownerCage(hit.root) : null) ?? cageUnder(ground)
+  if (!cage) return
+  drag = { cage, corner0: anchorOf(cage), start: ground, axis: null }
+  world.controls.enabled = false
+  autoOrbit = false
+  world.controls.autoRotate = false
+  canvas.style.cursor = 'grabbing'
+  lastInteraction = performance.now()
+  e.preventDefault()
+})
+
+window.addEventListener('pointermove', (e) => {
+  if (!drag) return
+  const ground = groundAt(ndcOf(e))
+  if (!ground) return
+  const dx = ground.x - drag.start.x
+  const dz = ground.z - drag.start.z
+  // commit to the dominant axis once the pointer has actually travelled, so a
+  // sideways drag moves along x instead of drifting in both at once
+  if (!drag.axis && Math.max(Math.abs(dx), Math.abs(dz)) > MOVE_STEP * 0.75) {
+    drag.axis = Math.abs(dx) >= Math.abs(dz) ? 'x' : 'z'
+    updateMoveHint()
+  }
+  const axis = e.shiftKey ? null : drag.axis
+  const snap = (v: number) => Math.round(v / MOVE_STEP) * MOVE_STEP
+  moveCageTo(drag.cage, [
+    snap(drag.corner0[0] + (axis === 'z' ? 0 : dx)),
+    snap(drag.corner0[1] + (axis === 'x' ? 0 : dz)),
+  ])
+  lastInteraction = performance.now()
+})
+
+window.addEventListener('pointerup', () => {
+  if (!drag) return
+  lastCage = drag.cage
+  drag = null
+  world.controls.enabled = true
+  canvas.style.cursor = 'grab'
+  updateMoveHint()
+  saveLayout()
+})
+
+// arrow keys: exactly one grid step along exactly one axis
+const NUDGE: Record<string, [number, number]> = {
+  ArrowLeft: [-1, 0],
+  ArrowRight: [1, 0],
+  ArrowUp: [0, -1],
+  ArrowDown: [0, 1],
+}
+window.addEventListener('keydown', (e) => {
+  if (!moveMode || !NUDGE[e.key]) return
+  if (e.target instanceof HTMLElement && /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return
+  const hit = pick(pointer)
+  const ground = groundAt(pointer)
+  const cage =
+    (hit ? ownerCage(hit.root) : null) ?? hoverCage ?? lastCage ?? (ground ? cageUnder(ground) : null)
+  if (!cage) return
+  const dir = NUDGE[e.key]
+  const corner = anchorOf(cage)
+  lastCage = cage
+  moveCageTo(cage, [corner[0] + dir[0] * MOVE_STEP, corner[1] + dir[1] * MOVE_STEP])
+  saveLayout()
+  e.preventDefault()
+})
 
 let autoOrbit = true
 let flyMode = false
@@ -179,7 +462,7 @@ const storyScene: StoryScene = {
     const box = new THREE.Box3(
       best.group.position.clone().add(new THREE.Vector3(-0.8, -2.35, -0.8)),
       best.group.position.clone().add(new THREE.Vector3(0.8, 0.75, 0.8)),
-    )
+    ).translate(POSTGRES_ORIGIN)
     return { id: `backend ${best.id + 1}`, box }
   },
   valid: (id: string) => {
@@ -340,7 +623,7 @@ function infoForRoot(o: THREE.Object3D | null) {
 
 function pick(ndc: THREE.Vector2): PickInfo | null {
   raycaster.setFromCamera(ndc, camera)
-  const hits = raycaster.intersectObjects(instance.pickables, true)
+  const hits = raycaster.intersectObjects(pickables, true)
   // Two passes on purpose. A block answers for one instance of one mesh and
   // declines when the camera is far away; the table-region boxes hover *above*
   // the blocks, so they are usually the nearer hit and would otherwise eat
@@ -381,6 +664,8 @@ canvas.addEventListener('pointerdown', (e) => {
 canvas.addEventListener('pointerup', (e) => {
   const moved = Math.hypot(e.clientX - downAt.x, e.clientY - downAt.y)
   if (moved > 6) return
+  // in move mode a click on a cage is a grab, not an inspection
+  if (moveMode) return
   const root = pick(pointer)
   if (root) {
     if (pinned?.key === root.key) {
@@ -444,6 +729,7 @@ const flyToggle = document.querySelector<HTMLInputElement>('#chk-fly')!
 // Double-click frames whatever is under the cursor and hands the orbit to it.
 // Empty space frames the whole instance, which doubles as "zoom out".
 canvas.addEventListener('dblclick', (e) => {
+  if (moveMode) return
   const ndc = new THREE.Vector2(
     (e.clientX / window.innerWidth) * 2 - 1,
     -(e.clientY / window.innerHeight) * 2 + 1,
@@ -462,7 +748,11 @@ canvas.addEventListener('dblclick', (e) => {
     flyToggle.checked = false
     flyToggle.dispatchEvent(new Event('change'))
   }
-  void rig.focus(root ? (root.box ?? root.root) : instance.group).then(() => {
+  void rig.focus(
+    root
+      ? (root.box ?? root.root)
+      : new THREE.Box3().setFromObject(instance.group).union(new THREE.Box3().setFromObject(redis.group)),
+  ).then(() => {
     autoOrbit = true
     if (orbitCheckbox) orbitCheckbox.checked = true
     world.controls.autoRotate = true
@@ -531,6 +821,40 @@ function updateFly(dt: number) {
   world.controls.target.add(flyMove)
 }
 
+/* -------------------------------- redis hud ------------------------------- */
+
+const rd = {
+  keys: document.getElementById('rd-keys')!,
+  ops: document.getElementById('rd-ops')!,
+  hit: document.getElementById('rd-hit')!,
+  lat: document.getElementById('rd-lat')!,
+  mem: document.getElementById('rd-mem')!,
+  evict: document.getElementById('rd-evict')!,
+  aof: document.getElementById('rd-aof')!,
+  bar: document.getElementById('rd-bar')!,
+  note: document.getElementById('rd-note')!,
+}
+
+const fmtBytes = (n: number) =>
+  n < 1024
+    ? `${n} B`
+    : n < 1024 * 1024
+      ? `${(n / 1024).toFixed(1)} kB`
+      : `${(n / (1024 * 1024)).toFixed(2)} MB`
+
+/** The redis card is fed straight from its own sim — it has no shared model. */
+function updateRedisCard(s: RedisStats) {
+  rd.keys.textContent = `${s.keys}/${s.capacity}`
+  rd.ops.textContent = `${Math.round(s.opsPerSec)} ops/s`
+  rd.hit.textContent = s.hitRate > 0 ? `${s.hitRate.toFixed(1)}%` : '—'
+  rd.lat.textContent = s.latency > 0 ? `${s.latency.toFixed(2)} ms` : '—'
+  rd.mem.textContent = `${s.memPct.toFixed(0)}%`
+  rd.evict.textContent = String(s.evictions)
+  rd.aof.textContent = fmtBytes(s.aofBytes)
+  rd.bar.style.width = `${Math.min(100, s.memPct)}%`
+  if (rd.note.textContent !== s.note) rd.note.textContent = s.note
+}
+
 /* --------------------------------- ambient -------------------------------- */
 
 instance.markDeadTuples(7)
@@ -548,6 +872,11 @@ function frame() {
 
   ticker.update(dt)
   sim.update(dt)
+  // redis runs on the same clock and pauses with the postgres ambient traffic,
+  // so a story about one instance is not competing with traffic in the other
+  redisSim.ambient = sim.ambient
+  redisSim.update(dt)
+  redis.update(dt, now * 0.001)
   updateFly(raw)
 
   // ambient traffic so the machine always feels alive; a story switches it off
@@ -562,6 +891,10 @@ function frame() {
 
   // hover highlight
   const root = pick(pointer)
+  hoverCage = root ? ownerCage(root.root) : null
+  // pointing at a cage also selects it, so arrow keys keep working after the
+  // pointer drifts off it (the camera keeps orbiting)
+  if (hoverCage) lastCage = hoverCage
   if ((root?.key ?? null) !== (hovered?.key ?? null)) {
     hovered = root
     hud.hover(root?.info ?? null, pointerPx.x, pointerPx.y)
@@ -614,6 +947,7 @@ function frame() {
   world.render(raw, dt)
   telemetry.tick(dt, raw)
   hud.setStats(sim.stats)
+  updateRedisCard(redisSim.stats)
 
   if (!booted) {
     booted = true
