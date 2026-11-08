@@ -38,7 +38,11 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   renderer.info.autoReset = false
 
   const scene = new THREE.Scene()
-  scene.fog = new THREE.FogExp2(0x061420, 0.0108)
+  // The two cages stand 34 units apart, so a single exp² density has to do two
+  // jobs: leave a close study readable (20–30 units → 10–20 % fade) and turn the
+  // neighbouring machine into a silhouette (60–70 units → 60–72 %). Labels are
+  // culled separately at 45 units; fog handles the geometry.
+  scene.fog = new THREE.FogExp2(0x061420, 0.016)
 
   const camera = new THREE.PerspectiveCamera(40, window.innerWidth / window.innerHeight, 0.1, 2600)
   camera.position.set(29.2, 19, 34.5)

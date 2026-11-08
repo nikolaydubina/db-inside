@@ -233,6 +233,8 @@ export class FlowLine {
       opacity: this.baseOpacity,
       blending: THREE.AdditiveBlending,
       depthWrite: false,
+      // same as the cage outlines: a ShaderMaterial does not opt into fog by default
+      fog: true,
       // screen-space width: a fat line stays solid even when it is far away
       worldUnits: false,
       dashed: false,

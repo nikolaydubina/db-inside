@@ -90,6 +90,9 @@ export class OutlineBox extends THREE.Group {
         opacity,
         blending: THREE.AdditiveBlending,
         depthWrite: false,
+        // ShaderMaterial defaults this to false: without it the fat-line shader
+        // never takes the fog chunks, so a cage stays bright while its blocks fade.
+        fog: true,
         worldUnits: false,
         dashed: this.dashed,
         dashSize: 0.22,
