@@ -1,6 +1,6 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
-import { BACKEND_ORIGIN, BACKEND_SLOTS, PALETTE } from './instance'
+import { BACKEND_ORIGIN, BACKEND_SLOTS, BLOCK_PICK_RANGE, PALETTE } from './instance'
 import type { Info } from './instance'
 import {
     BLOCK_LIFT,
@@ -463,16 +463,20 @@ export class RedisInstance {
 
         const dW = DICT.cols * PITCH
         const dD = DICT.rows * PITCH
-        const dictEdge = new OutlineBox(dW, 0.04, dD, PALETTE.cyan, 0.22).centre(0, DICT.y, DICT.cz)
-        this.group.add(dictEdge)
-        this.register(
-            dictEdge,
-            {
-                title: 'Hash table — the bucket array',
-                body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap. There is no index to choose and no planner to consult — the data structure is the query plan.',
-                meta: 'dict · bucket array · in the process heap',
-            },
+        // No permanent outline: the bucket array is not a selected thing, it is
+        // just there. Hovering it selects the whole table, and that is when the
+        // cage is drawn — by the hover highlight, not by the group itself.
+        const dictPick = new THREE.Mesh(
+            new THREE.BoxGeometry(dW, 0.6, dD),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
+        dictPick.position.set(0, DICT.y, DICT.cz)
+        this.group.add(dictPick)
+        this.register(dictPick, {
+            title: 'Hash table — the bucket array',
+            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap. There is no index to choose and no planner to consult — the data structure is the query plan.',
+            meta: 'dict · bucket array · in the process heap',
+        })
         const dictLab = label('DICT · BUCKETS')
         dictLab.position.set(-dW / 2 - 0.3, DICT.y + 0.55, DICT.cz - dD / 2)
         this.group.add(dictLab)
@@ -525,16 +529,20 @@ export class RedisInstance {
 
         const kW = KEYS.cols * PITCH
         const kD = KEYS.rows * PITCH
-        const keysEdge = new OutlineBox(kW, 0.04, kD, PALETTE.cyan, 0.3).centre(0, KEYS.y, KEYS.cz)
-        this.group.add(keysEdge)
-        this.register(
-            keysEdge,
-            {
-                title: 'Keyspace — the database itself, in RAM',
-                body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it.',
-                meta: `${KEYS.cols * KEYS.rows} slots · values live in the process heap`,
-            },
+        // Same mechanism as the disk: one pick volume for the whole container.
+        // The key blocks answer per-instance only from up close (see keyPick),
+        // so from a distance you select the keyspace, not a lucky block.
+        const keysPick = new THREE.Mesh(
+            new THREE.BoxGeometry(kW, 0.8, kD),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
+        keysPick.position.set(0, KEYS.y, KEYS.cz)
+        this.group.add(keysPick)
+        this.register(keysPick, {
+            title: 'Keyspace — the database itself, in RAM',
+            body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it.',
+            meta: `${KEYS.cols * KEYS.rows} slots · values live in the process heap`,
+        })
         const keysLab = label('KEYS · RAM')
         keysLab.position.set(-kW / 2 - 0.4, KEYS.y + 0.95, KEYS.cz - kD / 2)
         this.group.add(keysLab)
@@ -662,16 +670,19 @@ export class RedisInstance {
             this.queueCells.push(cell)
         }
         const qW = QUEUE.cells * 0.52 + 0.14
-        const qEdge = new OutlineBox(qW, 0.22, 0.62, PALETTE.violet, 0.3).centre(0, QUEUE.y, QUEUE.z)
-        this.group.add(qEdge)
-        this.register(
-            qEdge,
-            {
-                title: 'Command queue — shared by every connection',
-                body: 'Reads and writes from all clients are parsed into an argv and queued here. The single command thread drains the queue in order, so a command that takes 10 ms delays every client behind it by 10 ms. Redis is fast because each command is short, not because it runs many at once.',
-                meta: 'one queue · one consumer · strictly in order',
-            },
+        // same rule as the bucket array: the queue is a container, not a marked
+        // thing. Its cage appears when you hover it, never before.
+        const qPick = new THREE.Mesh(
+            new THREE.BoxGeometry(qW, 0.55, 0.62),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
+        qPick.position.set(0, QUEUE.y, QUEUE.z)
+        this.group.add(qPick)
+        this.register(qPick, {
+            title: 'Command queue — shared by every connection',
+            body: 'Reads and writes from all clients are parsed into an argv and queued here. The single command thread drains the queue in order, so a command that takes 10 ms delays every client behind it by 10 ms. Redis is fast because each command is short, not because it runs many at once.',
+            meta: 'one queue · one consumer · strictly in order',
+        })
         const qLab = label('COMMAND QUEUE')
         qLab.position.set(-qW / 2 - 0.2, QUEUE.y + 0.4, QUEUE.z)
         this.group.add(qLab)
@@ -781,18 +792,10 @@ export class RedisInstance {
         g.add(body)
         g.add(halo(color, 2.0, 0.28))
 
-        const ring = new THREE.Mesh(
-            new THREE.TorusGeometry(0.5, 0.014, 6, 40),
-            new THREE.MeshBasicMaterial({
-                color,
-                transparent: true,
-                opacity: 0.55,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-            }),
-        )
-        ring.rotation.x = Math.PI / 2
-        g.add(ring)
+        // No ring around the agent. A flat torus lying in the XZ plane reads as a
+        // cage drawn around it — the same "this thing is selected" signal the
+        // scene uses for hover — and it was on permanently. The body and the halo
+        // are enough to find it; the pick box below is what makes it selectable.
 
         const tag = label(text)
         tag.position.set(0.5, 0.15, 0)
@@ -828,6 +831,10 @@ export class RedisInstance {
     }
 
     private diskPick(hit: THREE.Intersection) {
+        // Nothing inside a container answers for itself until you are close enough
+        // to mean it: from across the room a click is about the file, not about
+        // one 4 kB block. Same range rule as the postgres disk.
+        if (hit.distance > BLOCK_PICK_RANGE) return null
         const i = this.instanceAt(hit, COLS * ROWS)
         if (i === null) return null
         const r = Math.floor(i / COLS)
@@ -856,6 +863,9 @@ export class RedisInstance {
     }
 
     private keyPick(hit: THREE.Intersection) {
+        // same rule: a key is only selectable from close up, otherwise you are
+        // pointing at the keyspace as a whole
+        if (hit.distance > BLOCK_PICK_RANGE) return null
         const i = this.instanceAt(hit, this.keys.length)
         if (i === null) return null
         const key = this.keys[i]
