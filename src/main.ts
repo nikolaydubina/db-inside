@@ -26,7 +26,7 @@ const instance = new PostgresInstance(ticker)
 scene.add(instance.group)
 
 // extra labels
-const bufferLabel = label('SHARED BUFFERS · RAM')
+const bufferLabel = label('SHARED BUFFERS')
 // pinned to the far-left corner of the floating pool, text flowing inward
 bufferLabel.position.copy(instance.bufferCorners.farLeft).add(new THREE.Vector3(-0.02, 0.34, -0.06))
 instance.group.add(bufferLabel)

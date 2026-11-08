@@ -796,11 +796,11 @@ export class PostgresInstance {
       meta: 'wal_buffers · RAM · 8 kB pages · circular · flushed by WAL writer',
     })
 
-    const wbLab = label('WAL BUFFERS · RAM')
+    const wbLab = label('WAL BUFFERS')
     wbLab.position.set(0, 0.75, 0)
     wb.add(wbLab)
 
-    const lab = label('WAL · DISK')
+    const lab = label('WAL')
     lab.position.set(x0 + 0.4, PAGE_Y + 0.85, z1 + 0.15)
     this.group.add(lab)
   }
