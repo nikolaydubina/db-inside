@@ -331,6 +331,39 @@ export class RedisInstance {
         this.aofHead = Math.round(AOF_LEN * 0.6)
         this.layoutAof()
 
+        // The AOF run gets an extent outline, exactly the way the WAL run does
+        // next door: a cage marks where the file LIVES on the floor, not what
+        // happens to be written in it. It therefore never grows or shrinks with
+        // the head — the file has a footprint, and this is it.
+        const ax0 = xAt(AOF_C0) - PITCH / 2
+        const ax1 = xAt(AOF_C0 + AOF_LEN - 1) + PITCH / 2
+        const az0 = zAt(AOF_ROW) - PITCH / 2
+        const az1 = zAt(AOF_ROW) + PITCH / 2
+        const aofEdge = new OutlineBox(
+            ax1 - ax0,
+            0.5,
+            az1 - az0,
+            PALETTE.amber,
+            0.75,
+        ).centre((ax0 + ax1) / 2, PAGE_Y + 0.1, (az0 + az1) / 2)
+        this.group.add(aofEdge)
+
+        const aofPick = new THREE.Mesh(
+            new THREE.BoxGeometry(ax1 - ax0, 1.4, az1 - az0),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        aofPick.position.set((ax0 + ax1) / 2, PAGE_Y + 0.5, (az0 + az1) / 2)
+        this.group.add(aofPick)
+        this.register(
+            aofPick,
+            {
+                title: 'AOF — the append-only file, on disk',
+                body: 'This run is one file. It is not page-structured: Redis appends the bytes of each write command after the last byte of the file, so the only unit here is the 4 kB block a filesystem stores it in. Only the blocks the file has reached are drawn; the rest of the run is room it will grow into. The block being appended pulses once and is an ordinary block again — nothing is selected, nothing is rewritten in place. The newest bytes are still in aof_buf, the floating cyan strip above, until fsync: with appendfsync everysec they can be up to a second behind, which is the whole trade. A rewrite writes a new, shorter file and swaps it in, which is why the end of this run can move backwards.',
+                meta: 'appendonlydir · byte stream on a filesystem · fsync per appendfsync',
+            },
+            aofEdge,
+        )
+
         // slot lattice across the free space — the same "room to grow" texture the
         // postgres disk uses for its untouched tail
         const slotPts: number[] = []
