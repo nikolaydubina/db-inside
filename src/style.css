@@ -1427,9 +1427,18 @@ body.db-open #inspector {
   border-bottom: 0;
 }
 
+/*
+ * The colophon: two credited statements and a link, and each of them is one
+ * line — this is not prose and there is nowhere sensible for it to wrap.
+ *
+ * It used to sit in a 300 px box while the longer line measured 298.3 px in
+ * Chrome: a pixel and a half of headroom, which Safari's font metrics spend and
+ * Firefox's do not. So the width is free and the wrapping is off, and the block
+ * is two lines in every engine rather than two lines in most of them.
+ */
 .fine {
   margin: 0;
-  max-width: 300px;
+  white-space: nowrap;
   text-align: right;
   font-family: var(--mono);
   font-size: 8.5px;
