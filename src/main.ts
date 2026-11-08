@@ -280,7 +280,7 @@ window.addEventListener(
     world.controls.enabled = false
     // hold the camera still for the duration of the grab; this is a box moving,
     // not the camera, so the orbit preference and its timer are left alone
-    world.controls.autoRotate = false
+    driftOn = false
     canvas.style.cursor = 'grabbing'
     e.preventDefault()
   },
@@ -437,11 +437,31 @@ let userTookCamera = false
  */
 const ORBIT_COOLDOWN = 5000
 
+/**
+ * The drift is ours, not OrbitControls' `autoRotate`.
+ *
+ * Both turn the camera around a point, but `autoRotate` can only turn it around
+ * the aim point — and a cage-level shot aims PAST its cage, out in front, so the
+ * machine would sweep across the frame instead of turning where it stands. Here
+ * the pivot is the view's own (the middle of the cage, for a cage-level shot), so
+ * the camera keeps its position and its framing and the object turns under it.
+ *
+ * 0.34 is the speed the old orbit ran at: OrbitControls turns 2π/60 · speed rad
+ * per second, so that is one revolution in about three minutes.
+ */
+const ORBIT_RATE = (2 * Math.PI / 60) * 0.34
+let driftOn = true
+
 let cameraMoves = 0
 function noteCameraMove() {
   cameraMoves++
   lastInteraction = performance.now()
-  world.controls.autoRotate = false
+  driftOn = false
+}
+
+/** The drift: turn the camera about what the shot aims at, once every ~3 minutes. */
+function drift(dt: number) {
+  rig.turn(-ORBIT_RATE * dt)
 }
 
 // what the drift is doing right now — handy when a gesture looks like it stuck
@@ -449,7 +469,7 @@ function noteCameraMove() {
   get state() {
     return {
       flyMode,
-      autoRotate: world.controls.autoRotate,
+      drift: driftOn,
       idleMs: Math.round(performance.now() - lastInteraction),
       dragging: !!drag,
       moves: cameraMoves,
@@ -485,7 +505,7 @@ const rig = createCameraRig({
   // Navigating stops the drift first, otherwise it drags the camera off the
   // pose. It comes back on its own after the cooldown, like after any camera move.
   beforeNavigate: () => {
-    world.controls.autoRotate = false
+    driftOn = false
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlViews = rig
@@ -618,40 +638,6 @@ function pinShotSubject(db: ShareDb, view: ViewDef) {
     hud.inspect(picked.info)
     return
   }
-}
-
-// The card is the query's business, never the path's: `/redis` is the cage from
-// its own shot, with whatever cards you happen to have open.
-const bootPanel = panelFromQuery()
-if (bootPanel) hud.setDb(bootPanel)
-
-if (bootAddress) {
-  // `?cam=` is a precise override, so it wins over whatever the path names
-  const pose = decodePose(new URLSearchParams(location.search).get('cam'))
-  // after the first frames: the boot tween and any layout move have settled
-  window.setTimeout(() => {
-    if (userTookCamera) return
-    if (pose) {
-      const origin = cageOrigin(bootAddress.db)
-      rig.release()
-      camera.position.copy(origin.clone().add(pose.pos))
-      camera.fov = pose.fov
-      camera.updateProjectionMatrix()
-      world.controls.target.copy(origin.clone().add(pose.target))
-      world.controls.update()
-      userTookCamera = true
-      lastInteraction = performance.now()
-      return
-    }
-    // A path that names nothing (a typo, or `/postgres` for `/postgresql`) still
-    // lands on the cage, and the address is rewritten to say what it shows.
-    const view = viewBySlug(bootAddress.db, bootAddress.slug) ?? defaultView(bootAddress.db)
-    rig.snap(view.id)
-    markView(view.id)
-    setAddress(bootAddress.db, view)
-    // only an explicit shot brings a card; snapping the whole cage does not
-    if (bootAddress.slug) pinShotSubject(bootAddress.db, view)
-  }, 1500)
 }
 
 /* -------------------------------- story mode ------------------------------- */
@@ -1017,7 +1003,7 @@ function setFly(on: boolean) {
   if (flyHint) flyHint.hidden = !on
   // flying and the drifting orbit fight each other; flight wins, and the drift
   // only comes back after the same quiet spell any camera move gets
-  world.controls.autoRotate = !on && performance.now() - lastInteraction > ORBIT_COOLDOWN
+  driftOn = !on && performance.now() - lastInteraction > ORBIT_COOLDOWN
 }
 
 /* ------------------------------ double click ------------------------------ */
@@ -1122,7 +1108,7 @@ function updateFly(dt: number) {
   if (flyDir.lengthSq() > 0) {
     flyDir.normalize().multiplyScalar(11 * boost)
     lastInteraction = performance.now()
-    if (world.controls.autoRotate) world.controls.autoRotate = false
+    driftOn = false
   }
   flyVel.lerp(flyDir, 1 - Math.exp(-dt * 9))
   if (flyVel.lengthSq() < 1e-5) return
@@ -1263,16 +1249,11 @@ function frame() {
     hoverBox.visible = false
   }
 
-  // resume the slow orbit after the user stops interacting
-  // resume the slow orbit after a quiet spell — every camera move pushes this out
-  if (
-    !flyMode &&
-    !drag &&
-    !world.controls.autoRotate &&
-    performance.now() - lastInteraction > ORBIT_COOLDOWN
-  ) {
-    world.controls.autoRotate = true
+  // resume the slow drift after a quiet spell — every camera move pushes this out
+  if (!flyMode && !drag && !driftOn && performance.now() - lastInteraction > ORBIT_COOLDOWN) {
+    driftOn = true
   }
+  if (driftOn) drift(raw)
 
   world.render(raw, dt)
   telemetry.tick(dt, raw)
@@ -1292,6 +1273,45 @@ window.addEventListener('resize', () => {
 })
 
 /* ----------------------------------- boot --------------------------------- */
+
+/**
+ * Where the page opens.
+ *
+ * Applied HERE, before the first frame: the first frame IS the shot. It used to
+ * be a 1.5 s timer, which meant the page first drew the camera the world happens
+ * to start with — aimed at the origin from the old default vantage — and then
+ * cut: a flash of a frame that describes nothing. Nothing needed the wait. The
+ * scene is built synchronously and a snap is a cut, not a tween.
+ *
+ * The card is the query's business, never the path's: `/redis` is the cage from
+ * its own shot, with whatever cards you happen to have open.
+ */
+const bootPanel = panelFromQuery()
+if (bootPanel) hud.setDb(bootPanel)
+
+if (bootAddress) {
+  // `?cam=` is a precise override, so it wins over whatever the path names
+  const pose = decodePose(new URLSearchParams(location.search).get('cam'))
+  if (pose) {
+    const origin = cageOrigin(bootAddress.db)
+    rig.release()
+    camera.position.copy(origin.clone().add(pose.pos))
+    camera.fov = pose.fov
+    camera.updateProjectionMatrix()
+    world.controls.target.copy(origin.clone().add(pose.target))
+    world.controls.update()
+    lastInteraction = performance.now()
+  } else {
+    // A path that names nothing (a typo, or `/postgres` for `/postgresql`) still
+    // lands on the cage, and the address is rewritten to say what it shows.
+    const view = viewBySlug(bootAddress.db, bootAddress.slug) ?? defaultView(bootAddress.db)
+    rig.snap(view.id)
+    markView(view.id)
+    setAddress(bootAddress.db, view)
+    // only an explicit shot brings a card; snapping the whole cage does not
+    if (bootAddress.slug) pinShotSubject(bootAddress.db, view)
+  }
+}
 
 // Every redis on the planet starts the same way: the process has files and no
 // data, so it reads the base dump, replays the log on top of it, and only then

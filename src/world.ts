@@ -52,8 +52,10 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   controls.maxDistance = 90
   controls.minPolarAngle = 0.06
   controls.maxPolarAngle = 1.52
-  controls.autoRotate = true
-  controls.autoRotateSpeed = 0.34
+  // The slow drift is not OrbitControls' autoRotate: it has to turn about the
+  // SUBJECT (the middle of a cage), not about the aim point, which for a
+  // cage-level shot is out in front of it. main.ts drives it — see drift() there.
+  controls.autoRotate = false
   controls.zoomSpeed = 0.75
   controls.enablePan = false
   controls.update()

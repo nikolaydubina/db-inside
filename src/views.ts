@@ -80,13 +80,17 @@ const TABLE_ANCHOR = { users: ANCHOR.heap, products: ANCHOR.events, metrics: ANC
  *
  * It is shared on purpose: a reader stepping from one cage to the next should be
  * in the same place looking at the same thing, and a new cage then only has to
- * say where its origin is. From the front-right and high enough to read a RAM deck
- * as a deck, with the aim point out in front of the cage so the machine sits above
- * the caption strip rather than behind it.
+ * say where its origin is.
+ *
+ * It aims at the MIDDLE OF THE CAGE. The drift turns the camera about the point a
+ * shot aims at, so a shot that aims past its cage would swing the machine across
+ * the frame instead of turning it where it stands — and a camera circling the
+ * middle while looking somewhere else is not an orbit of the middle at all.
+ * 4.9 is half the 9.8-tall shell, which stands on the floor.
  */
 const HOUSE: { offset: [number, number, number]; look: [number, number, number]; fov: number } = {
     offset: [29.29, 14.65, 15.15],
-    look: [-5.58, 0.06, -5.55],
+    look: [0, 4.9, 0],
     fov: 40,
 }
 const houseShot = (origin: THREE.Vector3) => shot(origin, HOUSE.offset, HOUSE.fov, HOUSE.look)
@@ -645,6 +649,23 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         },
         /** What the camera is currently holding on to, if anything. */
         following: () => followName,
+        /**
+         * The slow drift: turn the camera about the aim point.
+         *
+         * The aim point is the centre of what the shot is about — a cage-level shot
+         * aims at the middle of its cage precisely so this is an orbit of the cage —
+         * so the subject turns where it stands and the framing does not change. This
+         * is OrbitControls' autoRotate, done here because the rate belongs with the
+         * rest of the camera and not in a control's magic constant.
+         */
+        turn(angle: number) {
+            const dx = camera.position.x - controls.target.x
+            const dz = camera.position.z - controls.target.z
+            const c = Math.cos(angle)
+            const s = Math.sin(angle)
+            camera.position.x = controls.target.x + dx * c - dz * s
+            camera.position.z = controls.target.z + dx * s + dz * c
+        },
         /**
          * Let go of the subject.
          *
