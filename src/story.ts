@@ -107,7 +107,18 @@ export type StoryFacts = Pick<
     | 'walBytes'
     | 'walSegments'
     | 'walPending'
->
+> & {
+    /**
+     * The redis cage. A story that happens over there measures its own claims
+     * there, and the postgres numbers are still available — which is what a
+     * story about both cages will need.
+     */
+    rdKeys: number
+    rdOps: number
+    rdRps: number
+    bigKeys: number
+    hotKeys: number
+}
 
 /**
  * What the camera can be pointed at. The story asks for a *subject* — the whole
@@ -158,6 +169,8 @@ export interface StoryStep {
     lookShift?: [number, number, number]
     /** how many run-query taps to fire when this step opens */
     send?: number
+    /** the taps go to the redis cage instead of the postgres one */
+    tap?: 'postgres' | 'redis'
     /** wait before firing, so the caption lands before the motion */
     delay?: number
     /** something to trigger, e.g. a checkpoint */
@@ -297,10 +310,89 @@ export const QUEUE_STORY: StoryStep[] = [
     },
 ]
 
+/**
+ * The skew: a real keyspace is not a uniform field of keys. Most of it is small
+ * entries, a few values are so large that they are their own data structure, and
+ * a handful of small keys take most of the traffic. Every claim here is measured
+ * against the redis cage's own counters, so a step cannot describe a shape the
+ * drawing does not have.
+ */
+export const REDIS_SKEW_STORY: StoryStep[] = [
+    {
+        title: 'a field of small keys',
+        body: 'This plane is the keyspace, and nearly all of it is small: a string, a short hash, a list with a few dozen elements. Each block is one key — a dict entry, a key string and a value object, a few hundred bytes. This is what a keyspace looks like when it is mostly fine.',
+        view: 'redis-keys',
+        expect: (c) => c.rdKeys > 40,
+        waitFor: 'the keyspace to fill',
+    },
+    {
+        title: 'and a few very large values',
+        body: 'Three keys in here are not small, and they are not drawn as blocks: at the back of the cage are a hash, a sorted set and a list that have grown into their own structures. Same keyspace, same dict, same single thread — the difference is only how much one command against one of them can cost.',
+        view: 'redis-skew',
+        tap: 'redis',
+        delay: 500,
+        expect: (c) => c.bigKeys >= 2,
+        waitFor: 'the large values drawn as areas',
+    },
+    {
+        title: 'a sorted set is a tower',
+        body: 'ZADD does not keep a list and sort it. It builds a skiplist: every member sits on the bottom level, and each one is promoted a few levels higher with probability 1/4, so the top level skips over almost all of it. That is why ZRANGEBYSCORE finds its starting point in a handful of hops, and why a range read is cheap even at 1.4 million members. The plate beside the tower is the second half of the same value: a dict answering "what score does this member have" in O(1).',
+        view: 'big-zset',
+        tap: 'redis',
+        send: 4,
+        delay: 600,
+        sustain: 3,
+        expect: (c) => c.bigKeys >= 2 && c.rdOps > 0,
+        waitFor: 'commands running against the cage',
+    },
+    {
+        title: 'a hash is a bucket array',
+        body: 'The big hash is the ordinary hashtable, just large: hash the field, land on a bucket, follow the chain. Nothing about it changes with size except the amount a single command has to touch — HGETALL here walks five million fields, and it does so on the one thread, with every other client parked. That is the real cost of a big key, and it has nothing to do with disk.',
+        view: 'big-hash',
+        tap: 'redis',
+        delay: 500,
+        expect: (c) => c.bigKeys >= 2,
+        waitFor: 'the large values drawn as areas',
+    },
+    {
+        title: 'a list is a chain',
+        body: 'A long list is a quicklist: a linked chain of nodes, each one a small listpack. Pushing at either end is O(1) — a new element goes into the head or tail node. Reading the middle is not: it walks the chain from whichever end is closer, through nodes that are nowhere near each other in memory. The long gap in this chain is where the drawing stops; the real one runs on for tens of thousands of nodes.',
+        view: 'big-list',
+        tap: 'redis',
+        delay: 500,
+        expect: (c) => c.bigKeys >= 2,
+        waitFor: 'the large values drawn as areas',
+    },
+    {
+        title: 'the hot key',
+        body: 'Back on the plane, four of these little blocks carry most of the reads. They are nothing special in memory — that is exactly the point, and exactly the problem: a keyspace of a million entries can put most of its requests through one 200-byte value, on one thread. Watch which blocks keep lighting up.',
+        view: 'redis-keys',
+        tap: 'redis',
+        send: 10,
+        delay: 500,
+        sustain: 4,
+        expect: (c) => c.hotKeys >= 3 && c.rdOps > 0,
+        waitFor: 'the hot keys taking the traffic',
+    },
+    {
+        title: 'one command, millions of entries',
+        body: 'Everything here is one thread, so a command against a big value is not a slow response — it is a pause for everyone. The queue behind it does not drain while it runs. That is the whole trade of a skew: you cannot fix it with a bigger connection pool, only by not doing it.',
+        view: 'big-zset',
+        tap: 'redis',
+        send: 6,
+        delay: 600,
+        sustain: 4,
+        expect: (c) => c.rdOps > 0,
+        waitFor: 'commands running against the cage',
+    },
+]
+
 export interface StoryDef {
     id: string
     label: string
     hint: string
+    /** which engine's section this story belongs in */
+    db?: 'postgres' | 'redis' | 'both'
     steps: StoryStep[]
 }
 
@@ -309,7 +401,7 @@ export interface StoryDef {
  * looking. Not playable yet — listed so the gaps are visible instead of
  * implicit, and each one names the state it would have to show.
  */
-export const PLANNED_STORIES: { label: string; hint: string }[] = [
+export const PLANNED_STORIES: { label: string; hint: string; db?: 'postgres' | 'redis' }[] = [
     {
         label: 'a slot that pins the WAL',
         hint: 'an inactive replication slot stops the ring recycling: pg_wal grows until the disk fills',
@@ -326,6 +418,36 @@ export const PLANNED_STORIES: { label: string; hint: string }[] = [
         label: 'multixact accumulation',
         hint: 'heavy SELECT … FOR SHARE concurrency grows pg_multixact/members, with its own wraparound hazard',
     },
+    {
+        label: 'a blocking command',
+        hint: 'BLPOP does not stall the server: the client is parked and the thread moves on — unlike KEYS *, which does stall it',
+        db: 'redis',
+    },
+    {
+        label: 'MULTI / EXEC and Lua',
+        hint: 'queued, then executed in one burst; and BUSY after lua-time-limit, the only reply of its kind redis sends',
+        db: 'redis',
+    },
+    {
+        label: 'replication and the backlog',
+        hint: 'a replica, PSYNC, and the repl backlog — a fixed-size ring, the one buffer here whose policy is the opposite of a log that only grows',
+        db: 'redis',
+    },
+    {
+        label: 'pub/sub',
+        hint: 'no keys, no storage, pure fan-out to N sockets: a path that never touches the keyspace or the log',
+        db: 'redis',
+    },
+    {
+        label: 'eviction policy',
+        hint: 'LRU/LFU sampling: maxmemory-samples keys, the least recently used of the sample, and whether keys with a TTL go first',
+        db: 'redis',
+    },
+    {
+        label: 'io-threads',
+        hint: 'redis 6+ reads and writes sockets on several threads while command execution stays serial',
+        db: 'redis',
+    },
 ]
 
 export const STORIES: StoryDef[] = [
@@ -341,6 +463,13 @@ export const STORIES: StoryDef[] = [
         hint: 'why a change is written to a log before the page it changes',
         steps: WAL_STORY,
     },
+    {
+        id: 'skew',
+        label: 'one big value',
+        db: 'redis',
+        hint: 'what a large list, hash or sorted set looks like — and why the one thread makes it hurt',
+        steps: REDIS_SKEW_STORY,
+    },
 ]
 
 export interface StoryOptions {
@@ -348,6 +477,14 @@ export interface StoryOptions {
     sim: EngineSim
     /** resolves live subjects for steps that say "look at whatever is happening" */
     scene: StoryScene
+    /**
+     * The redis cage, for stories that happen in it. Structural on purpose: a
+     * story needs to tap it and read its numbers, and nothing else.
+     */
+    redis?: {
+        runCommand(): void
+        stats: { keys: number; ops: number; opsPerSec: number; bigKeys: number; hotKeys: number }
+    }
     stories?: StoryDef[]
     /** set the clock speed for steps that ask for one */
     setSpeed?: (v: number) => void
@@ -360,6 +497,7 @@ export function createStory({
     rig,
     sim,
     scene,
+    redis,
     stories = STORIES,
     setSpeed,
     onEnter,
@@ -400,6 +538,7 @@ export function createStory({
     /** The one place step predicates read the world from. */
     const facts = (): StoryFacts => {
         const s = sim.stats
+        const r = redis?.stats
         return {
             connections: s.connections,
             maxConnections: s.maxConnections,
@@ -411,7 +550,18 @@ export function createStory({
             walBytes: s.walBytes,
             walSegments: s.walSegments,
             walPending: s.walPending,
+            rdKeys: r?.keys ?? 0,
+            rdOps: r?.ops ?? 0,
+            rdRps: r?.opsPerSec ?? 0,
+            bigKeys: r?.bigKeys ?? 0,
+            hotKeys: r?.hotKeys ?? 0,
         }
+    }
+
+    /** One tap, aimed at the cage this step is about. */
+    const tap = (step: StoryStep) => {
+        if ((step.tap ?? 'postgres') === 'redis') redis?.runCommand()
+        else void sim.runQuery()
     }
 
     /**
@@ -547,7 +697,7 @@ export function createStory({
         if (n <= 0 && !step.sustain && !step.act) return
         window.setTimeout(() => {
             if (mine !== token || !running) return
-            for (let i = 0; i < n; i++) void sim.runQuery()
+            for (let i = 0; i < n; i++) tap(step)
             step.act?.(sim)
             hold(mine, step)
         }, step.delay ?? 800)
@@ -560,7 +710,7 @@ export function createStory({
         const beat = () => {
             if (mine !== token || !running) return
             if (step.expect(facts())) return
-            void sim.runQuery()
+            tap(step)
             window.setTimeout(beat, 1000 / rate)
         }
         beat()

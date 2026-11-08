@@ -63,13 +63,32 @@ export function initHud(handlers: HudHandlers) {
     postgres: $<HTMLElement>('#db-postgres'),
     redis: $<HTMLElement>('#db-redis'),
   }
-  let db: DbName = 'postgres'
+  /** The column both panels live in — it is only there while one of them is. */
+  const panelColumn = $<HTMLElement>('.panel.right')
+  let db: DbName | null = null
 
-  /** Exactly one database panel is on screen; the scene picks which. */
-  const setDb = (next: DbName) => {
+  /**
+   * The two switches at the top right. Both engines are always running, so the
+   * dot is always lit; the lit border says whose panel is open, and tapping the
+   * open one closes it. Nothing is selected at boot — the scene is the landing
+   * page, and the panel is something you ask for.
+   */
+  const dbButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.dbtn'))
+
+  /** Exactly one database panel is on screen, and only when one is selected. */
+  const setDb = (next: DbName | null) => {
     db = next
     for (const name of Object.keys(panels) as DbName[]) panels[name].hidden = name !== next
+    panelColumn.hidden = next === null
+    for (const b of dbButtons) b.classList.toggle('active', b.dataset.db === next)
   }
+  for (const b of dbButtons) {
+    b.addEventListener('click', () => {
+      const name = (b.dataset.db as DbName) ?? 'postgres'
+      setDb(db === name ? null : name)
+    })
+  }
+  setDb(null)
 
   const makeRow = (label: string) => {
     const li = document.createElement('li')
@@ -329,7 +348,7 @@ function setupCards() {
     head.setAttribute('role', 'button')
     head.setAttribute('tabindex', '0')
 
-    const startCollapsed = key in saved ? saved[key] : compact
+    const startCollapsed = key in saved ? saved[key] : compact || card.hasAttribute('data-folded')
     card.classList.toggle('collapsed', startCollapsed)
     head.setAttribute('aria-expanded', String(!startCollapsed))
 

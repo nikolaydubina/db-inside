@@ -12,9 +12,9 @@ import { makeFlows, makePaths } from './flow'
 import { EngineSim } from './sim'
 import type { Regime } from './sim'
 import { installTelemetry } from './debug'
-import { createCameraRig, ALL_VIEWS } from './views'
+import { createCameraRig, viewsFor } from './views'
 import { createStory } from './story'
-import { PLANNED_STORIES } from './story'
+import { PLANNED_STORIES, STORIES } from './story'
 import type { StoryScene } from './story'
 import { initCredits } from './credits'
 import { initHud } from './ui'
@@ -571,6 +571,7 @@ const story = createStory({
   rig,
   sim,
   scene: storyScene,
+  redis: redisSim,
   setSpeed: applySpeed,
   onEnter: () => {
     // no camera drift during a story: the scene is already moving enough, and
@@ -602,10 +603,17 @@ const story = createStory({
   ; (window as unknown as Record<string, unknown>).__psqlStory = story
 initCredits()
 
-// build the story list from the same registry the stories themselves come from
+// build the story list from the same registry the stories themselves come from.
+// One list at root level — a story may later span both cages — but grouped by
+// engine, because "too many requests" and "one big value" are not the same kind
+// of thing and reading them as one flat list hides which cage each one is about.
 const storiesEl = document.getElementById('stories')
 if (storiesEl) {
-  for (const s of story.stories) {
+  const groups: { db: 'postgres' | 'redis'; label: string }[] = [
+    { db: 'postgres', label: 'PostgreSQL' },
+    { db: 'redis', label: 'Redis' },
+  ]
+  const addStory = (s: (typeof STORIES)[number]) => {
     const b = document.createElement('button')
     b.className = 'sitem'
     b.dataset.story = s.id
@@ -618,23 +626,40 @@ if (storiesEl) {
     })
     storiesEl.appendChild(b)
   }
-  // not built yet: listed with a tag rather than hidden, so the gaps in the
-  // scene are visible and named
-  for (const p of PLANNED_STORIES) {
-    const b = document.createElement('button')
-    b.className = 'sitem soon'
-    b.disabled = true
-    b.title = p.hint
-    b.innerHTML = '<span class="soon-label"></span><i class="soon-tag">soon</i>'
-    b.querySelector('.soon-label')!.textContent = p.label
-    storiesEl.appendChild(b)
+  for (const g of groups) {
+    const head = document.createElement('div')
+    head.className = 'sgroup'
+    head.textContent = g.label
+    storiesEl.appendChild(head)
+    for (const s of STORIES.filter((x) => (x.db ?? 'postgres') === g.db)) addStory(s)
+    // not built yet: listed with a tag rather than hidden, so the gaps in the
+    // scene are visible and named
+    for (const p of PLANNED_STORIES.filter((x) => (x.db ?? 'postgres') === g.db)) {
+      const b = document.createElement('button')
+      b.className = 'sitem soon'
+      b.disabled = true
+      b.title = p.hint
+      b.innerHTML = '<span class="soon-label"></span><i class="soon-tag">soon</i>'
+      b.querySelector('.soon-label')!.textContent = p.label
+      storiesEl.appendChild(b)
+    }
   }
 }
 
-// build the view buttons from the single source of truth
-const viewsEl = document.getElementById('views')
-if (viewsEl) {
-  for (const v of ALL_VIEWS) {
+// The view buttons, built into the panel of the cage they belong to: the psql
+// shots under the postgres card, the redis shots under the redis card. One
+// registry, filtered — a view cannot end up listed under the wrong engine.
+const viewHosts = [
+  { el: document.getElementById('views'), db: 'postgres' as const },
+  { el: document.getElementById('views-redis'), db: 'redis' as const },
+]
+const viewButtons: { el: HTMLButtonElement; id: string }[] = []
+const markView = (id: string) => {
+  for (const v of viewButtons) v.el.classList.toggle('on', v.id === id)
+}
+for (const host of viewHosts) {
+  if (!host.el) continue
+  for (const v of viewsFor(host.db)) {
     const b = document.createElement('button')
     b.className = 'vbtn'
     b.dataset.view = v.id
@@ -643,24 +668,24 @@ if (viewsEl) {
     b.addEventListener('click', () => {
       rig.go(v.id)
       lastInteraction = performance.now()
-      for (const el of viewsEl.querySelectorAll('.vbtn')) el.classList.remove('on')
-      b.classList.add('on')
+      markView(v.id)
     })
-    viewsEl.appendChild(b)
+    host.el.appendChild(b)
+    viewButtons.push({ el: b, id: v.id })
   }
 }
 
 window.addEventListener('keydown', (e) => {
   if (isTyping(e.target)) return
   if (e.key >= '0' && e.key <= '9') {
-    const ids = ALL_VIEWS.map((v) => v.id)
+    // numbered within the panel you are looking at, so "3" means the third
+    // button on screen and not the third button in some other cage's list
+    const ids = viewsFor(hud.db ?? 'postgres').map((v) => v.id)
     const idx = e.key === '0' ? (ids.indexOf(rig.current() ?? '') + 1) % ids.length : Number(e.key) - 1
     const id = ids[idx]
     if (id) {
       rig.go(id)
-      viewsEl?.querySelectorAll('.vbtn').forEach((el, i) => {
-        el.classList.toggle('on', i === idx)
-      })
+      markView(id)
     }
   }
 })
@@ -919,6 +944,7 @@ function updateFly(dt: number) {
 
 const rd = {
   keys: document.getElementById('rd-keys')!,
+  skew: document.getElementById('rd-skew')!,
   ops: document.getElementById('rd-ops')!,
   hit: document.getElementById('rd-hit')!,
   lat: document.getElementById('rd-lat')!,
@@ -940,6 +966,7 @@ const fmtBytes = (n: number) =>
 /** The redis card is fed straight from its own sim — it has no shared model. */
 function updateRedisCard(s: RedisStats) {
   rd.keys.textContent = `${s.keys}/${s.capacity}`
+  rd.skew.textContent = `${s.bigKeys} big · ${s.hotKeys} hot`
   rd.ops.textContent = `${Math.round(s.opsPerSec)} ops/s`
   rd.hit.textContent = s.hitRate > 0 ? `${s.hitRate.toFixed(1)}%` : '—'
   rd.lat.textContent = s.latency > 0 ? `${s.latency.toFixed(2)} ms` : '—'

@@ -108,6 +108,87 @@ body {
   right: 26px;
 }
 
+/*
+ * The two engines as switches. Both are running, so both dots are lit; the
+ * lit BORDER says whose panel is open on the right. Deliberately not a
+ * segmented control: these are two separate machines on one floor, not two
+ * states of one setting.
+ */
+.dbswitch {
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+}
+
+.dbtn {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: rgba(8, 16, 25, 0.5);
+  backdrop-filter: blur(8px);
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: #7f9cb0;
+  cursor: pointer;
+  transition: color 0.16s, border-color 0.16s, background 0.16s;
+}
+
+.dbtn i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--teal);
+  box-shadow: 0 0 8px rgba(43, 255, 195, 0.6);
+}
+
+.dbtn:hover {
+  color: #cdefff;
+  border-color: rgba(53, 224, 255, 0.4);
+}
+
+.dbtn.active {
+  border-color: var(--cyan);
+  color: #eafcff;
+  background: rgba(53, 224, 255, 0.1);
+  box-shadow: 0 0 14px -6px rgba(53, 224, 255, 0.7);
+}
+
+/* the shelf: legend, stories, camera — reading material, one row, bottom left */
+.hud.bottom {
+  left: 26px;
+  bottom: 26px;
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+  pointer-events: auto;
+  /* an opened panel grows upward and never runs off the top of the screen */
+  max-height: calc(100% - 120px);
+  max-width: calc(100vw - 320px);
+}
+
+.hud.bottom>.card {
+  width: 232px;
+  flex: none;
+  max-height: 100%;
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.hud.bottom>.card::-webkit-scrollbar {
+  display: none;
+}
+
+/* folded, every one of them is just its title bar: a row of labels, not a wall */
+.hud.bottom>.card.collapsed {
+  width: auto;
+}
+
 .brand {
   display: flex;
   align-items: center;
@@ -129,30 +210,6 @@ h1 {
   font-size: 10px;
   letter-spacing: 0.06em;
   color: #5c7186;
-}
-
-.chip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 10px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: rgba(8, 16, 25, 0.5);
-  backdrop-filter: blur(8px);
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.chip .k {
-  color: #4e6579;
-}
-
-.chip .v.ok {
-  color: var(--teal);
-  text-shadow: 0 0 12px rgba(43, 255, 195, 0.35);
 }
 
 /* ---------- panels ---------- */
@@ -434,12 +491,14 @@ h2::after {
   pointer-events: none;
 }
 
-/* workload regime picker: chips, not switches — they are exclusive, and each one
-   reshapes the traffic instead of toggling a feature */
+/* A labelled group of chips: caption on its own line, buttons beneath it. The
+   same shape in both panels — a workload picker and the three file actions are
+   different things, but they are the same KIND of thing. */
 .regimes {
   display: flex;
-  align-items: baseline;
-  gap: 9px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 7px;
   margin-top: 12px;
   padding-top: 11px;
   border-top: 1px solid rgba(110, 170, 210, 0.1);
@@ -550,7 +609,9 @@ h2::after {
 /* ---------- stats ---------- */
 
 .stats {
-  margin: 0;
+  /* the picker above is a different kind of thing from the numbers below it, and
+     at zero margin the two rows read as one block */
+  margin: 14px 0 0;
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 7px 10px;
@@ -612,6 +673,17 @@ h2::after {
   font-size: 9px;
   letter-spacing: 0.06em;
   color: #4e6a7e;
+}
+
+/*
+ * The status line says something different every second, and its length changes
+ * with it. Reserving three lines means the panel below it holds still: a layout
+ * that reflows while you are reading it is worse than some empty space.
+ */
+#rd-note,
+#st-note {
+  line-height: 1.45;
+  min-height: 39px;
 }
 
 /* ---------- processes ---------- */
@@ -734,6 +806,7 @@ h2::after {
   left: 26px;
   bottom: 26px;
   width: 262px;
+  flex: none;
   border: 1px solid var(--line);
   border-radius: 6px;
   background: linear-gradient(155deg, rgba(11, 21, 33, 0.6), rgba(6, 12, 20, 0.45));
@@ -982,6 +1055,10 @@ h2::after {
 
   .legend {
     display: none;
+  }
+
+  .hud.bottom>.card {
+    width: 200px;
   }
 
   .top-left {
@@ -1246,6 +1323,22 @@ h2::after {
   flex-direction: column;
   align-items: stretch;
   gap: 1px;
+}
+
+/* one engine's stories, under a quiet heading. The list stays at root level
+   because a story may span both cages; only the headings move. */
+.sgroup {
+  margin: 8px 0 2px;
+  font-family: var(--mono);
+  font-size: 7.5px;
+  font-weight: 500;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: #40596a;
+}
+
+.sgroup:first-child {
+  margin-top: 2px;
 }
 
 .sitem {

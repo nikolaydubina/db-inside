@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { PALETTE } from './instance'
 import type { KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
+import { BIG_REAL } from './redis'
 import { QueryChain, pathCurve } from './flow'
 import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from './util'
 
@@ -22,6 +23,10 @@ export interface RedisStats {
     savingSync: boolean
     loading: boolean
     rewriting: boolean
+    /** values drawn as their own areas instead of as entries in the plane */
+    bigKeys: number
+    /** keys that take most of the traffic */
+    hotKeys: number
 }
 
 interface Command {
@@ -177,6 +182,8 @@ export class RedisSim {
             savingSync: this.blocked,
             loading: this.loading,
             rewriting: this.rewriting,
+            bigKeys: this.redis.bigCount,
+            hotKeys: this.redis.hotCount,
         }
     }
 
@@ -229,7 +236,7 @@ export class RedisSim {
             key = reuse ?? this.redis.freeKey()
             if (!key) {
                 // maxmemory: something has to go before this write fits
-                const victim = this.redis.randomLiveKey()
+                const victim = this.redis.evictionVictim()
                 if (victim) this.evict(victim)
                 key = this.redis.freeKey()
             }
@@ -237,7 +244,17 @@ export class RedisSim {
             // starts at one element, so its encoding budget starts over with it
             if (key && !key.live && cmd.kind) this.redis.setKeyKind(key, cmd.kind)
         } else {
-            key = this.redis.randomLiveKey()
+            // The skew lives in the traffic, not only in the picture: most reads go
+            // to a handful of small keys, a few go to a value so big that serving
+            // one of them walks millions of entries. Everything else is an even
+            // walk through the keyspace.
+            const roll = Math.random()
+            key =
+                roll < 0.08
+                    ? (this.redis.bigKey() ?? this.redis.randomLiveKey())
+                    : roll < 0.58
+                        ? (this.redis.hotKey() ?? this.redis.randomLiveKey())
+                        : this.redis.randomLiveKey()
             hit = Math.random() > 0.012
             if (!hit) {
                 key = this.redis.randomLiveKey()
@@ -301,6 +318,7 @@ export class RedisSim {
         this.redis.queuePop()
 
         let converted = false
+        let bigRead = false
         if (key) {
             this.redis.pulseBucket(key)
             // one bucket of the rehash per operation, exactly as redis does it —
@@ -357,6 +375,14 @@ export class RedisSim {
             } else {
                 this.redis.flashKey(key, PALETTE.ice, 0.45)
                 this.note = hit ? `${cmd.name} · hash hit, no disk` : `${cmd.name} · miss`
+                if (key.big) {
+                    // the one read that is not O(1): a big value is walked on the
+                    // single thread, and that is the whole cost model of a skew
+                    const real = BIG_REAL[key.big]
+                    bigRead = true
+                    this.note = `${cmd.name} · one value, ${real.entries.toLocaleString('en-US')} ${real.unit} — walked on the single thread`
+                    await this.ticker.wait(0.35)
+                }
                 if (hit) this.hits++
                 else this.misses++
             }
@@ -391,9 +417,12 @@ export class RedisSim {
         chain.fadeOut(this.ticker, 0.7)
 
         const dt = performance.now() - t0
-        // a conversion is a real pause, not a flicker: the latency sample has to
-        // carry it, or the one O(n) write in the command set would look free
-        this.latencies.push(0.08 + dt * 0.0004 + rand(0, 0.06) + (converted ? 1.7 : 0))
+        // A conversion or a big-value read is a real pause, not a flicker: the
+        // latency sample has to carry it, or the only O(n) work in the command set
+        // would look free.
+        this.latencies.push(
+            0.08 + dt * 0.0004 + rand(0, 0.06) + (converted ? 1.7 : 0) + (bigRead ? 2.6 : 0),
+        )
         if (this.latencies.length > 40) this.latencies.shift()
         this.ops++
         this.recent.push(this.clock)

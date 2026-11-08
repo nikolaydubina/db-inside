@@ -27,6 +27,11 @@ export interface ViewDef {
     /** Scene entity this shot is about. */
     entity: string
     hint: string
+    /**
+     * Which database's panel this shot belongs in. Left out means postgres, and
+     * 'both' is listed under each — the floor is shared, the panels are not.
+     */
+    db?: 'postgres' | 'redis' | 'both'
     pose(): CameraPose
 }
 
@@ -53,6 +58,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'overview',
         label: 'overview',
+        db: 'both',
         entity: 'the floor',
         hint: 'both databases on the same floor, each in its own cage',
         // midway between the two cages, so rearranging them keeps both in frame
@@ -74,6 +80,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis',
         label: 'redis',
+        db: 'redis',
         entity: 'redis cage',
         hint: 'the redis instance: almost nothing on the disk, everything in the air',
         pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 1)), [-19, 11, 23], 38, [0, 5.2, 0]),
@@ -81,13 +88,50 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis-keys',
         label: 'redis keys',
+        db: 'redis',
         entity: 'keyspace',
         hint: 'the keyspace: bucket array below, entries floating above it',
         pose: () => shot(REDIS_ANCHOR.keys, [-3.4, 5.4, 8.6], 34, [0, -0.5, 0]),
     },
     {
+        id: 'redis-skew',
+        label: 'redis skew',
+        db: 'redis',
+        entity: 'the distribution',
+        hint: 'many small keys, a few very large values, and the handful of keys taking the traffic',
+        pose: () =>
+            shot(REDIS_ORIGIN.clone().add(V(0, 3.4, -2.6)), [-7.5, 6.5, 15.5], 40, [0, 0.8, 0]),
+    },
+    {
+        id: 'big-zset',
+        label: 'sorted set · big',
+        db: 'redis',
+        entity: 'a big sorted set',
+        hint: 'a skiplist with the dict beside it — one key, 1.4 M members',
+        // above the keys plane and looking down: from any lower the plane hangs
+        // between the camera and the tower
+        pose: () => shot(REDIS_ANCHOR.bigZset, [0.6, 8.0, 5.2], 34, [0, 0.3, 0]),
+    },
+    {
+        id: 'big-hash',
+        label: 'hash · big',
+        db: 'redis',
+        entity: 'a big hash',
+        hint: 'a bucket array with chains — one key, 5.3 M fields',
+        pose: () => shot(REDIS_ANCHOR.bigHash, [0.6, 7.4, 5.2], 34, [0, 0.2, 0]),
+    },
+    {
+        id: 'big-list',
+        label: 'list · big',
+        db: 'redis',
+        entity: 'a big list',
+        hint: 'a chain of quicklist nodes — one key, 2.1 M elements',
+        pose: () => shot(REDIS_ANCHOR.bigList, [0.6, 7.6, 7.2], 34, [0, 0.2, 0]),
+    },
+    {
         id: 'redis-disk',
         label: 'redis disk',
+        db: 'redis',
         entity: 'persistence',
         hint: 'only two files are here: the incremental AOF and the base RDB',
         pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-4.5, 8.5, 12.5], 36),
@@ -95,6 +139,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis-aof',
         label: 'redis aof',
+        db: 'redis',
         entity: 'aof tail',
         hint: 'the end of the log: the block being appended, and the bytes still in aof_buf above it',
         // Aimed between the two things that matter here: the floating buffer and
@@ -228,6 +273,15 @@ export const ALL_VIEWS = [
     ...(['users', 'products', 'metrics'] as const).map(tableView),
     ...BACKEND_SLOTS.map((_, i) => backendView(i)),
 ]
+
+/**
+ * The shots that belong in one database's panel. A view with no `db` is
+ * postgres's (the first cage, and the default for anything unnamed), and a
+ * `both` view — the floor, the overview — is listed in each panel, because
+ * either tab may want to leave and look at the whole room.
+ */
+export const viewsFor = (db: 'postgres' | 'redis') =>
+    ALL_VIEWS.filter((v) => v.db === 'both' || (v.db ?? 'postgres') === db)
 
 export interface RigOptions {
     camera: THREE.PerspectiveCamera

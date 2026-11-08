@@ -49,8 +49,18 @@
       </div>
     </header>
 
-    <div class="hud top-right">
-      <div class="chip"><span class="k">state</span><span class="v ok">LIVE</span></div>
+    <!--
+      The two cages, as switches rather than a live/off chip: both databases are
+      running, and tapping one opens its panel on the right. The dot is the
+      engine being up; the lit border is the panel you are looking at.
+    -->
+    <div class="hud top-right dbswitch" id="db-switch">
+      <button class="dbtn on" data-db="redis" title="redis · one thread, dataset in RAM">
+        <i></i>Redis
+      </button>
+      <button class="dbtn on" data-db="postgres" title="postgres · processes, pages, WAL">
+        <i></i>PostgreSQL
+      </button>
     </div>
 
     <aside class="hud panel right">
@@ -59,8 +69,7 @@
         inside a cage brings up that database's own controls, numbers and process
         list, so nothing from the other engine is mixed in.
       -->
-      <section class="card" id="db-postgres">
-        <h2>PostgreSQL</h2>
+      <section class="card" id="db-postgres" hidden>
         <div class="buttons">
           <button id="btn-query" class="btn primary">
             <span class="glyph">↵</span> run query
@@ -76,7 +85,7 @@
             <span class="glyph">⇄</span> vacuum full
           </button>
         </div>
-        <div class="regimes" id="regimes">
+        <div class="regimes">
           <span class="regime-label">workload</span>
           <div class="regime-opts" id="regime-opts"></div>
         </div>
@@ -114,10 +123,14 @@
         <p class="hint" id="st-note">shared_buffers · 8 kB pages</p>
         <h3 class="sub-head">Processes</h3>
         <ul class="procs" id="procs"></ul>
+        <!-- The shots for this cage live in this cage's own panel: with two
+             databases on one floor, a root-level list of every camera pose is a
+             list of two unrelated things. -->
+        <h3 class="sub-head">Views</h3>
+        <div class="views" id="views"></div>
       </section>
 
       <section class="card" id="db-redis" hidden>
-        <h2>Redis</h2>
         <div class="buttons">
           <button id="btn-command" class="btn primary">
             <span class="glyph">↵</span> send command
@@ -127,9 +140,13 @@
             <span class="glyph">✳</span> aof rewrite
           </button>
         </div>
-        <!-- the three things that touch the base file: two writes and a read -->
+        <!--
+          The dump buttons are actions, like the two above — they used to sit in
+          the stats block, where the word "dump" read as a label for the numbers
+          underneath it ("dump keys").
+        -->
         <div class="regimes">
-          <span class="regime-label">dump</span>
+          <span class="regime-label">dump · base file</span>
           <div class="regime-opts" id="rdb-ops">
             <button class="regime" data-rdb="save">save</button>
             <button class="regime" data-rdb="bgsave">bgsave</button>
@@ -140,6 +157,10 @@
           <div>
             <dt>keys</dt>
             <dd id="rd-keys">0</dd>
+          </div>
+          <div>
+            <dt>skew</dt>
+            <dd id="rd-skew">—</dd>
           </div>
           <div>
             <dt>throughput</dt>
@@ -174,9 +195,94 @@
         <p class="hint" id="rd-note">one thread · dataset in RAM</p>
         <h3 class="sub-head">Threads</h3>
         <ul class="procs" id="rd-procs"></ul>
+        <h3 class="sub-head">Views</h3>
+        <div class="views" id="views-redis"></div>
       </section>
 
-      <section class="card" id="card-camera">
+      <section class="card inspector" id="inspector" hidden>
+        <h2 id="ins-title">Inspector</h2>
+        <p id="ins-body"></p>
+        <p class="ins-meta" id="ins-meta"></p>
+      </section>
+    </aside>
+
+    <!--
+      The bottom shelf: how to read the scene, what you can watch, and how to
+      move. All three are reading material rather than one engine's controls, so
+      they sit together at the bottom instead of stacking in the right column.
+
+      The legend describes the GRAMMAR of the scene, not one database's parts, so
+      it stays true for postgres, redis and anything added next. Two columns:
+      what you are looking at, and what it means.
+    -->
+    <div class="hud bottom" id="shelf">
+      <section class="card panel legend" id="legend-card" data-folded>
+        <h2>Legend</h2>
+        <table class="gloss">
+          <tbody>
+            <tr>
+              <th><span class="sw" style="--c: #35e0ff"></span>in memory</th>
+              <td>cache, buffer, dataset</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #ffb03a"></span>to a file</th>
+              <td>pages and log records</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #8a7bff"></span>structures</th>
+              <td>in-memory index or dict</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #ff3ea5"></span>traffic</th>
+              <td>client ↔ server bytes</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #93a1ae"></span>system</th>
+              <td>other files, unlabelled</td>
+            </tr>
+            <tr>
+              <th>floating</th>
+              <td>not on disk yet</td>
+            </tr>
+            <tr>
+              <th>on the grid</th>
+              <td>a file, or bytes in one</td>
+            </tr>
+            <tr>
+              <th>height</th>
+              <td>how full it is</td>
+            </tr>
+            <tr>
+              <th>stacked</th>
+              <td>one value, more than one allocation — a key whose entry now carries a hashtable, or a sorted set carrying both a skiplist and a dict</td>
+            </tr>
+            <tr>
+              <th>pulse</th>
+              <td>just read or written</td>
+            </tr>
+            <tr>
+              <th>outline</th>
+              <td>a run, not a selection</td>
+            </tr>
+            <tr>
+              <th><span class="sw dashed"></span>dashed outline</th>
+              <td>a diagram of a structure, not memory — an index tree, a plane of key entries. The blocks inside it are real; the volume is ours</td>
+            </tr>
+            <tr>
+              <th>grid</th>
+              <td>2 units, one floor</td>
+            </tr>
+          </tbody>
+        </table>
+        <p class="hint">double-click anything to fly to it and drift around it</p>
+      </section>
+
+      <section class="card" id="stories-card" data-folded>
+        <h2>Stories</h2>
+        <div class="stories" id="stories"></div>
+      </section>
+
+      <section class="card" id="card-camera" data-folded>
         <h2>Camera &amp; clock</h2>
         <label class="slider">
           <span class="slider-label">speed</span>
@@ -203,89 +309,6 @@
         <p class="hint" id="fly-hint" hidden>hold mouse to look · w a s d + q e · shift</p>
         <p class="hint" id="move-hint" hidden>drag a cage · snaps to the 2-unit floor grid</p>
       </section>
-
-      <section class="card" id="stories-card">
-        <h2>Stories</h2>
-        <div class="stories" id="stories"></div>
-      </section>
-
-      <section class="card" id="views-card">
-        <h2>Views</h2>
-        <div class="views" id="views"></div>
-        <p class="hint">1-9 · 0 next · click to fly</p>
-      </section>
-
-      <section class="card inspector" id="inspector" hidden>
-        <h2 id="ins-title">Inspector</h2>
-        <p id="ins-body"></p>
-        <p class="ins-meta" id="ins-meta"></p>
-      </section>
-    </aside>
-
-    <!--
-      The legend describes the GRAMMAR of the scene, not one database's parts, so
-      it stays true for postgres, redis and anything added next. Two columns:
-      what you are looking at, and what it means.
-    -->
-    <div class="hud panel legend">
-      <h2>Legend</h2>
-      <table class="gloss">
-        <tbody>
-          <tr>
-            <th><span class="sw" style="--c: #35e0ff"></span>in memory</th>
-            <td>cache, buffer, dataset</td>
-          </tr>
-          <tr>
-            <th><span class="sw" style="--c: #ffb03a"></span>to a file</th>
-            <td>pages and log records</td>
-          </tr>
-          <tr>
-            <th><span class="sw" style="--c: #8a7bff"></span>structures</th>
-            <td>in-memory index or dict</td>
-          </tr>
-          <tr>
-            <th><span class="sw" style="--c: #ff3ea5"></span>traffic</th>
-            <td>client ↔ server bytes</td>
-          </tr>
-          <tr>
-            <th><span class="sw" style="--c: #93a1ae"></span>system</th>
-            <td>other files, unlabelled</td>
-          </tr>
-          <tr>
-            <th>floating</th>
-            <td>not on disk yet</td>
-          </tr>
-          <tr>
-            <th>on the grid</th>
-            <td>a file, or bytes in one</td>
-          </tr>
-          <tr>
-            <th>height</th>
-            <td>how full it is</td>
-          </tr>
-          <tr>
-            <th>stacked</th>
-            <td>one value, more than one allocation — a key whose entry now carries a hashtable, or a sorted set carrying both a skiplist and a dict</td>
-          </tr>
-          <tr>
-            <th>pulse</th>
-            <td>just read or written</td>
-          </tr>
-          <tr>
-            <th>outline</th>
-            <td>a run, not a selection</td>
-          </tr>
-          <tr>
-            <th><span class="sw dashed"></span>dashed outline</th>
-            <td>a diagram of a structure, not memory — an index tree, a plane of key entries. The blocks inside it are real; the volume is ours</td>
-          </tr>
-          <tr>
-            <th>grid</th>
-            <td>2 units, one floor</td>
-          </tr>
-        </tbody>
-      </table>
-      <p class="hint">double-click anything to fly to it and drift around it</p>
     </div>
 
     <div id="crosshair" class="crosshair" hidden></div>

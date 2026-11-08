@@ -211,6 +211,28 @@ const VALUE_BYTES: Record<KeyKind, [number, number]> = {
 }
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
+/**
+ * A value too big to be a block in the keyspace plane.
+ *
+ * These are ordinary keys in the dict — that is exactly what a skewed keyspace
+ * is — but their SHAPE is what matters, and a plane of small cubes cannot say
+ * "this one is a skiplist with 1.4 million nodes". Each gets its own area at the
+ * back of the cage, its own dashed cage, and a drawing that is a SLICE: the
+ * shape is the real structure, the count is not.
+ */
+export type BigKind = 'hash' | 'zset' | 'list'
+export const BIG_SPOT: Record<BigKind, THREE.Vector3> = {
+    hash: new THREE.Vector3(-8.6, 3.4, -6.2),
+    zset: new THREE.Vector3(0, 3.4, -6.2),
+    list: new THREE.Vector3(8.6, 3.4, -6.2),
+}
+/** What each big value really is, for its card. */
+export const BIG_REAL: Record<BigKind, { entries: number; mb: number; unit: string }> = {
+    hash: { entries: 5_300_000, mb: 412, unit: 'fields' },
+    zset: { entries: 1_400_000, mb: 168, unit: 'members' },
+    list: { entries: 2_100_000, mb: 96, unit: 'elements' },
+}
+
 export interface RedisKey {
     i: number
     row: number
@@ -237,6 +259,10 @@ export interface RedisKey {
      * deleted and rebuilt.
      */
     aux: boolean
+    /** set when this key is drawn as its own area instead of a block in the plane */
+    big?: BigKind
+    /** one of the few keys that take most of the traffic */
+    hot?: boolean
 }
 
 /** How a value is actually stored, as `OBJECT ENCODING` would report it. */
@@ -293,6 +319,10 @@ export const REDIS_ANCHOR = {
     /** the floating aof_buf strip — it drifts, so update() rewrites this live */
     aofBuf: new THREE.Vector3(),
     rdb: new THREE.Vector3(),
+    /** the three large values, drawn as their own areas at the back */
+    bigHash: new THREE.Vector3(),
+    bigZset: new THREE.Vector3(),
+    bigList: new THREE.Vector3(),
 }
 
 /** local geometry + wherever the cage currently stands = world position */
@@ -306,6 +336,9 @@ function rebaseAnchors() {
     REDIS_ANCHOR.aof.set(xAt(AOF_C0), BLOCK_TOP, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.aofBuf.set(xAt(AOF_C0), AOF_BUF_Y, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.rdb.copy(RDB_CENTRE).add(o)
+    REDIS_ANCHOR.bigHash.copy(BIG_SPOT.hash).add(o)
+    REDIS_ANCHOR.bigZset.copy(BIG_SPOT.zset).add(o)
+    REDIS_ANCHOR.bigList.copy(BIG_SPOT.list).add(o)
 }
 rebaseAnchors()
 
@@ -331,6 +364,14 @@ export class RedisInstance {
     private auxMesh!: THREE.InstancedMesh
     /** per-key deploy of a conversion, 0 → 1; the map holds only keys mid-flight */
     private auxAnim = new Map<number, number>()
+    /** the few keys the traffic actually goes to */
+    private hotKeys: RedisKey[] = []
+    private hotHalos: THREE.Sprite[] = []
+    /** one material per big value, so a touch can light the whole structure */
+    private bigMats: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
+    private bigPulse: Record<BigKind, number> = { hash: 0, zset: 0, list: 0 }
+    /** the keys drawn as their own areas, by kind */
+    private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
     /** base albedo per instance, so a flash can be undone */
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
@@ -455,6 +496,7 @@ export class RedisInstance {
         this.buildPorts()
         this.buildPipeline()
         this.buildReadiness()
+        this.buildBigKeys()
         this.buildAgents()
 
         // the base file is whatever the keyspace encodes to: its length comes
@@ -894,6 +936,43 @@ export class RedisInstance {
         // the converted values' extra allocations, in their base colours
         this.paintAux()
 
+        // The skew. A real keyspace is not uniform: a handful of keys take most
+        // of the traffic, and a few values are so large that they are their own
+        // structure rather than an entry. Both are drawn differently from the
+        // ordinary block, and both are ordinary keys in the dict all the same.
+        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+            const key = this.keys.find((k) => k.live && !k.big && k.kind === kind)
+            if (!key) continue
+            const real = BIG_REAL[kind]
+            key.big = kind
+            key.aux = true
+            key.entries = real.entries
+            // what the FILE pays for it on this floor: the block is 4 kB and the
+            // lattice is finite, so a 412 MB value cannot be drawn in it — a few
+            // blocks is the sample. The card says the real number.
+            key.bytes = 9000 + randInt(0, 3000)
+            this.tmpObj.position.copy(key.home)
+            this.tmpObj.scale.setScalar(0.001)
+            this.tmpObj.updateMatrix()
+            keys.setMatrixAt(key.i, this.tmpObj.matrix)
+        }
+        keys.instanceMatrix.needsUpdate = true
+
+        // the hot keys: small, boring, and the reason there is a cache line's
+        // worth of traffic in a million-entry keyspace
+        this.hotKeys = this.keys
+            .filter((k) => k.live && !k.big && k.kind === 'string')
+            .filter((_, n) => n % 7 === 0)
+            .slice(0, 4)
+        for (const key of this.hotKeys) {
+            key.hot = true
+            // a hotter base colour, so the plane itself shows which entries the
+            // traffic is actually about
+            key.shade = 1.62
+            keys.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
+        }
+        if (keys.instanceColor) keys.instanceColor.needsUpdate = true
+
         const kW = KEYS.cols * PITCH
         const kD = KEYS.rows * PITCH
         // Same mechanism as the disk: one pick volume for the whole container.
@@ -1190,6 +1269,200 @@ export class RedisInstance {
         this.group.add(lab)
     }
 
+    /* ------------------------------ big values ------------------------------- */
+
+    /**
+     * The three large values.
+     *
+     * A plane of small cubes can say "there are many keys" and "this one is
+     * bigger", but it cannot say what a 5-million-field hash IS — and that shape
+     * is the whole answer to "so this is what my big list looks like?". So each
+     * big value is drawn as its own structure, in its own dashed cage at the back
+     * of the cage: a bucket array with chains, a skiplist with the dict beside it,
+     * a chain of quicklist nodes.
+     *
+     * What is drawn is a SLICE. The shapes are the real ones; the counts are not,
+     * and every card says the real number so the drawing can never be mistaken
+     * for the size.
+     */
+    private buildBigKeys() {
+        for (const key of this.keys) if (key.big) this.bigKeys[key.big] = key
+        this.buildBigHash()
+        this.buildBigZset()
+        this.buildBigList()
+        this.buildHotHalos()
+    }
+
+    private bigMaterial(kind: BigKind): THREE.MeshStandardMaterial {
+        const mat = new THREE.MeshStandardMaterial({
+            color: 0x0d0a16,
+            emissive: KIND_COLOR[kind],
+            emissiveIntensity: 0.42,
+            roughness: 0.4,
+            metalness: 0.35,
+        })
+        this.bigMats[kind] = mat
+        return mat
+    }
+
+    /** The dashed cage, the pick box and the label for one big value. */
+    private bigFrame(kind: BigKind, w: number, h: number, d: number, cy: number) {
+        const at = BIG_SPOT[kind]
+        const cage = new OutlineBox(w, h, d, KIND_COLOR[kind], 0.2, { dashed: true }).centre(
+            at.x,
+            at.y + cy,
+            at.z,
+        )
+        this.group.add(cage)
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(w, h, d),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.set(at.x, at.y + cy, at.z)
+        this.group.add(pick)
+        const key = this.bigKeys[kind]
+        if (key) {
+            pick.userData.infoFor = () => this.keyInfo(key.i)
+            this.pickables.push(pick)
+        }
+        const lab = label(`${kind.toUpperCase()} · 1 KEY`)
+        lab.position.set(at.x - w / 2 - 0.45, at.y + cy + h / 2 + 0.3, at.z - d / 2 - 0.1)
+        this.group.add(lab)
+    }
+
+    /** A hashtable: the bucket array, and the chains hanging off it. */
+    private buildBigHash() {
+        const at = BIG_SPOT.hash
+        const mat = this.bigMaterial('hash')
+        const cols = 9
+        const rows = 3
+        const pitch = 0.36
+        const bucketGeo = new RoundedBoxGeometry(0.24, 0.07, 0.24, 1, 0.01)
+        for (let r = 0; r < rows; r++) {
+            for (let c = 0; c < cols; c++) {
+                const tile = new THREE.Mesh(bucketGeo, mat)
+                tile.position.set(
+                    at.x + (c - (cols - 1) / 2) * pitch,
+                    at.y,
+                    at.z + (r - (rows - 1) / 2) * pitch,
+                )
+                this.group.add(tile)
+            }
+        }
+        // one entry per bucket, two in a few, none in others — the chains are the
+        // reason the array stays small while the value grows
+        const eGeo = new RoundedBoxGeometry(0.15, 0.15, 0.15, 1, 0.01)
+        for (let c = 0; c < cols; c++) {
+            const links = c % 4 === 1 ? 2 : c % 5 === 2 ? 0 : 1
+            for (let k = 0; k < links; k++) {
+                const e = new THREE.Mesh(eGeo, mat)
+                e.position.set(
+                    at.x + (c - (cols - 1) / 2) * pitch,
+                    at.y + 0.28 + k * 0.17,
+                    at.z + ((rows - 1) / 2) * pitch + 0.26,
+                )
+                this.group.add(e)
+            }
+        }
+        this.bigFrame('hash', cols * pitch + 0.5, 1.6, rows * pitch + 1.2, 0.34)
+    }
+
+    /** A sorted set: a skiplist tower, and the dict beside it. */
+    private buildBigZset() {
+        const at = BIG_SPOT.zset
+        const mat = this.bigMaterial('zset')
+        const pitch = 0.42
+        // Heights per column, as a skiplist really builds them: every node is at
+        // the bottom level, and each one is promoted a few levels with probability
+        // 1/4. The result is what makes the picture mean something — a link two
+        // levels up skips over whole runs of the list, which is the entire idea.
+        const heights = [5, 1, 2, 1, 4, 1, 3, 1, 2, 1, 5]
+        const cols = heights.length
+        const levels = 5
+        const nodeGeo = new RoundedBoxGeometry(0.17, 0.17, 0.17, 1, 0.01)
+        for (let lv = 0; lv < levels; lv++) {
+            const y = at.y + lv * 0.32
+            let prev = NaN
+            for (let c = 0; c < cols; c++) {
+                if (heights[c] <= lv) continue
+                const x = at.x + (c - (cols - 1) / 2) * pitch
+                const node = new THREE.Mesh(nodeGeo, mat)
+                node.position.set(x, y, at.z)
+                this.group.add(node)
+                if (!Number.isNaN(prev) && x - prev > 0.1) {
+                    const link = new THREE.Mesh(new THREE.BoxGeometry(x - prev - 0.14, 0.02, 0.02), mat)
+                    link.position.set((prev + x) / 2, y, at.z)
+                    this.group.add(link)
+                }
+                prev = x
+            }
+        }
+        // the other half of the value: a dict for "score of this member"
+        const dictGeo = new RoundedBoxGeometry(0.2, 0.06, 0.2, 1, 0.01)
+        for (let c = 0; c < 6; c++) {
+            const tile = new THREE.Mesh(dictGeo, mat)
+            tile.position.set(at.x - 0.75 + c * 0.3, at.y - 0.55, at.z + 0.95)
+            this.group.add(tile)
+        }
+        this.bigFrame('zset', 5.0, 2.7, 2.5, 0.5)
+    }
+
+    /** A long list: a chain of quicklist nodes, each a small listpack. */
+    private buildBigList() {
+        const at = BIG_SPOT.list
+        const mat = this.bigMaterial('list')
+        const nodes = 5
+        const nodeGeo = new RoundedBoxGeometry(0.72, 0.22, 0.34, 1, 0.02)
+        const sliceGeo = new THREE.BoxGeometry(0.19, 0.23, 0.35)
+        let x = at.x - 2.3
+        for (let n = 0; n < nodes; n++) {
+            const node = new THREE.Mesh(nodeGeo, mat)
+            node.position.set(x, at.y, at.z)
+            this.group.add(node)
+            // the listpack inside the node, drawn as the pack of elements it is
+            for (let k = -1; k <= 1; k++) {
+                const slice = new THREE.Mesh(sliceGeo, mat)
+                slice.position.set(x + k * 0.21, at.y, at.z)
+                this.group.add(slice)
+            }
+            if (n < nodes - 1) {
+                // the third gap is drawn long: that is where the drawing stops and
+                // the real chain runs on for tens of thousands more nodes
+                const skip = n === 2 ? 1.5 : 0
+                const link = new THREE.Mesh(new THREE.BoxGeometry(0.34 + skip, 0.03, 0.03), mat)
+                link.position.set(x + 0.53 + skip / 2, at.y, at.z)
+                this.group.add(link)
+                x += 1.02 + skip
+            }
+        }
+        this.bigFrame('list', 7.4, 1.4, 1.9, 0.1)
+    }
+
+    /**
+     * Hot keys. Nothing about them is special in memory — that IS the point:
+     * a 200-byte string can carry most of the traffic in a keyspace of millions,
+     * and every request for it goes through the same one thread.
+     */
+    private buildHotHalos() {
+        for (const [i, key] of this.hotKeys.entries()) {
+            const sprite = new THREE.Sprite(
+                new THREE.SpriteMaterial({
+                    map: radialTexture(),
+                    color: PALETTE.ice,
+                    transparent: true,
+                    opacity: 0.26,
+                    depthWrite: false,
+                    blending: THREE.AdditiveBlending,
+                }),
+            )
+            sprite.scale.setScalar(0.62)
+            sprite.position.copy(key.home).add(new THREE.Vector3(0, KEY.h * 0.7, 0))
+            sprite.userData.hot = i
+            this.group.add(sprite)
+            this.hotHalos.push(sprite)
+        }
+    }
+
     private buildAgents() {
         this.bgsaveDrone = this.makeAgent(
             this.rdbHome.clone(),
@@ -1317,6 +1590,7 @@ export class RedisInstance {
     private keyInfo(i: number) {
         const key = this.keys[i]
         if (!key || !key.live) return null
+        if (key.big) return this.bigInfo(key)
         const box = new THREE.Box3().setFromCenterAndSize(
             key.home.clone().add(new THREE.Vector3(0, this.keyStack(key) / 2, 0)),
             new THREE.Vector3(KEY.w, this.keyStack(key), KEY.d),
@@ -1348,6 +1622,32 @@ export class RedisInstance {
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
             } as Info,
             box: this.toWorld(box),
+        }
+    }
+
+    /**
+     * The card for one large value.
+     *
+     * Same rule as the encoding cards: the drawing is a SLICE, so the card carries
+     * the real number and says so. What it can show honestly is the shape — and
+     * the shape is the answer to what a big list or a big sorted set really is.
+     */
+    private bigInfo(key: RedisKey) {
+        const kind = key.big as BigKind
+        const real = BIG_REAL[kind]
+        const body: Record<BigKind, string> = {
+            hash: 'A hashtable: one bucket array, and one chain per bucket. This is ONE key — five million fields, hundreds of megabytes — and every one of them is behind that single entry in the dict. That is why HGETALL on it is not a slow query but a stall: the command runs on the one thread, walks all of it, and every other client waits. DEL of this key is the same problem. What is drawn here is the shape and not the count: nine buckets, a few chains; the real array is a few million pointers long and doubles with a rehash.',
+            zset: 'A sorted set is TWO structures at once, and this is why: a skiplist for the range queries, and a dict beside it answering "what is the score of this member" in O(1). The tower is the whole trick — each level skips over more of the list, so ZRANGEBYSCORE finds its starting point in a few hops instead of a walk. One and a half million members, one key. The drawing shows five levels and seven nodes; the real tower has the same shape with a few million nodes under it.',
+            list: 'A long list is not one array: it is a quicklist, a doubly linked chain of nodes, and each node holds a small listpack. Two million elements, one key. That shape is the reason LPUSH and RPUSH are O(1) while LINDEX in the middle is O(n): the middle is a walk along the chain, through nodes that are not next to each other in memory. The long gap in this chain is where the drawing stops — the real one runs on for tens of thousands of nodes.',
+        }
+        return {
+            key: `redis-key-${key.i}`,
+            info: {
+                title: `key #${key.i} — ${kind} · ${encodingOf(key)} · a big value`,
+                body: body[kind],
+                meta: `1 key · ${real.entries.toLocaleString('en-US')} ${real.unit} · ~${real.mb} MB · drawn as a slice`,
+            } as Info,
+            box: this.toWorld(this.bigBox(kind)),
         }
     }
 
@@ -1501,6 +1801,10 @@ export class RedisInstance {
     }
 
     keyTop(key: RedisKey): THREE.Vector3 {
+        if (key.big) {
+            const at = BIG_SPOT[key.big]
+            return new THREE.Vector3(at.x, at.y + 0.5, at.z)
+        }
         return key.home.clone().add(new THREE.Vector3(0, KEY.h / 2 + 0.04, 0))
     }
 
@@ -1510,12 +1814,28 @@ export class RedisInstance {
     }
 
     keyBox(key: RedisKey): THREE.Box3 {
+        if (key.big) return this.toWorld(this.bigBox(key.big))
         const h = this.keyStack(key)
         return this.toWorld(
             new THREE.Box3().setFromCenterAndSize(
                 key.home.clone().add(new THREE.Vector3(0, h / 2, 0)),
                 new THREE.Vector3(KEY.w, h, KEY.d),
             ),
+        )
+    }
+
+    /** The volume one big value occupies, cage-local — its dashed cage, in a box. */
+    private bigBox(kind: BigKind): THREE.Box3 {
+        const at = BIG_SPOT[kind]
+        const size: Record<BigKind, [number, number, number, number]> = {
+            hash: [3.74, 1.6, 2.28, 0.34],
+            zset: [5.0, 2.7, 2.5, 0.5],
+            list: [7.4, 1.4, 1.9, 0.1],
+        }
+        const [w, h, d, cy] = size[kind]
+        return new THREE.Box3().setFromCenterAndSize(
+            new THREE.Vector3(at.x, at.y + cy, at.z),
+            new THREE.Vector3(w, h, d),
         )
     }
 
@@ -1534,7 +1854,8 @@ export class RedisInstance {
      * you can see across the plane.
      */
     private paintAuxKey(key: RedisKey) {
-        const n = auxBlocks(key)
+        // a big value is its own area, not a stack on a plane block
+        const n = key.big ? 0 : auxBlocks(key)
         const deploy = this.auxAnim.get(key.i) ?? 1
         for (let b = 0; b < 2; b++) {
             const on = key.live && b < n
@@ -1617,9 +1938,51 @@ export class RedisInstance {
         return encodingOf(key)
     }
 
+    /* -------------------------------- the skew ------------------------------- */
+
+    /** A hot key to send a read at — most traffic goes to a few of them. */
+    hotKey(): RedisKey | null {
+        const live = this.hotKeys.filter((k) => k.live)
+        if (live.length === 0) return null
+        return live[randInt(0, live.length - 1)]
+    }
+
+    /** One of the large values, if the same kind is asked for. */
+    bigKey(kind?: BigKind): RedisKey | null {
+        const all = Object.values(this.bigKeys) as RedisKey[]
+        const live = all.filter((k) => k && k.live && (!kind || k.big === kind))
+        if (live.length === 0) return null
+        return live[randInt(0, live.length - 1)]
+    }
+
+    /** Keys drawn as their own area — the panel counts them. */
+    get bigCount() {
+        return (Object.values(this.bigKeys) as RedisKey[]).filter((k) => k && k.live).length
+    }
+
+    get hotCount() {
+        return this.hotKeys.filter((k) => k.live).length
+    }
+
+    /**
+     * Who a write can push out. Never a big or a hot key: both are the point of
+     * this floor, and evicting one would delete the thing being explained. Real
+     * redis would evict whatever the policy picked — including them.
+     */
+    evictionVictim(): RedisKey | null {
+        const live = this.keys.filter((k) => k.live && !k.big && !k.hot)
+        if (live.length === 0) return null
+        return live[randInt(0, live.length - 1)]
+    }
+
     setKeyLive(key: RedisKey, live: boolean) {
         key.live = live
         key.heat = live ? 1 : 0
+        if (key.big) {
+            // drawn as its own area, never as a block in the plane
+            this.flashKey(key, KIND_COLOR[key.kind], 0.5)
+            return
+        }
         const s = live ? 1 : 0.001
         this.tmpObj.position.copy(key.home)
         this.tmpObj.scale.set(s, s, s)
@@ -1804,6 +2167,11 @@ export class RedisInstance {
     }
 
     flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
+        // a big value is not a block in the plane: the touch lights its structure
+        if (key.big) {
+            this.pulseBig(key.big)
+            return
+        }
         this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(pulseHex(hex)))
         if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
         void this.ticker.add(dur, (k) => {
@@ -1812,6 +2180,15 @@ export class RedisInstance {
             this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(base))
             if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
         })
+    }
+
+    /**
+     * One big value was touched. The whole structure lights at once, because that
+     * is the honest picture: a command against a value like this walks all of it,
+     * on the one thread, and every other client waits.
+     */
+    pulseBig(kind: BigKind) {
+        this.bigPulse[kind] = 1
     }
 
     /* ----------------------------------- AOF --------------------------------- */
@@ -2344,6 +2721,7 @@ export class RedisInstance {
         if (!key || key.live) return
         key.live = true
         key.heat = 0.9
+        if (key.big) return
         this.tmpObj.position.copy(key.home)
         this.tmpObj.scale.setScalar(1)
         this.tmpObj.updateMatrix()
@@ -2667,6 +3045,22 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity +=
             (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) * Math.min(1, dt * 6)
         this.loopRing.rotation.z += dt * 0.5
+
+        // a big value that was touched burns for a beat and settles back
+        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+            this.bigPulse[kind] = Math.max(0, this.bigPulse[kind] - dt * 2.2)
+            const mat = this.bigMats[kind]
+            if (!mat) continue
+            mat.emissiveIntensity = 0.42 + 0.1 * breathe(time, 1.4, kind.length) + this.bigPulse[kind] * 2.2
+        }
+
+        // hot keys glow softly, and stop glowing when they are gone
+        this.hotHalos.forEach((s, i) => {
+            const key = this.hotKeys[i]
+            const on = !!key && key.live
+            s.visible = on
+            if (on) s.material.opacity = 0.16 + 0.12 * breathe(time, 1.6, i)
+        })
 
         // the dict's cron: while a rehash is running it migrates a burst of
         // buckets on a timer, and once the load factor passes 1 it starts one
