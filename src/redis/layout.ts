@@ -130,6 +130,90 @@ export const HASH_SIZES = [32, 64, 128] as const
 export const HASH_MAX = HASH_SIZES[HASH_SIZES.length - 1]
 export const KEYS = { cols: 26, rows: 7, y: 7.0, cz: -2.2 }
 
+/**
+ * The heap: one contiguous arena of 4 kB page cubes, below the hash table.
+ *
+ * This is memory, not a drawing of memory. The arena is a fixed address space
+ * (cols × rows × 4 kB); the pages in use are scattered through it by the
+ * allocator, so there is a lot of free space between them and no ordering at
+ * all — RAM is not compacted by the OS, and nothing moves a page to make the
+ * used ones adjacent. A bucket points at an entry, and the entry sits on one of
+ * these pages: that is the memory the dictionary really reaches.
+ *
+ * The cube size is the same 4 kB block used on the disk floor, one 4 kB page per
+ * cube. Pitch is the shared 4 kB cell so the lattice reads like the disk's.
+ */
+export const HEAP = { cols: 48, rows: 16, y: 1.95, cz: KEYS.cz }
+/** Side of one heap page cube — the same 4 kB block the disk uses, so the two read alike. */
+export const HEAP_PAGE = 0.23
+/**
+ * How full the heap is drawn. A working instance near maxmemory is not an empty
+ * arena: 80% of the pages are in use and the remaining fifth is free space
+ * scattered between them, the same way the postgres disk is drawn mostly packed.
+ */
+export const HEAP_OCCUPANCY = 0.8
+export const heapX = (c: number) => (c - (HEAP.cols - 1) / 2) * CELL
+export const heapZ = (r: number) => HEAP.cz + (r - (HEAP.rows - 1) / 2) * CELL
+/** Which page a key slot's entry is allocated on — scattered, never sorted. */
+export const heapPageOf = (i: number, pageCount: number) => (i * 209) % pageCount
+
+/**
+ * Which pages of the arena are in use.
+ *
+ * There is no single correct heap picture, because the layout is the product of
+ * the workload and the allocator. What is wrong is a repeating rule: a modulus
+ * puts the free pages on a visible lattice, which no allocator produces. This
+ * model is the smallest thing with the right shapes: memory is handed out in
+ * runs of 1–12 pages at pseudo-random spots, then freed runs of 1–10 pages are
+ * removed until the target occupancy is reached. The result is long used
+ * stretches, irregular holes, and a few isolated free pages — a fragmented heap
+ * rather than a pattern. It is seeded, so the picture is stable frame to frame.
+ *
+ * It is a model, not a measurement: jemalloc's real runs depend on size classes
+ * and on what the application allocated and freed. The honest claim is the
+ * occupancy (80%) and the shape (runs and holes), not the exact page indices.
+ */
+export function heapOccupancyMask(pageCount: number, occupancy: number): Uint8Array {
+    let s = 0x9e3779b9
+    const rnd = () => {
+        s = (s + 0x6d2b79f5) | 0
+        let t = Math.imul(s ^ (s >>> 15), 1 | s)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    const used = new Uint8Array(pageCount)
+    const target = Math.round(pageCount * occupancy)
+    const fillTo = Math.min(pageCount, Math.round(pageCount * Math.min(1, occupancy + 0.08)))
+    let count = 0
+    // allocate in runs, as an allocator hands out pages
+    while (count < fillTo) {
+        const len = 1 + Math.floor(rnd() * 12)
+        const start = Math.floor(rnd() * pageCount)
+        for (let k = 0; k < len && count < fillTo; k++) {
+            const id = start + k
+            if (id >= pageCount) break
+            if (!used[id]) {
+                used[id] = 1
+                count++
+            }
+        }
+    }
+    // free in runs, leaving holes where memory was returned
+    while (count > target) {
+        const len = 1 + Math.floor(rnd() * 10)
+        const start = Math.floor(rnd() * pageCount)
+        for (let k = 0; k < len && count > target; k++) {
+            const id = start + k
+            if (id >= pageCount) break
+            if (used[id]) {
+                used[id] = 0
+                count--
+            }
+        }
+    }
+    return used
+}
+
 export const dictX = (c: number) => (c - (DICT.cols - 1) / 2) * PITCH
 export const dictZ = (r: number) => DICT.cz + (r - (DICT.rows - 1) / 2) * PITCH
 export const keyX = (c: number) => (c - (KEYS.cols - 1) / 2) * PITCH

@@ -383,12 +383,14 @@ export class RedisSim {
             return
         }
 
-        // The whole way down is one thread, and the hop through the bucket is a
-        // real step: hash the key, land on a bucket, follow the chain to the
-        // entry. Drawing loop → key directly would skip the only lookup in the
-        // whole system — the thing that makes it O(1).
+        // What the command loop does with a command, in order: it names a KEY
+        // (the dashed entry in the keyspace plane), hashes that key to a BUCKET,
+        // follows the bucket's pointer to the entry's page in the HEAP, reads the
+        // value there, and the reply goes straight back to the loop. The key cube
+        // is representational; the page is where the bytes are.
         const chain = new QueryChain(cage)
-        const target = key ? this.redis.keyTop(key) : this.redis.channelPoint()
+        const keyPoint = key ? this.redis.keyTop(key) : this.redis.channelPoint()
+        const target = key ? this.redis.keyPageTop(key) : this.redis.channelPoint()
         const bucket = key ? this.redis.bucketTop(key) : this.redis.channelPoint()
 
         // The bytes are in that socket's input buffer now, and they stay there
@@ -427,7 +429,7 @@ export class RedisSim {
             await this.fanout(ride, packet, route.getTangent(1).normalize())
         } else {
             chain.add(
-                [portTop, queue, loop, bucket, target].map((p) => p.clone()),
+                [portTop, queue, loop, keyPoint, bucket, target].map((p) => p.clone()),
                 PALETTE.violet,
                 { speed: 0.9, opacity: 0.5 },
             )
@@ -444,6 +446,8 @@ export class RedisSim {
         let bigRead = false
         if (key) {
             this.redis.pulseBucket(key)
+            this.redis.pulsePage(key)
+            this.redis.flashKey(key, PALETTE.ice, 0.3)
             // one bucket of the rehash per operation, exactly as redis does it —
             // the cron makes up the rest
             this.redis.rehashStep(1)
@@ -520,10 +524,17 @@ export class RedisSim {
 
         // The reply climbs back up the same socket and leaves the frame the way
         // the request came in — a strand to the side of it, not a stub that stops
-        // in mid-air above the port. A publish has no key to come back from, so
-        // its reply starts at the channel: the count is made there and nowhere else.
+        // in mid-air above the port. It starts at the HEAP PAGE, not at the key
+        // entry: a bucket holds a pointer, the entry holds pointers, and the
+        // value's bytes are on a 4 kB page in the heap. For a publish there is no
+        // key, so the count starts at the channel.
+        const replyFrom = key
+            ? this.redis.keyPageTop(key)
+            : cmd.fanout
+                ? this.redis.channelPoint()
+                : loop.clone()
         const reply = pathCurve([
-            ...(cmd.fanout ? [] : [target]),
+            ...(cmd.fanout ? [] : [replyFrom]),
             ...(cmd.fanout ? [this.redis.channelPoint()] : [loop.clone()]),
             loop.clone(),
             queue.clone(),
@@ -535,7 +546,7 @@ export class RedisSim {
         const replyChain = new QueryChain(cage)
         replyChain.addCurve(reply, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
         const out = makePacket(PALETTE.teal, 0.26, cage)
-        out.position.copy(cmd.fanout ? this.redis.channelPoint() : target)
+        out.position.copy(replyFrom)
         await travel(this.ticker, out, reply, 0.8, easeOutCubic)
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)

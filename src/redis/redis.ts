@@ -29,7 +29,7 @@ import {
     setLabelEnabled,
     slotLattice,
 } from '../core/util'
-import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, keyX, keyZ, xAt, zAt, } from './layout'
+import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, keyX, keyZ, xAt, zAt, } from './layout'
 export * from './layout'
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
@@ -60,6 +60,8 @@ export interface RedisKey {
     row: number
     col: number
     home: THREE.Vector3
+    /** the heap page this entry's allocation lives on */
+    page: number
     kind: KeyKind
     live: boolean
     /** seconds left, 0 = no expiry */
@@ -166,7 +168,7 @@ export const REDIS_ANCHOR = {
 function rebaseAnchors() {
     const o = REDIS_ORIGIN
     REDIS_ANCHOR.sky.set(6, 26, 2).add(o)
-    REDIS_ANCHOR.keys.set(0, KEYS.y + 0.4, KEYS.cz + 0.4).add(o)
+    REDIS_ANCHOR.keys.set(0, HEAP.y + 0.5, HEAP.cz + 0.4).add(o)
     REDIS_ANCHOR.dict.set(0, DICT.y, DICT.cz).add(o)
     REDIS_ANCHOR.loop.copy(LOOP).add(o)
     REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
@@ -198,6 +200,12 @@ export class RedisInstance {
 
     private disk!: THREE.InstancedMesh
     private dictMesh!: THREE.InstancedMesh
+    /** the 4 kB pages the entries are allocated in, under the keyspace cage */
+    private heapMesh!: THREE.InstancedMesh
+    /** 1 = page in use; seeded once, so the heap does not shimmer */
+    private heapMask?: Uint8Array
+    /** the used pages, in arena order — keys take one each for their allocation */
+    private heapPages: number[] = []
     private keysMesh!: THREE.InstancedMesh
     /** the second (and for a zset, third) allocation of a converted value */
     private auxMesh!: THREE.InstancedMesh
@@ -797,6 +805,47 @@ export class RedisInstance {
         this.dictTableLab = tableLab
         this.paintDict()
 
+        /* ------------------------- heap: page cubes ----------------------- */
+        // The arena comes first, because it is where the entries are: 768 pages
+        // of 4 kB in one contiguous address space, below the hash table. The
+        // page cubes are the same 4 kB block as the disk's, so RAM and disk
+        // speak the same unit; what differs is that nothing here is a file and
+        // nothing is sorted — used pages are scattered through the arena and
+        // never compacted, because the OS does not defragment RAM.
+        const pageCount = HEAP.cols * HEAP.rows
+        // Seeded once: the same pages are in use on every frame and every load.
+        this.heapMask = heapOccupancyMask(pageCount, HEAP_OCCUPANCY)
+        this.heapPages = []
+        for (let p = 0; p < pageCount; p++) if (this.heapMask[p] === 1) this.heapPages.push(p)
+        // A page is a cube, not a plate: small enough that the 4 kB cell keeps a
+        // visible gap, so the arena reads as pages rather than one slab.
+        const heapGeo = new RoundedBoxGeometry(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE, 1, 0.01)
+        const heapMat = new THREE.MeshStandardMaterial({
+            color: 0xffffff,
+            emissive: PALETTE.cyan,
+            // almost no emission: the per-instance colour is the only thing that
+            // may separate a used page from a free one
+            emissiveIntensity: 0.05,
+            roughness: 0.5,
+            metalness: 0.3,
+        })
+        const heap = new THREE.InstancedMesh(heapGeo, heapMat, pageCount)
+        // free pages are collapsed, so their matrices change with the dataset
+        heap.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
+        for (let r = 0; r < HEAP.rows; r++) {
+            for (let c = 0; c < HEAP.cols; c++) {
+                const id = r * HEAP.cols + c
+                this.tmpObj.position.set(heapX(c), HEAP.y, heapZ(r))
+                this.tmpObj.scale.setScalar(1)
+                this.tmpObj.updateMatrix()
+                heap.setMatrixAt(id, this.tmpObj.matrix)
+            }
+        }
+        this.group.add(heap)
+        this.heapMesh = heap
+        heap.userData.infoFor = (hit: THREE.Intersection) => this.heapPageInfo(hit)
+        this.pickables.push(heap)
+
         /* ----------------------------- entries ---------------------------- */
         const kMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
@@ -831,6 +880,8 @@ export class RedisInstance {
         i = 0
         for (let r = 0; r < KEYS.rows; r++) {
             for (let c = 0; c < KEYS.cols; c++) {
+                // The keyspace is a representational plane: each cube is one entry
+                // placed so it can be pointed at. It is not the heap volume below.
                 const home = new THREE.Vector3(keyX(c), KEYS.y, keyZ(r))
                 // about three quarters of the slots hold a key at boot
                 const live = Math.random() < 0.74
@@ -852,6 +903,7 @@ export class RedisInstance {
                             : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
+                    page: this.heapPages[i % this.heapPages.length],
                     row: r,
                     col: c,
                     home,
@@ -915,6 +967,23 @@ export class RedisInstance {
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
 
+        /* --------------------------- heap volume -------------------------- */
+        // The pages are lit from the dataset's bytes; nothing is placed on them —
+        // the keyspace above stays a dashed representation, this is the memory.
+        this.paintHeap()
+
+        const hW = (HEAP.cols - 1) * CELL + HEAP_PAGE
+        const hD = (HEAP.rows - 1) * CELL + HEAP_PAGE
+        // No pick plate and no separate cage. The page cubes are the pick
+        // surface: from far away they answer for the arena and the outline is
+        // the arena's bounds — a box that wraps every cube, taller than a block
+        // and wide enough in x/z. From close up they answer for one page. A
+        // plate under the cubes would cut the volume in half and a taller box
+        // would swallow the page clicks; neither is a cage around the pages.
+        const heapLab = label('HEAP')
+        heapLab.position.set(-hW / 2 - 0.42, HEAP.y + 0.34, HEAP.cz - hD / 2)
+        this.group.add(heapLab)
+
         // Every entry is tethered to the bucket that points at it. One hairline
         // per live entry, coloured by kind, so a collision reads as several
         // lines landing on one tile — the chain — and a big value reads as one
@@ -946,7 +1015,7 @@ export class RedisInstance {
         // DASHED, because the volume is ours: the entries are separate
         // allocations scattered across the heap, and this plane is only where we
         // put them so they can be pointed at. A solid cage is reserved for
-        // volumes that really exist — the process, the two files.
+        // volumes that really exist — the process, the two files, the heap.
         const keysFrame = this.frame(
             new THREE.Vector3(0, KEYS.y, KEYS.cz),
             new THREE.Vector3(kW, 0.9, kD),
@@ -959,7 +1028,7 @@ export class RedisInstance {
             keysPick,
             {
                 title: 'Keyspace — the database itself, in RAM',
-                body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it. Two things to be clear about, because the drawing is ours: this is the SAME structure as the bucket array below, not a second arena — the buckets are one array of pointers, and each cube here is the set of allocations a bucket points at: a 24-byte dictEntry holding the key pointer and the value pointer, the key\'s own sds string, the value\'s robj header, and then the bytes of the value itself. The value is not inside the bucket and not even inside the entry: both only point. A converted value adds more allocations, drawn stacked above its cube; a value too big for a cube is one of the dashed areas at the back of the cage. The lattice is only how we place them: in memory those allocations are scattered across the heap wherever malloc put them, with no order at all. That is what the dashed cage says: the volume is a drawing, the blocks in it are real. The blocks are deliberately small too: an entry is a few hundred bytes, while the smallest unit on the floor below is a 4 kB block — at true scale one bucket (8 B) would be a speck beside it.',
+                body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it. Two things to be clear about, because the drawing is ours: this is the SAME structure as the bucket array below, not a second arena — the buckets are one array of pointers, and each cube here is the set of allocations a bucket points at: a 24-byte dictEntry holding the key pointer and the value pointer, the key\'s own sds string, the value\'s robj header, and then the bytes of the value itself. The value is not inside the bucket and not even inside the entry: both only point. A converted value adds more allocations, drawn stacked above its cube; a value too big for a cube is one of the dashed areas at the back of the cage. The lattice is only how we place them: in memory those allocations are scattered across whatever pages the allocator handed out, with no order at all. That is what the dashed cage says: the volume is a drawing, the blocks in it are real. The blocks are deliberately small: an entry is a few hundred bytes, while the smallest unit on the floor below is a 4 kB block — at true scale one bucket (8 B) would be a speck beside it.',
                 meta: `${KEYS.cols * KEYS.rows} slots · 3–4 allocations per key · position is representational`,
             },
             keysCage,
@@ -1669,6 +1738,129 @@ export class RedisInstance {
         return this.keyInfo(i)
     }
 
+    /**
+     * The whole arena: its card, and the cage that wraps every page cube.
+     *
+     * The box is the pages' bounds, not a plate and not a taller generic
+     * volume — it has the arena's x/z extent and a height above one 4 kB block,
+     * so the outline surrounds the cubes and touches none of them. This is the
+     * same box a far click on any page returns; close up the same mesh answers
+     * for one page instead.
+     */
+    private heapInfo() {
+        const pageCount = HEAP.cols * HEAP.rows
+        const hW = (HEAP.cols - 1) * CELL + HEAP_PAGE
+        const hD = (HEAP.rows - 1) * CELL + HEAP_PAGE
+        const box = new THREE.Box3().setFromCenterAndSize(
+            new THREE.Vector3(0, HEAP.y, HEAP.cz),
+            new THREE.Vector3(hW, Math.max(BLOCK.h, HEAP_PAGE) + 0.06, hD),
+        )
+        return {
+            key: 'redis-heap',
+            info: {
+                title: 'Memory — the heap, a volume of its own',
+                body: 'This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 kB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine\'s RAM.',
+                meta: `heap · ${pageCount} × 4 kB · ${fmtBytes(pageCount * 4096)} arena · scattered pages · separate volume`,
+                stats: () => {
+                    const pageBytes = 4096
+                    const arena = pageCount * pageBytes
+                    const small = this.keys.filter((k) => k.live && !k.big)
+                    const smallBytes = small.reduce((n, k) => n + k.bytes, 0)
+                    const bigBytes = (Object.keys(this.bigKeys) as BigKind[]).reduce(
+                        (n, k) => n + (this.bigKeys[k]?.live ? BIG_REAL[k].mb * 1024 * 1024 : 0),
+                        0,
+                    )
+                    const inUse = this.heapMask
+                        ? this.heapMask.reduce((n, v) => n + (v ? 1 : 0), 0)
+                        : 0
+                    const pct = Math.round((inUse / pageCount) * 100)
+                    return [
+                        { label: 'pages', value: `${pageCount} × 4 kB` },
+                        { label: 'arena', value: fmtBytes(arena) },
+                        { label: 'in use', value: `${inUse} · ${pct}%` },
+                        { label: 'free', value: `${pageCount - inUse} · ${100 - pct}%` },
+                        { label: 'dataset', value: fmtBytes(smallBytes) },
+                        { label: 'big values', value: `≈ ${fmtBytes(bigBytes)}` },
+                        { label: 'resident', value: `≈ ${fmtBytes(smallBytes + bigBytes)}` },
+                    ]
+                },
+            } as Info,
+            box: this.toWorld(box),
+        }
+    }
+
+    /**
+     * A key was created or loaded: the allocator hands it a free page. The page
+     * appears where the free list had it, not next to the key's neighbours, so
+     * the arena keeps its holes instead of closing up.
+     */
+    private occupyHeapPage() {
+        if (!this.heapMask) return
+        const pageCount = HEAP.cols * HEAP.rows
+        const free: number[] = []
+        for (let i = 0; i < pageCount; i++) if (this.heapMask[i] === 0) free.push(i)
+        if (free.length === 0) return
+        const page = free[randInt(0, free.length - 1)]
+        this.heapMask[page] = 1
+        this.fadeHeapPage(page, true)
+    }
+
+    /** A key was deleted or evicted: its page is freed and left as a hole. */
+    private releaseHeapPage() {
+        if (!this.heapMask) return
+        const pageCount = HEAP.cols * HEAP.rows
+        const used: number[] = []
+        for (let i = 0; i < pageCount; i++) if (this.heapMask[i] === 1) used.push(i)
+        if (used.length <= 1) return
+        const page = used[randInt(0, used.length - 1)]
+        this.heapMask[page] = 0
+        this.fadeHeapPage(page, false)
+    }
+
+    /** A page appears when allocated and disappears into a hole when freed. */
+    private fadeHeapPage(page: number, on: boolean) {
+        const row = Math.floor(page / HEAP.cols)
+        const col = page % HEAP.cols
+        const from = on ? 0.001 : 1
+        const to = on ? 1 : 0.001
+        const hex = on ? mixHex(0x06222c, PALETTE.cyan, 0.82) : mixHex(0x04141c, PALETTE.cyan, 0.07)
+        this.heapMesh.setColorAt(page, this.tmpColor.setHex(hex))
+        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
+        void this.ticker.add(0.32, (k) => {
+            const s = from + (to - from) * Math.min(1, k)
+            this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
+            this.tmpObj.scale.setScalar(Math.max(0.001, s))
+            this.tmpObj.updateMatrix()
+            this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
+            this.heapMesh.instanceMatrix.needsUpdate = true
+        }).then(() => this.paintHeap())
+    }
+    private heapPageInfo(hit: THREE.Intersection) {
+        if (hit.distance > BLOCK_PICK_RANGE) return this.heapInfo()
+        const pageCount = HEAP.cols * HEAP.rows
+        const id = this.instanceAt(hit, pageCount)
+        if (id === null) return null
+        const used = this.heapMask?.[id] === 1
+        const row = Math.floor(id / HEAP.cols)
+        const col = id % HEAP.cols
+        const box = new THREE.Box3().setFromCenterAndSize(
+            new THREE.Vector3(heapX(col), HEAP.y, heapZ(row)),
+            new THREE.Vector3(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
+        )
+        const inUse = this.heapMask ? this.heapMask.reduce((n, v) => n + (v ? 1 : 0), 0) : 0
+        return {
+            key: `redis-heap-${id}`,
+            info: {
+                title: `heap page #${id} — ${used ? 'in use' : 'free'} · 4 kB`,
+                body: used
+                    ? 'One 4 kB page of the process heap, and it is allocated. The keys and values are allocated on pages like this one: the bucket array holds pointers, the dictEntry holds the key and value pointers, and the bytes at the end of those pointers live in memory of this kind. A page is the operating system unit; jemalloc hands out larger runs and carves them into size classes, so several small objects can share one page, and a large value is spread over many. Nothing about this page is a file and nothing about it is a cache: it is the dataset.'
+                    : 'One 4 kB page of the process heap, and nothing is allocated on it. The arena includes it, but no object lives here — it is free space left where an allocation once was or has never been used. Nothing compacts it into the used region: the OS does not defragment RAM, and the allocator only reuses a page when the next allocation fits.',
+                meta: `heap page · 4 kB · ${used ? 'allocated' : 'free'} · ${inUse}/${pageCount} pages in use`,
+            } as Info,
+            box: this.toWorld(box),
+        }
+    }
+
     /** The inspector payload for one key, shared by its entry block and its structures. */
     private keyInfo(i: number) {
         const key = this.keys[i]
@@ -1955,6 +2147,18 @@ export class RedisInstance {
         return key.home.clone().add(new THREE.Vector3(0, KEY.h / 2 + 0.04, 0))
     }
 
+    /**
+     * The heap page this entry's bytes actually sit on. This is the far end of
+     * the pointer: a bucket points at a dictEntry, and the dictEntry (and the
+     * key and value it names) live on a page in the heap. The dashed key cube is
+     * the representation of the entry; this is where the memory is.
+     */
+    keyPageTop(key: RedisKey): THREE.Vector3 {
+        const row = Math.floor(key.page / HEAP.cols)
+        const col = key.page % HEAP.cols
+        return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
+    }
+
     /** Height of what this key occupies on screen: its block, plus the structures above it. */
     private keyStack(key: RedisKey): number {
         return KEY.h * (1 + auxBlocks(key)) + 0.02 * auxBlocks(key)
@@ -2044,6 +2248,7 @@ export class RedisInstance {
         this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
         if (this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
         this.paintAuxKey(key)
+        this.paintHeap()
     }
 
     /**
@@ -2067,6 +2272,7 @@ export class RedisInstance {
         this.auxAnim.set(key.i, 0)
         this.flashKey(key, KIND_COLOR[key.kind], 0.9)
         this.paintAuxKey(key)
+        this.paintHeap()
         return true
     }
 
@@ -2115,6 +2321,9 @@ export class RedisInstance {
     setKeyLive(key: RedisKey, live: boolean) {
         key.live = live
         key.heat = live ? 1 : 0
+        // a created key takes a page, a deleted one returns it as a hole
+        if (live) this.occupyHeapPage()
+        else this.releaseHeapPage()
         if (key.big) {
             // drawn as its own area, never as a block in the plane
             this.flashKey(key, KIND_COLOR[key.kind], 0.5)
@@ -2337,6 +2546,36 @@ export class RedisInstance {
     }
 
     /**
+     * Paint the arena at its working occupancy.
+     *
+     * A page in use is a full 4 kB cube; a free page is collapsed, so the empty
+     * fifth of the arena shows as holes. The used pages are scattered through the
+     * arena by the allocator's order, not packed from the start, and nothing
+     * reorders them — the OS does not compact RAM. That is the same convention
+     * the postgres disk uses: a mostly-packed volume with fragmentation, not an
+     * empty grid.
+     */
+    private paintHeap() {
+        if (!this.heapMesh) return
+        const free = mixHex(0x04141c, PALETTE.cyan, 0.07)
+        const pageCount = HEAP.cols * HEAP.rows
+        const mask = this.heapMask
+        for (let id = 0; id < pageCount; id++) {
+            const row = Math.floor(id / HEAP.cols)
+            const col = id % HEAP.cols
+            const on = mask?.[id] === 1
+            this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
+            this.tmpObj.scale.setScalar(on ? 1 : 0.001)
+            this.tmpObj.updateMatrix()
+            this.heapMesh.setMatrixAt(id, this.tmpObj.matrix)
+            const hex = on ? mixHex(0x06222c, PALETTE.cyan, 0.82) : free
+            this.heapMesh.setColorAt(id, this.tmpColor.setHex(hex))
+        }
+        this.heapMesh.instanceMatrix.needsUpdate = true
+        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
+    }
+
+    /**
      * Load factor 1: the next insert grows the table. Real dicts check this on
      * every add; so does this one.
      */
@@ -2389,6 +2628,25 @@ export class RedisInstance {
         })
         // repaint from state rather than restoring a remembered colour
         void this.ticker.wait(PULSE_TIME).then(() => this.paintDict())
+    }
+
+    /**
+     * The lookup reached memory: light the page the entry's bytes live on. This
+     * is the access the path is about — the bucket is an index, the page is the
+     * data.
+     */
+    pulsePage(key: RedisKey) {
+        const page = key.page
+        this.heapMesh.setColorAt(page, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.5)))
+        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
+        void this.ticker.add(PULSE_TIME, (k) => {
+            this.heapMesh.setColorAt(
+                page,
+                this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.5)).multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
+            )
+            if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
+        })
+        void this.ticker.wait(PULSE_TIME).then(() => this.paintHeap())
     }
 
     flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
@@ -2830,7 +3088,7 @@ export class RedisInstance {
         this.pulseAgent(this.bgsaveDrone)
 
         // 1. read the keyspace
-        this.rdbAim.set(keyX(0), KEYS.y + 0.8, KEYS.cz)
+        this.rdbAim.set(heapX(0), HEAP.y + 0.8, HEAP.cz)
         await this.ticker.wait(0.28)
         await this.ticker.add(1.0, (k) => {
             const col = Math.min(KEYS.cols - 1, Math.floor(k * KEYS.cols))
@@ -2839,7 +3097,7 @@ export class RedisInstance {
                     key.heat = Math.max(key.heat, 0.85)
                 }
             }
-            this.rdbAim.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
+            this.rdbAim.set(heapX(col), HEAP.y + 0.8, HEAP.cz)
         })
 
         // 2. write the new file: it starts empty and fills block by block
@@ -2947,7 +3205,10 @@ export class RedisInstance {
             this.keysMesh.setMatrixAt(key.i, this.tmpObj.matrix)
         }
         this.keysMesh.instanceMatrix.needsUpdate = true
+        // The arena's other occupants are not keys: wiping the keyspace during a
+        // load does not empty the process heap, so the 80% seed stays.
         this.rebuildPointerWeb()
+        this.paintHeap()
     }
 
     /** One key comes back from the files — no flash, it was never "written". */
@@ -2956,6 +3217,7 @@ export class RedisInstance {
         if (!key || key.live) return
         key.live = true
         key.heat = 0.9
+        this.paintHeap()
         if (key.big) {
             this.rebuildPointerWeb()
             return
@@ -3002,14 +3264,14 @@ export class RedisInstance {
         // 1. it flies to the keyspace, then sweeps it: the wave is the scan, not
         //    decoration. The aim point moves, the lerp in update() does the flight,
         //    so there is no cut between "idle" and "scanning".
-        this.rewriteAim.set(keyX(0), KEYS.y + 0.8, KEYS.cz)
+        this.rewriteAim.set(heapX(0), HEAP.y + 0.8, HEAP.cz)
         await this.ticker.wait(0.35)
         await this.ticker.add(1.15, (k) => {
             const col = Math.min(KEYS.cols - 1, Math.floor(k * KEYS.cols))
             for (const key of this.keys) {
                 if (key.live && Math.abs(key.col - col) <= 1) key.heat = Math.max(key.heat, 0.9)
             }
-            this.rewriteAim.set(keyX(col), KEYS.y + 0.8, KEYS.cz)
+            this.rewriteAim.set(heapX(col), HEAP.y + 0.8, HEAP.cz)
         })
 
         // 2. it drops to the staging area — free floor in front of the log, not
