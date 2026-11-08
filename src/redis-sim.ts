@@ -100,7 +100,20 @@ export class RedisSim {
     private inFlight = 0
     private nextArrival = 0.4
     private saveTimer = 6
-    private rewriteTimer = 18
+    /**
+     * appendfsync everysec: the buffer is flushed (write + fsync) once a second.
+     * That interval IS the durability window — not a drain rate we picked.
+     */
+    private fsyncTimer = 1
+    /**
+     * auto-aof-rewrite-percentage and …-min-size, in the units this diagram has:
+     * blocks, not bytes. Redis defaults are 100 % growth and 64 MB; the rule is
+     * the same, the scale is not.
+     */
+    private readonly rewriteGrowth = 2
+    private readonly rewriteMinBlocks = 6
+    /** Log size right after the last rewrite — the baseline the growth is measured from. */
+    private blocksAtLastRewrite = 0
     saving = false
     rewriting = false
     ambient = true
@@ -324,6 +337,7 @@ export class RedisSim {
     }
 
     bgsave() {
+        if (this.saving) return
         this.saving = true
         this.redis.bgsave()
         this.note = `bgsave · ${this.redis.liveKeys} keys forked into dump.rdb`
@@ -332,16 +346,35 @@ export class RedisSim {
         })
     }
 
+    /** One command by hand, straight down the socket — the panel's run button. */
+    runCommand() {
+        if (this.inFlight >= 6) return
+        void this.runOp()
+    }
+
     rewriteAof() {
         if (this.rewriting) return
         this.rewriting = true
-        this.note = 'bgrewriteaof · child scanning the keyspace'
+        const before = this.redis.aofUsed
+        this.note = `bgrewriteaof · child scanning the keyspace (log is ${before} blocks)`
         // the instance runs the whole sequence (scan, write, swap); the sim just
         // reports it, and holds the flag until the swap has actually happened
         void this.redis.runRewrite().then(() => {
             this.rewriting = false
-            this.note = `bgrewriteaof · swapped in, log is ${this.redis.aofUsed} blocks`
+            this.blocksAtLastRewrite = this.redis.aofUsed
+            this.note = `bgrewriteaof · ${before} → ${this.redis.aofUsed} blocks`
         })
+    }
+
+    /**
+     * The rewrite does not run on a stopwatch. Redis measures growth since the
+     * last rewrite and rewrites when the log has grown past a percentage of it
+     * (default 100 %), provided it is also past a minimum size. That is why a
+     * quiet instance never rewrites and a busy one rewrites repeatedly.
+     */
+    private shouldRewrite(): boolean {
+        const used = this.redis.aofUsed
+        return used >= Math.max(this.rewriteMinBlocks, this.blocksAtLastRewrite * this.rewriteGrowth)
     }
 
     /* ---------------------------------- update ------------------------------- */
@@ -360,17 +393,20 @@ export class RedisSim {
         // the expire cycle is a background chore, not a command
         this.expireCycle()
 
+        // appendfsync everysec: whatever is in aof_buf goes to the file
+        this.fsyncTimer -= dt
+        if (this.fsyncTimer <= 0) {
+            this.fsyncTimer = 1
+            this.redis.flushAofBuffer()
+        }
+
         if (this.ambient) {
             this.saveTimer -= dt
             if (this.saveTimer <= 0) {
                 this.saveTimer = 24
                 this.bgsave()
             }
-            this.rewriteTimer -= dt
-            if (this.rewriteTimer <= 0) {
-                this.rewriteTimer = 40
-                this.rewriteAof()
-            }
+            if (!this.rewriting && this.shouldRewrite()) this.rewriteAof()
         }
     }
 

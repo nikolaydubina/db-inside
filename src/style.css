@@ -177,6 +177,23 @@ h1 {
   display: none;
 }
 
+/* a sub-heading inside a card: same weight as h2, smaller, no rule */
+h3.sub-head {
+  margin: 12px 0 6px;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-weight: 500;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: #4e6a7e;
+}
+
+/* a card hidden by the panel switcher must stay hidden, whatever display it
+   would otherwise inherit */
+[hidden] {
+  display: none !important;
+}
+
 .card {
   width: 100%;
   border: 1px solid var(--line);
@@ -535,7 +552,7 @@ h2::after {
 .stats {
   margin: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 7px 10px;
 }
 
@@ -543,6 +560,8 @@ h2::after {
   display: flex;
   flex-direction: column;
   gap: 3px;
+  /* a value longer than its column must be cut, not spilled over the card */
+  min-width: 0;
 }
 
 .stats dt {
@@ -556,10 +575,13 @@ h2::after {
 .stats dd {
   margin: 0;
   font-family: var(--mono);
-  font-size: 13px;
+  font-size: 12px;
   letter-spacing: 0.02em;
   color: #d7ecfa;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .stats dd.c-cyan {

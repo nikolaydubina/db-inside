@@ -386,6 +386,11 @@ const hud = initHud({
   compact: () => {
     void sim.compact()
   },
+  // redis has no statements and no planner: one command, executed by the one
+  // thread, plus the two background jobs it can start
+  runCommand: () => redisSim.runCommand(),
+  bgsave: () => redisSim.bgsave(),
+  rewriteAof: () => redisSim.rewriteAof(),
   setSpeed: (v) => {
     speed = v
   },
@@ -744,6 +749,9 @@ canvas.addEventListener('pointerup', (e) => {
   if (moveMode) return
   const root = pick(pointer)
   if (root) {
+    // the click says which database you are looking at, so the panel follows it
+    const cage = ownerCage(root.root)
+    if (cage) hud.setDb(cage)
     if (pinned?.key === root.key) {
       pinned = null
       hud.unpin()
@@ -932,6 +940,7 @@ function updateRedisCard(s: RedisStats) {
   rd.aof.textContent = fmtBytes(s.aofBytes)
   rd.bar.style.width = `${Math.min(100, s.memPct)}%`
   if (rd.note.textContent !== s.note) rd.note.textContent = s.note
+  hud.setRedisBusy(s.saving, s.rewriting)
 }
 
 /* --------------------------------- ambient -------------------------------- */

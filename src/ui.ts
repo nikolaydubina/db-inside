@@ -2,11 +2,19 @@ import type { Info } from './instance'
 import { REGIME_ORDER, regimeLabel } from './sim'
 import type { Regime, SimStats } from './sim'
 
+export type DbName = 'postgres' | 'redis'
+
 export interface HudHandlers {
   runQuery(): void
   checkpoint(): void
   vacuum(): void
   compact(): void
+  /** redis: send one command by hand */
+  runCommand(): void
+  /** redis: fork a child that writes the RDB */
+  bgsave(): void
+  /** redis: bgrewriteaof */
+  rewriteAof(): void
   setSpeed(v: number): void
   setRegime(r: Regime): void
   setOrbit(on: boolean): void
@@ -45,6 +53,20 @@ export function initHud(handlers: HudHandlers) {
 
   const procsEl = $<HTMLElement>('#procs')
 
+  /* --------------------------- database panels --------------------------- */
+
+  const panels: Record<DbName, HTMLElement> = {
+    postgres: $<HTMLElement>('#db-postgres'),
+    redis: $<HTMLElement>('#db-redis'),
+  }
+  let db: DbName = 'postgres'
+
+  /** Exactly one database panel is on screen; the scene picks which. */
+  const setDb = (next: DbName) => {
+    db = next
+    for (const name of Object.keys(panels) as DbName[]) panels[name].hidden = name !== next
+  }
+
   const makeRow = (label: string) => {
     const li = document.createElement('li')
     li.innerHTML = '<i class="pt"></i><span></span><b></b>'
@@ -82,6 +104,26 @@ export function initHud(handlers: HudHandlers) {
     })
   }
 
+  // redis has one thread, not one process per connection: the only other things
+  // that ever run are the two forked children
+  const rdProcsEl = $<HTMLElement>('#rd-procs')
+  const rdThread = makeRow('command thread')
+  rdThread.querySelector('i')!.classList.add('on')
+  rdThread.querySelector('b')!.textContent = 'running'
+  const rdSave = makeRow('bgsave child')
+  const rdRewriteRow = makeRow('rewrite child')
+  rdProcsEl.append(rdThread, rdSave, rdRewriteRow)
+
+  const syncRedisProcs = (saving: boolean, rewriting: boolean) => {
+    rdSave.querySelector('i')!.classList.toggle('on', saving)
+    rdSave.querySelector('b')!.textContent = saving ? 'writing' : '—'
+    rdRewriteRow.querySelector('i')!.classList.toggle('on', rewriting)
+    rdRewriteRow.querySelector('b')!.textContent = rewriting ? 'rewriting' : '—'
+  }
+  const btnCommand = $<HTMLButtonElement>('#btn-command')
+  const btnBgsave = $<HTMLButtonElement>('#btn-bgsave')
+  const btnRewrite = $<HTMLButtonElement>('#btn-rewrite')
+
   const inspector = $<HTMLElement>('#inspector')
   const insTitle = $<HTMLElement>('#ins-title')
   const insBody = $<HTMLElement>('#ins-body')
@@ -98,6 +140,9 @@ export function initHud(handlers: HudHandlers) {
   btnCheckpoint.addEventListener('click', () => handlers.checkpoint())
   btnVacuum.addEventListener('click', () => handlers.vacuum())
   btnCompact.addEventListener('click', () => handlers.compact())
+  btnCommand.addEventListener('click', () => handlers.runCommand())
+  btnBgsave.addEventListener('click', () => handlers.bgsave())
+  btnRewrite.addEventListener('click', () => handlers.rewriteAof())
   speedIn.addEventListener('input', () => {
     const v = Number(speedIn.value)
     speedVal.textContent = `${v}×`
@@ -132,9 +177,11 @@ export function initHud(handlers: HudHandlers) {
   window.addEventListener('keydown', (e) => {
     const el = e.target as HTMLElement | null
     if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
+    // space is "the next unit of work" for whichever database is on screen
     if (e.code === 'Space') {
       e.preventDefault()
-      handlers.runQuery()
+      if (db === 'redis') handlers.runCommand()
+      else handlers.runQuery()
     } else if (e.key === 'c') {
       handlers.checkpoint()
     } else if (e.key === 'v') {
@@ -147,6 +194,13 @@ export function initHud(handlers: HudHandlers) {
   const busy = (el: HTMLElement, on: boolean) => el.classList.toggle('busy', on)
 
   return {
+    setDb,
+    get db() {
+      return db
+    },
+    setRedisBusy(saving: boolean, rewriting: boolean) {
+      syncRedisProcs(saving, rewriting)
+    },
     setQueryBusy(on: boolean) {
       busy(btnQuery, on)
     },
@@ -157,8 +211,10 @@ export function initHud(handlers: HudHandlers) {
     setStats(s: SimStats) {
       stQueries.textContent = String(s.queries)
       stRps.textContent = `${s.rps.toFixed(1)} rps`
+      // busy backends are already visible in the process list below, so this is
+      // just the pool: how many connections are open against the limit
       stConn.textContent =
-        s.connections === 0 ? '—' : `${s.busyBackends} busy · ${s.connections}/${s.maxConnections}`
+        s.connections === 0 ? '—' : `${s.connections}/${s.maxConnections}`
       stHit.textContent = s.hitRate > 0 ? `${s.hitRate.toFixed(1)}%` : '—'
       stLat.textContent = s.latency > 0 ? `${s.latency.toFixed(2)} ms` : '—'
       stWal.textContent = fmtBytes(s.walBytes)

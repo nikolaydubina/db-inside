@@ -54,8 +54,13 @@
     </div>
 
     <aside class="hud panel right">
-      <section class="card">
-        <h2>Simulate</h2>
+      <!--
+        One panel per database, and only one is ever on screen: clicking anything
+        inside a cage brings up that database's own controls, numbers and process
+        list, so nothing from the other engine is mixed in.
+      -->
+      <section class="card" id="db-postgres">
+        <h2>PostgreSQL</h2>
         <div class="buttons">
           <button id="btn-query" class="btn primary">
             <span class="glyph">↵</span> run query
@@ -71,49 +76,10 @@
             <span class="glyph">⇄</span> vacuum full
           </button>
         </div>
-        <p class="hint" id="fly-hint" hidden>hold mouse to look · w a s d + q e · shift</p>
-        <label class="slider">
-          <span class="slider-label">speed</span>
-          <input type="range" id="speed" min="0.25" max="4" step="0.25" value="1" />
-          <b id="speed-val">1×</b>
-        </label>
         <div class="regimes" id="regimes">
           <span class="regime-label">workload</span>
           <div class="regime-opts" id="regime-opts"></div>
         </div>
-        <div class="switches">
-          <label class="switch">
-            <input type="checkbox" id="chk-orbit" checked />
-            <span class="track"></span>
-            <span class="label">auto orbit</span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="chk-fly" />
-            <span class="track"></span>
-            <span class="label">fly · wasd</span>
-          </label>
-          <label class="switch">
-            <input type="checkbox" id="chk-move" />
-            <span class="track"></span>
-            <span class="label">move · drag</span>
-          </label>
-        </div>
-        <p class="hint" id="move-hint" hidden>drag a cage · snaps to the 2-unit floor grid</p>
-      </section>
-
-      <section class="card" id="stories-card">
-        <h2>Stories</h2>
-        <div class="stories" id="stories"></div>
-      </section>
-
-      <section class="card" id="views-card">
-        <h2>Views</h2>
-        <div class="views" id="views"></div>
-        <p class="hint">1-9 · 0 next · click to fly</p>
-      </section>
-
-      <section class="card">
-        <h2>Stats</h2>
         <dl class="stats">
           <div>
             <dt>queries</dt>
@@ -146,10 +112,24 @@
         </dl>
         <div class="bar"><i id="st-bar"></i></div>
         <p class="hint" id="st-note">shared_buffers · 8 kB pages</p>
+        <h3 class="sub-head">Processes</h3>
+        <ul class="procs" id="procs"></ul>
       </section>
 
-      <section class="card" id="redis-card">
+      <section class="card" id="db-redis" hidden>
         <h2>Redis</h2>
+        <div class="buttons">
+          <button id="btn-command" class="btn primary">
+            <span class="glyph">↵</span> send command
+            <kbd>space</kbd>
+          </button>
+          <button id="btn-bgsave" class="btn">
+            <span class="glyph">⇩</span> bgsave
+          </button>
+          <button id="btn-rewrite" class="btn">
+            <span class="glyph">✳</span> aof rewrite
+          </button>
+        </div>
         <dl class="stats">
           <div>
             <dt>keys</dt>
@@ -182,12 +162,47 @@
         </dl>
         <div class="bar"><i id="rd-bar"></i></div>
         <p class="hint" id="rd-note">one thread · dataset in RAM</p>
+        <h3 class="sub-head">Threads</h3>
+        <ul class="procs" id="rd-procs"></ul>
       </section>
 
-      <section class="card">
-        <h2>Processes</h2>
-        <ul class="procs" id="procs"></ul>
-        <p class="hint">one process per connection</p>
+      <section class="card" id="card-camera">
+        <h2>Camera &amp; clock</h2>
+        <label class="slider">
+          <span class="slider-label">speed</span>
+          <input type="range" id="speed" min="0.25" max="4" step="0.25" value="1" />
+          <b id="speed-val">1×</b>
+        </label>
+        <div class="switches">
+          <label class="switch">
+            <input type="checkbox" id="chk-orbit" checked />
+            <span class="track"></span>
+            <span class="label">auto orbit</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="chk-fly" />
+            <span class="track"></span>
+            <span class="label">fly · wasd</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="chk-move" />
+            <span class="track"></span>
+            <span class="label">move · drag</span>
+          </label>
+        </div>
+        <p class="hint" id="fly-hint" hidden>hold mouse to look · w a s d + q e · shift</p>
+        <p class="hint" id="move-hint" hidden>drag a cage · snaps to the 2-unit floor grid</p>
+      </section>
+
+      <section class="card" id="stories-card">
+        <h2>Stories</h2>
+        <div class="stories" id="stories"></div>
+      </section>
+
+      <section class="card" id="views-card">
+        <h2>Views</h2>
+        <div class="views" id="views"></div>
+        <p class="hint">1-9 · 0 next · click to fly</p>
       </section>
 
       <section class="card inspector" id="inspector" hidden>

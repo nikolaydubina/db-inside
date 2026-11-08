@@ -42,6 +42,8 @@ const FIELD = { w: 24, d: 8.5, cz: 3.25 }
 
 const PITCH = 0.5
 const BLOCK = { w: 0.46, h: 0.28, d: 0.46 }
+/** What a filesystem stores a byte stream in — the only unit a file has. */
+const BLOCK_BYTES = 4096
 /** Blocks rest ON the floor, lifted by the shared hair so the grid never cuts them. */
 const PAGE_Y = FLOOR_Y + BLOCK_LIFT + BLOCK.h / 2
 const BLOCK_TOP = PAGE_Y + BLOCK.h / 2
@@ -1087,8 +1089,8 @@ export class RedisInstance {
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
         this.markBlockTop(block)
 
-        // the bytes are in aof_buf until the next fsync, not on the disk
-        this.aofBuffered = Math.min(1, this.aofBuffered + 0.25)
+        // the bytes are in aof_buf until the next flush, not on the device yet
+        this.aofBuffered = Math.min(1, this.aofBuffered + bytes / BLOCK_BYTES)
         const mat = this.aofBufMats[this.bufferCubeIndex()]
         if (mat) {
             void this.ticker.add(0.5, (k) => {
@@ -1140,6 +1142,33 @@ export class RedisInstance {
             this.aofBufCells.length - 1,
             Math.floor(this.aofBuffered * this.aofBufCells.length),
         )
+    }
+
+    /**
+     * appendfsync: everything in aof_buf is written out and flushed. With the
+     * default `everysec` this runs once a second, which is exactly the durability
+     * window — a crash can lose the last second of acknowledged writes and not
+     * one byte more. `always` would drain on every command, `no` would leave the
+     * dirty pages to the kernel.
+     *
+     * The buffer is a staging area, not a queue that can overflow: what it holds
+     * is copied into the file and then reused. Nothing is discarded by a flush.
+     */
+    flushAofBuffer() {
+        if (this.aofBuffered <= 0) return
+        this.aofBuffered = 0
+        this.pulseBuffered()
+    }
+
+    /** A single lift of the strip as it empties: "these bytes just became durable". */
+    private pulseBuffered() {
+        const base = this.aofBufGroup?.position.clone()
+        if (!base) return
+        void this.ticker.add(0.4, (k) => {
+            const g = this.aofBufGroup
+            if (!g) return
+            g.position.y = base.y + Math.sin(k * Math.PI) * 0.18
+        })
     }
 
     rdbCentre(): THREE.Vector3 {
@@ -1313,11 +1342,9 @@ export class RedisInstance {
                 m.rotation.y = Math.sin(time * 0.75 + ph * 0.7) * 0.4
                 m.scale.setScalar(1 + Math.sin(time * 2.4 + ph) * 0.035)
             })
-            // the strip drains on fsync, so what is still in it is what is not
-            // durable yet
-            if (this.aofBuffered > 0) {
-                this.aofBuffered = Math.max(0, this.aofBuffered - dt * 0.18)
-            }
+            // The strip cycles: it fills with writes and empties on the next
+            // flush (see flushAofBuffer). Nothing is dropped here — what drains
+            // it is write() + fsync, once a second by default.
             this.aofBufMats.forEach((mat, i) => {
                 const live = i <= this.bufferCubeIndex() ? this.aofBuffered : 0
                 mat.emissiveIntensity +=
