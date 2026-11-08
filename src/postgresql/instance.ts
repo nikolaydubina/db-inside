@@ -10,6 +10,7 @@ import {
   dustField,
   easeInOutCubic,
   floorLabel,
+  fmtBytes,
   halo,
   label,
   neonEdges,
@@ -26,10 +27,17 @@ import type { SystemArea } from './layout'
 export * from './layout'
 
 
+export interface StatLine {
+  label: string
+  value: string
+}
+
 export interface Info {
   title: string
   body: string
   meta?: string
+  /** Live counters for the selected cage; re-read while the card is pinned. */
+  stats?: () => StatLine[]
 }
 
 /**
@@ -295,6 +303,7 @@ export class PostgresInstance {
       title: 'Disk — a field of 8 kB pages',
       body: 'Every block is one 8 kB page; brighter and taller means fuller. The grid under the blocks is the 4 kB filesystem cell — two cells make one page — so a page covers two squares and the address lattice stays the unit the OS allocates in. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
       meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
+      stats: () => this.pageStats(this.pages8k),
     })
 
     // On the floor, along the short axis, starting at the front corner past the
@@ -408,6 +417,26 @@ export class PostgresInstance {
       title: 'Shared buffers',
       body: 'The page cache every backend shares. Each block is one buffer slot holding a full 8 kB page — identical to a page on disk. The slot is always 8 kB; what varies is how packed the page inside is, and that is what brightness and height show. Lifecycle: a miss picks a victim with the clock sweep (usage_count 0), writes it back if it is dirty, then reads the new page in. The slot itself never moves — only which page lives in it changes. Hue is state: cyan = cached and clean, amber = dirty (waiting to be written), green = just served a hit.',
       meta: 'shared_buffers · RAM · 8 kB pages · clock sweep',
+      stats: () => {
+        const slots = this.pages.length
+        const total = slots * PAGE_BYTES
+        let occupied = 0
+        let used = 0
+        let dirty = 0
+        for (const p of this.pages) {
+          if (p.fill > 0.001) {
+            occupied++
+            used += p.fill * PAGE_BYTES
+          }
+          if (p.dirty) dirty++
+        }
+        return [
+          { label: 'slots', value: `${slots} × 8 kB` },
+          { label: 'total', value: fmtBytes(total) },
+          { label: 'occupied', value: `${occupied} slots · ${fmtBytes(used)}` },
+          { label: 'dirty', value: `${dirty} slots` },
+        ]
+      },
     })
   }
 
@@ -520,6 +549,7 @@ export class PostgresInstance {
         title: 'Write-ahead log (on disk)',
         body: 'A run of segment blocks in pg_wal, appended left to right on every change before the heap page is touched. The block currently being written is the WAL head: it stands up and pulses. Nothing floats above it. The newest bytes sit in wal_buffers — the floating cyan cubes above — and only reach disk when the WAL writer issues write + fsync; COMMIT does not return until that fsync finishes. The run is a ring, not a growing file: when the head reaches the end it wraps and writes over the oldest segment, which by then is behind the last checkpoint and no longer needed. That is why pg_wal has a bounded footprint instead of filling the disk.',
         meta: 'pg_wal · sequential blocks on disk · tail in wal_buffers · fsync',
+        stats: () => this.pageStats(this.walBlocks),
       },
       runEdge,
     )
@@ -563,6 +593,16 @@ export class PostgresInstance {
       title: 'wal_buffers — the not-yet-written tail of the log',
       body: 'wal_buffers is a circular strip of 8 kB shared-memory pages that holds the newest WAL records. It is NOT a copy of heap pages: the records describe changes to pages, but the buffer holds the log stream itself. Anything here is not durable yet — it becomes durable when the WAL writer writes it to the segment blocks below and fsyncs. After that the memory is simply overwritten, so these cubes are a staging area, and the segment below is the lasting artefact.',
       meta: 'wal_buffers · RAM · 8 kB pages · circular · flushed by WAL writer',
+      stats: () => {
+        const cubes = this.walBufBlocks.length
+        const total = cubes * PAGE_BYTES
+        const fill = Math.max(0, Math.min(1, this.walBuffered))
+        return [
+          { label: 'cubes', value: `${cubes} × 8 kB` },
+          { label: 'total', value: fmtBytes(total) },
+          { label: 'occupied', value: `${fmtBytes(fill * total)} · ${Math.round(fill * 100)}%` },
+        ]
+      },
     })
 
     const wbLab = label('WAL BUFFERS')
@@ -971,12 +1011,14 @@ export class PostgresInstance {
     let c1 = -Infinity
     let r0 = Infinity
     let r1 = -Infinity
+    const pages: Page8K[] = []
     for (const run of SYSTEM_RUNS) {
       for (let r = run.rows[0]; r <= run.rows[1]; r++) {
         for (let c = run.c0; c <= run.c1; c++) {
           const p = this.pages8k.find((b) => b.row === r && b.col === c)
           if (!p || p.free) continue
           p.system = run.area
+          pages.push(p)
           p.hint = SYSTEM_GREY
           p.hintAmt = 0.92
           p.shade = rand(0.86, 1.04)
@@ -1022,6 +1064,7 @@ export class PostgresInstance {
           'because there are few of them: a fresh cluster holds the whole set in a few megabytes. Hover a ' +
           'grey block to see which file it belongs to.',
         meta: 'catalogs · free space map · visibility map · commit log · 8 kB pages',
+        stats: () => this.pageStats(pages),
       },
       cage,
     )
@@ -1071,6 +1114,36 @@ export class PostgresInstance {
   }
 
   /**
+   * Counters for one run of 8 kB pages. The number of cubes is the total, the
+   * sum of fills is the occupied bytes, and the rest are the same facts a page
+   * field can be asked for: how much is claimed, how full it is, and how much is
+   * dead. Every disk cage on this floor reports through this one shape.
+   */
+  private pageStats(blocks: Page8K[]): StatLine[] {
+    const pages = blocks.length
+    const total = pages * PAGE_BYTES
+    let occupiedPages = 0
+    let occupiedBytes = 0
+    let deadPages = 0
+    for (const b of blocks) {
+      if (b.fill > 0.001) {
+        occupiedPages++
+        occupiedBytes += b.fill * PAGE_BYTES
+      }
+      if (b.dead) deadPages++
+    }
+    const avgFill = occupiedPages > 0 ? occupiedBytes / (occupiedPages * PAGE_BYTES) : 0
+    return [
+      { label: 'blocks', value: `${pages} × 8 kB` },
+      { label: 'total', value: fmtBytes(total) },
+      { label: 'occupied', value: `${occupiedPages} pages · ${fmtBytes(occupiedBytes)}` },
+      { label: 'free slots', value: `${pages - occupiedPages} pages` },
+      { label: 'avg fill', value: occupiedPages > 0 ? `${Math.round(avgFill * 100)}%` : '—' },
+      ...(deadPages > 0 ? [{ label: 'dead pages', value: String(deadPages) }] : []),
+    ]
+  }
+
+  /**
    * Tables are just contiguous runs of those pages, so they are drawn as
    * selection marquees over the block field — no extra geometry, no fake shape.
    */
@@ -1116,7 +1189,7 @@ export class PostgresInstance {
       )
       pick.position.set(cx, PAGE_Y + h / 2, cz)
       this.group.add(pick)
-      this.register(pick, region.info, edges)
+      this.register(pick, { ...region.info, stats: () => this.pageStats(blocks) }, edges)
 
       // centred above the run, at staggered heights so labels never collide
       const stagger = TABLE_REGIONS.findIndex((r) => r.label === region.label) * 0.45

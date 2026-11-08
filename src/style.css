@@ -925,6 +925,38 @@ body.db-open #inspector {
 }
 
 /*
+ * The counters are a two-column table of facts: the number of cubes, the bytes
+ * they add up to, what is actually occupied, and the same for the buffers. They
+ * are updated live while the card is pinned, so they stay true as the simulation
+ * runs instead of describing the instant it was opened.
+ */
+.inspector dl.ins-stats {
+  margin: 9px 0 0;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 3px 12px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.04em;
+}
+
+.inspector dl.ins-stats[hidden] {
+  display: none;
+}
+
+.inspector dl.ins-stats dt {
+  color: #4d6a80;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.inspector dl.ins-stats dd {
+  margin: 0;
+  color: #bfe9ff;
+  text-align: right;
+}
+
+/*
  * Long descriptions scroll inside the card instead of stretching the whole
  * right-hand column and pushing the other cards around. The meta line stays
  * outside the scroll area so it is always readable.

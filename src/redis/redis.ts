@@ -14,6 +14,7 @@ import {
     driftDust,
     dustField,
     floorLabel,
+    fmtBytes,
     halo,
     label,
     neonEdges,
@@ -515,6 +516,9 @@ export class RedisInstance {
         // blocks, and the rest are not drawn at all (see layoutAof). The layout
         // runs once the log's outline exists — fitAofEdge() is what sizes it.
         this.aofHead = AOF_SEED
+        // A file with blocks but no length is not a file: the boot log already
+        // has bytes in it, one full block per block drawn.
+        this.aofBytes = this.aofUsed * BLOCK_BYTES
 
         // The base file is one sequential write, so it takes its cells row by
         // row, left to right and then right to left. A file is a stream, so the
@@ -567,6 +571,18 @@ export class RedisInstance {
                 title: 'Append-Only File (AOF)',
                 body: 'This is a log of commands, not a copy of the data: every write appends its bytes after the last byte of the file, so the only unit here is the 4 kB block a filesystem stores it in. The file therefore GROWS — the blocks in front of the head are empty floor it takes as it needs them, and it keeps taking them for as long as writes arrive. It never wraps and never drops: wrapping over old data is what the WAL does next door, with a checkpoint deciding when a segment is free, and there is no such decision here. The only thing that makes this file shorter is a rewrite, which writes a new file containing the minimum commands that reproduce the current dataset and swaps it in. If nothing rewrites it and the floor fills, the disk is full and the appends start failing: redis then rejects the writes and keeps serving reads — the opposite of throwing bytes away quietly.',
                 meta: 'appendonlydir · one growing file · shortened only by bgrewriteaof',
+                stats: () => {
+                    const blocks = this.aofUsed
+                    const total = blocks * BLOCK_BYTES
+                    const fill = total > 0 ? Math.min(1, this.aofBytes / total) : 0
+                    return [
+                        { label: 'blocks', value: `${blocks} × 4 kB` },
+                        { label: 'total', value: fmtBytes(total) },
+                        { label: 'file length', value: fmtBytes(this.aofBytes) },
+                        { label: 'filled', value: `${Math.round(fill * 100)}%` },
+                        { label: 'pending', value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}` },
+                    ]
+                },
             },
             aofEdge,
         )
@@ -614,6 +630,21 @@ export class RedisInstance {
                 title: 'RDB — the base file',
                 body: 'This is a dump, not a log: the keyspace is walked once and every key and value is written out as it stands, so loading it rebuilds the data structures rather than replaying commands. That is why it loads fast, why it only knows about the instant it was taken, and why everything after it comes from the AOF. It is written by the forked child (bgsave) and read back at start-up before the log is replayed on top. Its blocks are the same 4 kB the filesystem always hands out, packed tight with no gaps — the file is written fresh every time, so unlike a table file it has no holes to defragment. What varies is its length: that is the size of your data. Writes cost memory, not time: the child needs a copy-on-write view of the whole dataset, so a big instance briefly needs close to twice its size to save.',
                 meta: 'dump.rdb · state, not history · written by bgsave, read on start',
+                stats: () => {
+                    const blocks = this.rdbLen
+                    const total = blocks * BLOCK_BYTES
+                    const fill = total > 0 ? Math.min(1, this.rdbBytes / total) : 0
+                    const keys = this.rdbBlocks
+                        .slice(0, blocks)
+                        .reduce((n, b) => n + b.length, 0)
+                    return [
+                        { label: 'blocks', value: `${blocks} × 4 kB` },
+                        { label: 'total', value: fmtBytes(total) },
+                        { label: 'file length', value: fmtBytes(this.rdbBytes) },
+                        { label: 'filled', value: `${Math.round(fill * 100)}%` },
+                        { label: 'keys', value: String(keys) },
+                    ]
+                },
             },
             rdbEdge,
         )
@@ -675,6 +706,18 @@ export class RedisInstance {
                 title: 'Disk — persistence only',
                 body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 kB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
                 meta: 'appendonlydir · base rdb + incr aof · the rest is unused',
+                stats: () => {
+                    const cells = COLS * ROWS
+                    const total = cells * BLOCK_BYTES
+                    const usedCells = this.aofUsed + this.rdbLen
+                    const usedBytes = this.aofBytes + this.rdbBytes
+                    return [
+                        { label: 'cells', value: `${cells} × 4 kB` },
+                        { label: 'total', value: fmtBytes(total) },
+                        { label: 'files', value: `${usedCells} cells · ${fmtBytes(usedBytes)}` },
+                        { label: 'free', value: fmtBytes(Math.max(0, total - usedBytes)) },
+                    ]
+                },
             },
         )
     }
@@ -930,6 +973,16 @@ export class RedisInstance {
             title: 'AOF buffer — bytes not yet on disk',
             body: 'Write commands are appended here first, in the process heap, and fsynced to the AOF file according to appendfsync: everysec (the default) loses up to a second, always loses nothing but pays a flush per write, no quietly hands durability to the kernel. Cyan is the point: this is memory, the bytes are not in the file yet, and they only turn amber when they are copied into the blocks below. The handover is a copy, not a move: write(2) hands the bytes to the kernel page cache and the buffer is reused. Compared with wal_buffers the difference is the contract, not the idea: postgres flushes at commit, redis flushes per appendfsync policy.',
             meta: 'aof_buf · in memory · appendfsync everysec by default',
+            stats: () => {
+                const total = AOF_BUF_CELLS * BLOCK_BYTES
+                const fill = Math.max(0, Math.min(1, this.aofBuffered))
+                return [
+                    { label: 'cubes', value: `${AOF_BUF_CELLS} × 4 kB` },
+                    { label: 'total', value: fmtBytes(total) },
+                    { label: 'occupied', value: `${fmtBytes(fill * total)} · ${Math.round(fill * 100)}%` },
+                    { label: 'pending', value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}` },
+                ]
+            },
         })
         // the label hangs UNDER the strip: the space above it belongs to the
         // AOF REWRITE agent, which works directly above the end of the log
@@ -2221,9 +2274,9 @@ export class RedisInstance {
         return this.aofHead + 1
     }
 
-    /** Is there an empty block in front of the file for the next record? */
+    /** Is there room left in the file for more bytes? */
     get aofCanGrow() {
-        return this.aofHead < this.aofOrder.length - 1
+        return this.aofBytes < this.aofOrder.length * BLOCK_BYTES
     }
 
     /** Where a block of the log sits, by its position in the file. */
@@ -2284,7 +2337,12 @@ export class RedisInstance {
     bufferAof(bytes: number) {
         this.aofPending++
         this.aofPendingBytes += bytes
-        this.aofBuffered = Math.min(1, this.aofBuffered + bytes / BLOCK_BYTES)
+        // the strip is five 4 kB cubes: its occupancy is the bytes waiting, not
+        // one cube per record
+        this.aofBuffered = Math.min(
+            1,
+            this.aofPendingBytes / (AOF_BUF_CELLS * BLOCK_BYTES),
+        )
         const mat = this.aofBufMats[this.bufferCubeIndex()]
         if (mat) {
             void this.ticker.add(PULSE_TIME, (k) => {
@@ -2299,33 +2357,33 @@ export class RedisInstance {
     }
 
     /**
-     * Write one buffered record into the file: the log gains a block, and that
-     * block pulses once.
+     * Write buffered bytes into the file.
      *
-     * Returns where it landed, or null when the floor is full — a log that cannot
-     * grow has nowhere to put the bytes, and that is a write error, not a silent
-     * loss.
+     * A 4 kB block holds several records: the file's length is the byte count,
+     * and a block is allocated only when the write crosses its boundary. The head
+     * therefore moves by ceil(length / 4 kB) − the blocks already drawn, which is
+     * often zero. This is the difference between a byte stream and a list of
+     * blocks, and it is what makes "occupied" a real number in the card.
+     *
+     * Returns the top of the block the bytes landed in, or null when the floor is
+     * full — a log that cannot grow has nowhere to put the bytes.
      */
-    private writeAofBlock(bytes: number): THREE.Vector3 | null {
-        // the record goes after the last byte of the file, so at most it starts a
-        // new block; it never rewrites one that is already there
-        if (this.aofHead >= this.aofOrder.length - 1) {
-            this.aofFull = true
-            return null
+    private writeAofBytes(bytes: number): THREE.Vector3 | null {
+        const before = this.aofUsed
+        const maxBlocks = this.aofOrder.length
+        const length = this.aofBytes + bytes
+        const wantBlocks = Math.max(1, Math.ceil(length / BLOCK_BYTES))
+        const blocks = Math.min(wantBlocks, maxBlocks)
+        this.aofBytes = Math.min(length, maxBlocks * BLOCK_BYTES)
+        if (wantBlocks > maxBlocks) this.aofFull = true
+        if (blocks > before) {
+            for (let k = before; k < blocks; k++) {
+                this.pulseDiskBlock(this.aofOrder[k], PALETTE.amber)
+            }
+            this.aofHead = blocks - 1
+            this.layoutAof()
         }
-        this.aofBytes += bytes
-        this.aofHead += 1
-        this.layoutAof()
-
-        const i = this.aofOrder[this.aofHead]
-        const block = this.aofBlockPos(this.aofHead)
-
-        // One pulse per block written, on the one block that changed — the same
-        // pulse an edited page gets on the postgres disk, and the same pulse a
-        // cube of aof_buf gets when a record lands in it.
-        this.pulseDiskBlock(i, PALETTE.amber)
-
-        return block.add(new THREE.Vector3(0, BLOCK.h / 2, 0))
+        return this.aofHeadTop()
     }
 
     /**
@@ -2429,12 +2487,10 @@ export class RedisInstance {
         this.aofPendingBytes = 0
         this.aofBuffered = 0
 
-        // one block per buffered record: this file is a stream of commands, and a
-        // 4 kB block holds a whole number of them, never a fraction
-        let head: THREE.Vector3 | null = null
-        for (let i = 0; i < records; i++) {
-            head = this.writeAofBlock(bytes / records) ?? head
-        }
+        // A 4 kB block holds a whole number of records, never a fraction. The
+        // file grows to the block that contains the new last byte; if the bytes
+        // fit in the block already on the floor, no block moves at all.
+        const head = this.writeAofBytes(bytes)
         this.pulseBuffered()
         return head ? { head, records } : null
     }

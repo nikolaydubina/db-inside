@@ -1405,6 +1405,7 @@ function frame() {
   telemetry.tick(dt, raw)
   hud.setStats(sim.stats)
   updateRedisCard(redisSim.stats)
+  hud.refreshStats()
 
   if (!booted) {
     booted = true

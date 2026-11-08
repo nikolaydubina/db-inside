@@ -205,7 +205,35 @@ export function initHud(handlers: HudHandlers) {
   const insTitleText = $<HTMLElement>('#ins-title-text')
   const insClose = $<HTMLElement>('#ins-close')
   const insBody = $<HTMLElement>('#ins-body')
+  const insStats = $<HTMLElement>('#ins-stats')
   const insMeta = $<HTMLElement>('#ins-meta')
+
+  /**
+   * Counters are a function, not a snapshot: WAL buffers and aof_buf change
+   * every second, so a card that is pinned has to keep asking its cage what it
+   * holds now. Everything is a text update of a handful of rows, throttled
+   * below, so it is cheaper than a frame.
+   */
+  let statsFn: Info['stats'] | null = null
+  let lastStats = 0
+  const renderStats = () => {
+    if (!statsFn) {
+      insStats.hidden = true
+      insStats.replaceChildren()
+      return
+    }
+    const rows = statsFn()
+    insStats.hidden = rows.length === 0
+    const frag = document.createDocumentFragment()
+    for (const row of rows) {
+      const dt = document.createElement('dt')
+      dt.textContent = row.label
+      const dd = document.createElement('dd')
+      dd.textContent = row.value
+      frag.append(dt, dd)
+    }
+    insStats.replaceChildren(frag)
+  }
   const tooltip = $<HTMLElement>('#tooltip')
   const boot = $<HTMLElement>('#boot')
 
@@ -364,11 +392,23 @@ export function initHud(handlers: HudHandlers) {
       insTitleText.textContent = info.title
       insBody.textContent = info.body
       insMeta.textContent = info.meta ?? ''
+      statsFn = info.stats ?? null
+      renderStats()
       // the card may be below the fold of a tall column; bring it into view
       // rather than letting the reader hunt for what they just clicked
       inspector.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
     },
+    /** Keep a pinned card's counters in step with the simulation. */
+    refreshStats() {
+      if (inspector.hidden || !statsFn) return
+      const now = performance.now()
+      if (now - lastStats < 220) return
+      lastStats = now
+      renderStats()
+    },
     unpin() {
+      statsFn = null
+      insStats.hidden = true
       inspector.hidden = true
     },
     hover(info: Info | null, x: number, y: number) {

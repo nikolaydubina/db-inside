@@ -180,7 +180,7 @@ export const TABLE_REGIONS: TableRegion[] = [
     info: {
       title: 'TABLE: users — contiguous 8 kB pages',
       body: 'A table is not a separate kind of object: it is a named, contiguous run of 8 kB pages, and this outline is all that \'table\' means at the storage layer. Rows live inside those pages. Page height is how full the page is: INSERTs fill a page up and allocate a new one from the run when it is full, DELETEs drain it. Dead row versions collect inside the page until VACUUM reclaims that space — the page itself stays in the file either way.',
-      meta: 'demo table · 28 pages · heap file on disk',
+      meta: 'demo table · 160 pages · heap file on disk',
     },
   },
   {
@@ -192,9 +192,9 @@ export const TABLE_REGIONS: TableRegion[] = [
     r1: 21,
     color: PALETTE.amber,
     info: {
-      title: 'TABLE: products — 32 contiguous pages',
+      title: 'TABLE: products — 160 contiguous pages',
       body: 'Another example table, same shape: a contiguous run of pages, nothing more. These rows are wide and carry a jsonb document, which is why the interesting query is containment inside the document. A B-tree cannot answer that, because the whole document is one value in one column — which is what GIN is for.',
-      meta: 'demo table · 32 pages · jsonb payload · heap file',
+      meta: 'demo table · 160 pages · jsonb payload · heap file',
     },
   },
   {
@@ -206,9 +206,9 @@ export const TABLE_REGIONS: TableRegion[] = [
     r1: 33,
     color: 0x5a7bff,
     info: {
-      title: 'TABLE: metrics — 21 contiguous pages',
+      title: 'TABLE: metrics — 72 contiguous pages',
       body: 'A third example table, again just pages: append-only measurements written in timestamp order. Nothing in Postgres guaranteed that order — we simply inserted them that way, so ranges of these pages hold narrow timestamp ranges. That is exactly the assumption BRIN exploits, and why it can be a few kilobytes for a huge table.',
-      meta: 'demo table · 21 pages · naturally ordered · heap file',
+      meta: 'demo table · 72 pages · naturally ordered · heap file',
     },
   },
 ]

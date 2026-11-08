@@ -54,6 +54,12 @@ export function pulseHex(base: number, up = PULSE_WHITEN) {
 export const PULSE_GAIN = 2.4
 
 export const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v)
+/** A byte count as a short human string, for cards and counters. */
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${Math.round(n)} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} kB`
+  return `${(n / (1024 * 1024)).toFixed(2)} MB`
+}
 export const easeInOutCubic = (t: number) =>
   t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2
 export const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3)
