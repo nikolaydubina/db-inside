@@ -531,9 +531,30 @@ export class PostgresInstance {
     )
     this.group.add(floorLab)
 
-    const processLabel = label('POSTGRESQL')
-    processLabel.position.set(-12.3, 10.15, 8.1)
-    this.group.add(processLabel)
+    // The instance name is a sticker on the cage itself, not a tag hovering in
+    // front of it: same letterform and same text height as the DISK label on
+    // the floor, so the two read as one hand-lettered marking on the same
+    // object. It lives on the +x wall — the one nearest the DISK word — in that
+    // wall's top-left corner as seen from the default camera.
+    const STICKER_INSET = 0.45
+    const sticker = floorLabel('POSTGRESQL', {
+      height: 0.475,
+      color: 'rgba(170, 220, 242, 0.9)',
+    })
+    const inkSticker = sticker.userData.ink as { x0: number; x1: number; y0: number; y1: number }
+    // Stand the quad up on the wall. rotation.y of +90° maps plane +x onto
+    // world -z and plane +y onto world +y, so the glyphs start at the left
+    // corner of the face and run inward, reading left to right from +x.
+    sticker.rotation.set(0, Math.PI / 2, 0)
+    sticker.position.set(
+      shellW / 2 + 0.012,
+      shellH - STICKER_INSET - inkSticker.y1,
+      shellD / 2 - STICKER_INSET + inkSticker.x0,
+    )
+      // A sticker has a front. From behind the cage it should be absent rather
+      // than show up mirrored, reading backwards through the whole scene.
+      ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
+    this.group.add(sticker)
 
     // drifting data motes inside the instance
     const count = 220
