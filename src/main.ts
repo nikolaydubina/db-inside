@@ -517,6 +517,15 @@ const ORBIT_COOLDOWN = 5000
  */
 const ORBIT_RATE = (2 * Math.PI / 60) * 0.34
 let driftOn = true
+/**
+ * A story owns the camera while it runs.
+ *
+ * The drift is not OrbitControls' autoRotate any more — it is this file turning
+ * the camera on its own — so turning `autoRotate` off no longer stops it. Left
+ * on, a story's frame would creep off its pose a few seconds after every step
+ * opened and the panel would sit on "camera → …" forever.
+ */
+let storyActive = false
 
 let cameraMoves = 0
 function noteCameraMove() {
@@ -784,9 +793,14 @@ const story = createStory({
     // and two listeners on the redis floor, so a story about pub/sub starts from
     // the state its first step claims rather than from whatever was left behind
     redisSim.resetPubSub()
+    // the drift belongs to the idle page, not to a caption: it would carry the
+    // camera off the step's pose a few seconds after the step opened
+    storyActive = true
+    driftOn = false
   },
   onExit: () => {
     sim.ambient = true
+    storyActive = false
     applySpeed(speedBeforeStory)
     hud.setRegime(regimeBeforeStory)
     // the drift comes back on its own once the cooldown passes
@@ -1318,7 +1332,7 @@ function frame() {
   }
 
   // resume the slow drift after a quiet spell — every camera move pushes this out
-  if (!flyMode && !drag && !driftOn && performance.now() - lastInteraction > ORBIT_COOLDOWN) {
+  if (!storyActive && !flyMode && !drag && !driftOn && performance.now() - lastInteraction > ORBIT_COOLDOWN) {
     driftOn = true
   }
   if (driftOn) drift(raw)

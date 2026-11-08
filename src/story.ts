@@ -776,7 +776,10 @@ export function createStory({
     const keepPublishing = (mine: number) => {
         if (mine !== token || !running) return
         redis?.publish()
-        window.setTimeout(() => keepPublishing(mine), 1600)
+        // a fan is over in well under a second, and the wires fade slowly, so the
+        // beat has to be short enough that the step is never a caption about an
+        // empty screen
+        window.setTimeout(() => keepPublishing(mine), 1100)
     }
 
     /**
