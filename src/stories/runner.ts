@@ -1,5 +1,5 @@
 import * as THREE from 'three'
-import type { CameraPose, CameraRig } from 'views'
+import type { CameraPose, CameraRig } from '../views'
 import type { EngineSim } from '../postgresql/sim'
 import type { RidePhase, StoryDef, StoryFacts, StoryScene, StoryStep } from './types'
 

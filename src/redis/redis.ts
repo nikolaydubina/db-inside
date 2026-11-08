@@ -1328,6 +1328,24 @@ export class RedisInstance {
         const loopLab = label('COMMAND LOOP')
         loopLab.position.set(LOOP.x + 1.2, LOOP.y + 0.1, LOOP.z)
         this.group.add(loopLab)
+
+        // Everything in the cage passes through this node, so it is a subject
+        // like any other: point at it for the card, double-click to frame it.
+        // A sphere, not a box — the orb and its ring are round, and 0.9 holds
+        // both with room for a pointer. No `outline`: hover then draws the same
+        // generated box every other node gets, and nothing is painted over a
+        // thing whose whole job is to read as the one sun in this cage.
+        const loopPick = new THREE.Mesh(
+            new THREE.SphereGeometry(0.9, 16, 12),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        loopPick.position.copy(LOOP)
+        this.group.add(loopPick)
+        this.register(loopPick, {
+            title: 'COMMAND LOOP — one thread, every command',
+            body: 'This is the whole of redis: one thread in an event loop. epoll, on the plate below, hands it only the sockets that have bytes; it reads and parses what is there into an argv, runs the command against the in-memory dicts, appends a write to aof_buf and queues the reply on that socket\u2019s output buffer \u2014 then goes straight back to waiting. Because exactly one thread ever touches the keyspace, nothing needs a lock and every command is atomic on its own: no client can see a hash half-rehashed or a list read halfway through a push. The price is the queue above. While a command runs nothing else does, so one slow O(n) call \u2014 KEYS *, a huge HGETALL, a long Lua script \u2014 stalls every connection behind it. What redis sells is multiplexing, not parallelism: since 6.0 extra IO threads may read, parse and write, but execution is still this one thread.',
+            meta: 'one thread · epoll → read → parse → execute → reply · no locks',
+        })
     }
 
     /**
@@ -2050,8 +2068,14 @@ export class RedisInstance {
         return new THREE.Vector3(0, QUEUE.y + 0.3, QUEUE.z)
     }
 
-    loopTop(): THREE.Vector3 {
-        return LOOP.clone().add(new THREE.Vector3(0, 0.9, 0))
+    /**
+     * Where a command is executed: the centre of the loop orb itself, not a
+     * point floating above it. Same rule the postgres lanes follow — sim.ts
+     * aims at the parse/plan/exec group positions — so a route visibly enters
+     * the node it is addressed to instead of converging in the air over it.
+     */
+    loopPoint(): THREE.Vector3 {
+        return LOOP.clone()
     }
 
     pulseLoop() {

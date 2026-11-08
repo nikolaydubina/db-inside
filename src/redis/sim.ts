@@ -299,7 +299,7 @@ export class RedisSim {
         // before it is executed: that waiting is what the strip shows
         const slot = this.redis.queuePush()
         const queue = this.redis.queueCellTop(slot)
-        const loop = this.redis.loopTop()
+        const loop = this.redis.loopPoint()
 
         // which key: a read hits a live one, a write updates or creates one
         let key: RedisKey | null = null
@@ -763,7 +763,7 @@ export class RedisSim {
         const portTop = this.redis.portTop(pod)
         const slot = this.redis.queuePush()
         const queue = this.redis.queueCellTop(slot)
-        const loop = this.redis.loopTop()
+        const loop = this.redis.loopPoint()
         const channel = this.redis.channelPoint()
 
         const route = pathCurve([portTop, queue.clone(), loop.clone(), channel.clone()])
@@ -816,7 +816,7 @@ export class RedisSim {
         const portTop = this.redis.portTop(pod)
         const slot = this.redis.queuePush()
         const queue = this.redis.queueCellTop(slot)
-        const loop = this.redis.loopTop()
+        const loop = this.redis.loopPoint()
         const channel = this.redis.channelPoint()
 
         const route = pathCurve([portTop, queue.clone(), loop.clone(), channel.clone()])
