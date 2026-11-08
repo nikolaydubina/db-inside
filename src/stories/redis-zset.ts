@@ -1,4 +1,5 @@
 import type { StoryStep } from './types'
+import { frozeAt } from './stop'
 
 /**
  * A sorted set, followed: the point lookup and the range scan.
@@ -26,8 +27,10 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.bigKeys >= 2 && c.rdOps > 0,
-        waitFor: 'reads against the sorted set',
+        expect: (c) => c.rdPhase === 'value' && c.bigKeys >= 2,
+        waitFor: 'the value with its two halves in view',
+        freezeAt: 'value',
+        assert: frozeAt('value', 'the value object with its two halves'),
     },
     {
         title: 'ZSCORE: one member, one bucket',
@@ -44,8 +47,10 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
-        waitFor: 'point reads against the sorted set',
+        expect: (c) => c.rdPhase === 'field',
+        waitFor: 'the bucket the member hashed to',
+        freezeAt: 'field',
+        assert: frozeAt('field', 'the bucket the member hashed to'),
     },
     {
         title: 'ZRANGEBYSCORE: find a start, then walk',
@@ -62,8 +67,10 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'node',
         waitFor: 'a range walking the tower',
+        freezeAt: 'node',
+        assert: frozeAt('node', 'a node of the skiplist'),
     },
     {
         title: 'and the one thread pays for it',
@@ -80,7 +87,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'node',
         waitFor: 'the walk still running on the one thread',
+        freezeAt: 'node',
+        assert: frozeAt('node', 'a node of the walk, one thread still inside it'),
     },
 ]

@@ -18,7 +18,12 @@ export type RidePhase =
     | 'delivered'
     | 'bucket'
     | 'page'
+    | 'entry'
     | 'value'
+    | 'inner'
+    | 'field'
+    | 'node'
+    | 'hop'
     | 'reply'
     | null
 
@@ -300,6 +305,27 @@ export class RedisSim {
      * description of something that has already gone.
      */
     private ridePhase: RidePhase = null
+    /**
+     * The point the leg the ride is on was supposed to END at, in cage-local
+     * space — the same space the route was drawn in.
+     *
+     * Without it a story can only say which NAME the clock stopped under, which is
+     * how a caption about the value's own bucket array froze the packet on the
+     * value object two stops earlier and looked fine. With it, a stop is a place:
+     * the packet's distance from the point it claims to be standing on is a number
+     * anyone can read back and check.
+     */
+    private rideStopPoint: THREE.Vector3 | null = null
+    /**
+     * The last few phase writes, each with the packet's position at that moment.
+     *
+     * The phase is shared state: the ride a story watches, the reply hand-off and
+     * the safety valve all write it. So "the clock stopped in the wrong place" is
+     * really "which write did it, and where was the packet then" — a question a
+     * screenshot cannot answer and a log can.
+     */
+    private rideTrace: Array<{ t: number; phase: RidePhase; ride: number; at: number[] | null }> =
+        []
     /** when the focused packet went missing, in real ms — the safety valve */
     private focusLostAt = 0
     /** has the ridden packet come down into camera range yet */
@@ -339,52 +365,68 @@ export class RedisSim {
      * pointers through RAM is: the next node is never next to this one. A
      * converted hash or zset also consults its OWN bucket array, which is a second
      * hash table and not the keyspace dict.
+     *
+     * Every point carries the name of the stop it is. The name used to be derived
+     * from the leg's index — `i === 0 ? 'bucket' : i === 1 ? 'page' : i === 2 ?
+     * 'value' : 'page'` — which is only true of the three-stop route: a big hash
+     * point read has six stops, so the value's OWN bucket array was announced as
+     * 'page'. A story that stopped the clock there froze the packet two stops
+     * early, on the value object in the heap, under a caption about the bucket
+     * array inside the cage. Deriving the label from the point fixes the class of
+     * bug rather than one instance of it: the drawing cannot drift under the prose
+     * while the two are read off the same list.
      */
-    private keyRoute(key: RedisKey, probe: 'point' | 'walk' | 'object' = 'walk'): THREE.Vector3[] {
+    private keyRoute(
+        key: RedisKey,
+        probe: 'point' | 'walk' | 'object' = 'walk'
+    ): Array<{ p: THREE.Vector3; stop: RidePhase }> {
         const r = this.redis
-        const walk: THREE.Vector3[] = [r.bucketTop(key)]
+        const walk: Array<{ p: THREE.Vector3; stop: RidePhase }> = [
+            { p: r.bucketTop(key), stop: 'bucket' },
+        ]
         if (key.big) {
             // the entry is a heap allocation like any other: the first hop lands
             // on its page, and only then does the value's structure come into it
-            walk.push(r.keyPageTop(key))
-            walk.push(r.valuePoint(key))
+            walk.push({ p: r.keyPageTop(key), stop: 'page' })
+            walk.push({ p: r.valuePoint(key), stop: 'value' })
             const inner = r.innerDictPoint(key)
-            if (inner) walk.push(inner)
+            if (inner) walk.push({ p: inner, stop: 'inner' })
             if (probe === 'point') {
                 // one field or member: the value's OWN dict lands on a single
                 // bucket, and the entry behind that bucket is one allocation
-                walk.push(r.nodePoint(key, 1))
-                walk.push(r.hopPoint(key, 0))
+                walk.push({ p: r.nodePoint(key, 1), stop: 'field' })
+                walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
             } else {
                 const hops = key.kind === 'string' ? 1 : key.kind === 'hash' ? 2 : 3
                 for (let n = 0; n < hops; n++) {
-                    walk.push(r.nodePoint(key, n))
-                    walk.push(r.hopPoint(key, n))
+                    walk.push({ p: r.nodePoint(key, n), stop: 'node' })
+                    walk.push({ p: r.hopPoint(key, n), stop: 'hop' })
                 }
-                walk.push(r.nodePoint(key, hops))
+                walk.push({ p: r.nodePoint(key, hops), stop: 'node' })
             }
         } else if (probe === 'object') {
             // The order is the point: the bucket points at a PAGE, the type is
             // only known by reading the header that lives there, and that same
             // allocation holds the payload for an inline encoding. So the object
             // section comes after the page, not before it.
-            walk.push(r.keyPageTop(key))
-            walk.push(r.inlinePoint())
+            walk.push({ p: r.keyPageTop(key), stop: 'page' })
+            walk.push({ p: r.inlinePoint(), stop: 'value' })
         } else if (key.aux) {
             // page first: the entry is an allocation, so the bucket points AT the
             // page, and only from there do the entry and its value pointer read
-            walk.push(r.keyPageTop(key))
-            walk.push(r.keyTop(key))
+            walk.push({ p: r.keyPageTop(key), stop: 'page' })
+            walk.push({ p: r.keyTop(key), stop: 'entry' })
             // the converted structure is a SECOND allocation, so a second page
-            walk.push(r.valuePoint(key))
-            walk.push(r.hopPoint(key, 0))
-            if (key.kind === 'zset' || key.kind === 'hash') walk.push(r.hopPoint(key, 1))
+            walk.push({ p: r.valuePoint(key), stop: 'value' })
+            walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
+            if (key.kind === 'zset' || key.kind === 'hash')
+                walk.push({ p: r.hopPoint(key, 1), stop: 'hop' })
         } else {
             // every read lands on a page before anything is known: the type and
             // the encoding live in the object header that sits there. The cube is
             // what that allocation holds, so it comes after the page.
-            walk.push(r.keyPageTop(key))
-            walk.push(r.keyTop(key))
+            walk.push({ p: r.keyPageTop(key), stop: 'page' })
+            walk.push({ p: r.keyTop(key), stop: 'value' })
         }
         return walk
     }
@@ -423,7 +465,7 @@ export class RedisSim {
             // live key and must never be aimed at a free slot.
             const reuse =
                 cmd.kind === undefined
-                    ? this.redis.randomLiveKey()
+                    ? (this.redis.randomLiveSmallKey() ?? this.redis.randomLiveKey())
                     : Math.random() >= 0.3
                         ? this.redis.liveOfKind(cmd.kind)
                         : null
@@ -470,7 +512,7 @@ export class RedisSim {
         // at the fan, which is where a published message is already half-way
         // through. A cued command rides the same mechanism: one live packet, one
         // identity, and the camera holds on to whichever leg it is on.
-        const ride = cmd.fanout || cmd.cue ? this.beginRide(packet) : 0
+        const ride = cmd.fanout || cmd.cue ? this.beginRide(packet, !!cmd.cue) : 0
         const inbound = pathCurve([
             sky.clone(),
             sky.clone().setY(portTop.y + SKY_ABOVE_PORT * 0.5).add(new THREE.Vector3(0, 0, 0.8)),
@@ -482,8 +524,15 @@ export class RedisSim {
         await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
         fIn.flash(0.9)
         // the bytes are in that socket's input buffer now, and stay there until the
-        // one thread comes round to them — the first leg a ride can be ridden on
-        if (ride) this.ridePhase = 'socket'
+        // one thread comes round to them — the first leg a ride can be ridden on.
+        //
+        // OWNED ride only: `ride` is a token that stays truthy after a takeover,
+        // so an abandoned request finishing its fall would announce 'socket' while
+        // the packet a story is watching was still 42 units up in the sky. The
+        // phase is shared state, so whoever writes it must own the camera.
+        if (this.ownsRide(ride)) {
+            this.setPhase('socket', portTop.clone())
+        }
         // the wire stays a beat after the packet lands, then goes: a hammered
         // socket must not silt the scene up with permanent lines
         void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
@@ -505,11 +554,16 @@ export class RedisSim {
         // chase, and it is the difference between a 2-hop read and a traversal.
         // The reply climbs back from wherever the walk stopped.
         const chain = new QueryChain(cage)
+        // every stop carries its own name, so the leg a ride is on and the words a
+        // caption uses for it come from one list instead of two that could drift
+        const route: Array<{ p: THREE.Vector3; stop: RidePhase }> = key
+            ? this.keyRoute(key, cmd.probe)
+            : [{ p: this.redis.channelPoint(), stop: null }]
         const chainPts: THREE.Vector3[] = [
             portTop.clone(),
             queue.clone(),
             loop.clone(),
-            ...(key ? this.keyRoute(key, cmd.probe) : [this.redis.channelPoint()]),
+            ...route.map((s) => s.p),
         ]
 
         // The bytes are in that socket's input buffer now, and they stay there
@@ -517,8 +571,8 @@ export class RedisSim {
         // single-threaded server, and it is the instant a story stops the clock on
         // to talk about a command arriving — so it lasts long enough to be an
         // instant rather than a single frame, and only for a ridden message.
-        if (ride) {
-            this.ridePhase = 'socket'
+        if (this.ownsRide(ride)) {
+            this.setPhase('socket', portTop.clone())
             await this.ticker.wait(0.3)
         }
 
@@ -553,20 +607,20 @@ export class RedisSim {
             this.walking = true
             let from = loop.clone()
             try {
-                const legs = chainPts.slice(3)
-                for (const [i, to] of legs.entries()) {
-                    // the first three legs are the same in every route — the bucket,
-                    // the page, the value — so a story can stop the clock on any of
-                    // them; after that the packet is walking pages
-                    if (ride) {
-                        this.ridePhase =
-                            i === 0 ? 'bucket' : i === 1 ? 'page' : i === 2 ? 'value' : 'page'
-                    }
-                    const leg = pathCurve([from.clone(), to.clone()])
+                for (const legStop of route) {
+                    const leg = pathCurve([from.clone(), legStop.p.clone()])
                     chain.addCurve(leg, PALETTE.violet, { speed: 0.9, opacity: 0.55 })
                     await travel(this.ticker, packet, leg, 0.4)
+                    // Announced on ARRIVAL, not on departure. The phase is the leg
+                    // the packet is STANDING on, so a story that freezes a leg
+                    // freezes with the packet at that stop — set at the start of
+                    // the leg, the caption named a place the packet had not
+                    // reached, and the freeze landed on the stop before it.
+                    if (this.ownsRide(ride)) {
+                        this.setPhase(legStop.stop, legStop.p.clone())
+                    }
                     await this.ticker.wait(0.22)
-                    from = to
+                    from = legStop.p
                 }
             } finally {
                 this.walking = false
@@ -701,12 +755,15 @@ export class RedisSim {
         // the frame — so the ride ends exactly at the socket and the camera holds
         // there, instead of trailing the packet upward for a poll interval and
         // jittering when it finally lets go.
-        const proxy = ride ? new THREE.Object3D() : null
+        const proxy = this.ownsRide(ride) ? new THREE.Object3D() : null
         if (proxy) {
             proxy.position.copy(replyFrom)
             cage.add(proxy)
             this.focusPacket = proxy
-            this.ridePhase = 'reply'
+            // 'reply' is the return LEG, not a stop: it is announced as the packet
+            // sets off, and the ride ends at the socket, so there is no point to
+            // measure the packet against while it is in the air.
+            this.setPhase('reply', null)
         }
         await Promise.all([
             travel(this.ticker, out, replyIn, 0.55, easeOutCubic),
@@ -744,13 +801,28 @@ export class RedisSim {
      * hand-off from the incoming message to the outgoing copies has to be one
      * continuous subject.
      */
-    private beginRide(packet: THREE.Object3D): number {
-        if (this.focusRide !== 0) return 0
+    private beginRide(packet: THREE.Object3D, takeover = false): number {
+        // A cue may TAKE the camera from a ride that is still finishing: the
+        // previous reply is on its way out while the next request is already
+        // falling in, and waiting for it would leave the camera on nothing.
+        if (this.focusRide !== 0 && !takeover) return 0
         this.focusRide = ++this.rideToken
         this.focusPacket = packet
         this.focusLostAt = 0
         this.focusNear = false
+        // A new ride begins in the SKY, on no leg at all. Leaving the previous
+        // ride's phase in place made the two disagree: the phase named the stop the
+        // old packet had reached while `at` was the new packet still falling from
+        // 32 units up, which read as "frozen at the socket" with the socket 33
+        // units below.
+        this.ridePhase = null
+        this.rideStopPoint = null
         return this.focusRide
+    }
+
+    /** Does this command still own the camera? A later cue may have taken it. */
+    private ownsRide(ride: number) {
+        return ride !== 0 && ride === this.focusRide
     }
 
     /**
@@ -764,11 +836,72 @@ export class RedisSim {
         this.focusLostAt = 0
         this.focusNear = false
         this.ridePhase = null
+        this.rideStopPoint = null
     }
 
     /** Which leg of the route the ridden message is on, if any. */
     phase(): RidePhase {
         return this.ridePhase
+    }
+
+    /**
+     * Write the phase AND record it.
+     *
+     * The one place a leg is announced. Anything that wants to say where the ride
+     * is goes through here, so every claim in the scene is also a line in the
+     * trace — including the ones that turn out to be wrong.
+     */
+    private setPhase(phase: RidePhase, stop: THREE.Vector3 | null = null) {
+        this.ridePhase = phase
+        this.rideStopPoint = stop
+        if (phase === null) return
+        const p = this.focusPacket
+        const at =
+            p && p.parent
+                ? this.redis.group.worldToLocal(p.getWorldPosition(new THREE.Vector3()))
+                : null
+        this.rideTrace.push({
+            t: +this.clock.toFixed(2),
+            phase,
+            ride: this.focusRide,
+            at: at ? at.toArray().map((n) => +n.toFixed(2)) : null,
+        })
+        if (this.rideTrace.length > 60) this.rideTrace.shift()
+    }
+
+    /**
+     * Debug: what the ride machinery currently believes, in numbers.
+     *
+     * `gap` is the one that matters: how far the ridden object actually is from
+     * the point the leg it claims to be on ends at, in cage units. A story that
+     * froze on the wrong stop shows up as a `gap` of whole units instead of ~0,
+     * so a wrong instant is measured rather than argued about.
+     */
+    rideState() {
+        const p = this.focusPacket
+        const at =
+            p && p.parent
+                ? this.redis.group.worldToLocal(p.getWorldPosition(new THREE.Vector3()))
+                : null
+        const round = (v: number[]) => v.map((n) => +n.toFixed(2))
+        return {
+            ride: this.focusRide,
+            hasPacket: !!p?.parent,
+            lost: this.focusLostAt,
+            phase: this.ridePhase,
+            /** a walk is in progress: the thread is inside one command */
+            walking: this.walking,
+            /** where the ridden object is, in the space the route was drawn in */
+            at: at ? round(at.toArray()) : null,
+            /** where the leg it is on was supposed to end */
+            stopAt: this.rideStopPoint ? round(this.rideStopPoint.toArray()) : null,
+            gap:
+                at && this.rideStopPoint
+                    ? +at.distanceTo(this.rideStopPoint).toFixed(2)
+                    : null,
+            /** the last handful of writes, oldest first */
+            trace: this.rideTrace.slice(-16),
+        }
     }
 
     /**
@@ -786,10 +919,12 @@ export class RedisSim {
     packetSubject(): { id: string; object: THREE.Object3D } | null {
         const p = this.focusPacket
         if (!p || !p.parent) return null
-        // a reply climbs out of the cage the same way it came in: 32 units up.
-        // The ride ends at the SOCKET — just above the port — and from there the
-        // packet flies out on its own; following it further is a shot of empty sky.
-        if (this.ridePhase === 'reply' && p.position.y > BACKEND_ORIGIN.y + 1) return null
+        // The reply used to be hidden from the camera above this height, back when
+        // the ride followed the outgoing packet itself: it climbed 32 units and the
+        // shot became sky. The reply now rides a PROXY that stops at the socket and
+        // the visible packet leaves on its own — nothing to trail into the sky — so
+        // the gate only succeeded in making the camera lose the return leg, which
+        // is the one step about it.
         if (!this.focusNear) {
             // cage-local y: the packet is a child of the cage, and the sockets sit
             // at BACKEND_ORIGIN.y. Two units out, not four: the shot is about the
@@ -874,7 +1009,7 @@ export class RedisSim {
         // another, and every one of them is a copy — the message is never shared.
         // The copies exist from here: this is the moment the list is walked, so it
         // is also the moment a story can stop on.
-        if (ride) this.ridePhase = 'channel'
+        if (this.ownsRide(ride)) this.setPhase('channel', null)
         for (let i = 0; i < arcs.length; i++) {
             const arc = arcs[i]
             // The message that came down the route IS the first copy. It only
@@ -892,7 +1027,7 @@ export class RedisSim {
             if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = packet
             void travel(this.ticker, packet, arc.toSocket, 0.42).then(() => {
                 // the first copy has reached a listener's output buffer
-                if (i === 0 && ride) this.ridePhase = 'delivered'
+                if (i === 0 && this.ownsRide(ride)) this.setPhase('delivered', null)
                 // its ring answers. The connection is not a key-space client and
                 // does not become busy.
                 this.redis.pulseSend(arc.pod)
@@ -1192,11 +1327,15 @@ export class RedisSim {
      */
     readBig(kind: BigKind, op: 'point' | 'walk' = 'walk'): boolean {
         if (this.loading || this.inFlight >= 6) return false
-        // a cued read is the thing being watched: it is drawn leg by leg, and a
-        // second one on top of it would bury the trail — so the next cue waits,
-        // exactly like the commands behind a slow one in the queue
-        if (this.walking) return false
-        const key = this.redis.bigKey(kind)
+        // One cued read at a time, for the whole life of the ride — not just while
+        // it is walking. A sustain tap lands every second and a request takes about
+        // five to fall into its socket at story speed, so "refuse only while
+        // walking" let every tap TAKE THE CAMERA from a request still on its way in:
+        // the previous one was abandoned before it ever began its walk, and a step
+        // waiting to freeze on the last leg of that walk waited forever. The comment
+        // below said the next cue waits; this is what makes that true.
+        if (this.walking || this.focusRide !== 0) return false
+        const key = this.redis.bigKey(kind) ?? this.reviveBig(kind)
         if (!key) return false
         const name =
             kind === 'zset'
@@ -1213,11 +1352,24 @@ export class RedisSim {
      * story's cue. Same as any GET: one bucket, one object, one page.
      */
     readInline(): boolean {
-        if (this.loading || this.inFlight >= 6 || this.walking) return false
+        if (this.loading || this.inFlight >= 6 || this.walking || this.focusRide !== 0)
+            return false
         const key = this.redis.compactKeyLeft()
         if (!key) return false
         void this.runOp({ name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true }, key)
         return true
+    }
+
+    /**
+     * A story needs its subject to exist. If the big value was deleted by traffic
+     * before the story started, it is put back — the drawing has a cage for it
+     * either way, and a caption about an absent key is a caption about nothing.
+     */
+    private reviveBig(kind: BigKind): RedisKey | null {
+        const key = this.redis.keys.find((k) => k.big === kind)
+        if (!key) return null
+        this.redis.setKeyLive(key, true)
+        return key
     }
 
     rewriteAof() {
@@ -1262,6 +1414,7 @@ export class RedisSim {
                 this.focusPacket = null
                 this.focusLostAt = 0
                 this.ridePhase = null
+                this.rideStopPoint = null
             }
         }
 

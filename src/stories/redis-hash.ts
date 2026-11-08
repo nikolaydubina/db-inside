@@ -1,4 +1,5 @@
 import type { StoryStep } from './types'
+import { frozeAt } from './stop'
 
 /**
  * A big hash, followed: one field versus every field.
@@ -26,8 +27,10 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.bigKeys >= 2 && c.rdOps > 0,
-        waitFor: 'reads against the large hash',
+        expect: (c) => c.rdPhase === 'inner' && c.bigKeys >= 2,
+        waitFor: 'the value’s own bucket array',
+        freezeAt: 'inner',
+        assert: frozeAt('inner', 'the value’s own bucket array'),
     },
     {
         title: 'HGET: hash the field, follow the chain',
@@ -44,8 +47,10 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
-        waitFor: 'point reads against the big hash',
+        expect: (c) => c.rdPhase === 'field',
+        waitFor: 'the bucket inside the value’s table that the field hashed to',
+        freezeAt: 'field',
+        assert: frozeAt('field', 'the bucket inside the value’s table that the field hashed to'),
     },
     {
         title: 'HGETALL: there is no order to jump through',
@@ -62,8 +67,10 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'hop',
         waitFor: 'a walk across every bucket',
+        freezeAt: 'hop',
+        assert: frozeAt('hop', 'the page a field’s entry was allocated on'),
     },
     {
         title: 'why one command can stop the server',
@@ -80,7 +87,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'hop',
         waitFor: 'the walk still running on the one thread',
+        freezeAt: 'hop',
+        assert: frozeAt('hop', 'a page of the walk, one thread still inside it'),
     },
 ]

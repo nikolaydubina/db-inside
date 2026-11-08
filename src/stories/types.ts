@@ -44,19 +44,46 @@ export type StoryFacts = Pick<
      * stay frozen: the caption and the picture are about the same instant.
      */
     rdPhase: RidePhase
+    /**
+     * How far the ridden object is from the point its current leg ends at, in cage
+     * units — null when there is no ride, or when the leg is one in the air rather
+     * than a stop. A frozen step whose caption names a place is only honest when
+     * this is ~0, and the number is what makes that checkable.
+     */
+    rdStopGap: number | null
 }
 
 /**
  * The legs of a published message: down into a socket, at the channel where the
  * subscriber list is walked, and delivered into one listener's output buffer.
+ *
+ * A cued command reuses the same ride and adds its address chain. The stops are
+ * named after the thing the packet is standing on, not after a position in the
+ * route, because the routes are not the same length: a compact string is bucket →
+ * page → value, while a big hash point read is bucket → page → value → the
+ * value's own bucket array → the field's bucket → that entry's page. Naming by
+ * index once put a caption about the bucket array on a freeze two stops early.
  */
 export type RidePhase =
     | 'socket'
     | 'channel'
     | 'delivered'
+    /** the keyspace bucket the key hashed to */
     | 'bucket'
+    /** the heap page an entry sits on */
     | 'page'
+    /** the dictEntry itself, when the entry cube is drawn */
+    | 'entry'
+    /** the value object, where the encoding is read */
     | 'value'
+    /** the value's OWN bucket array — a second hash table, inside the value */
+    | 'inner'
+    /** the bucket inside that inner table that the field or member hashes to */
+    | 'field'
+    /** a node of a big value: a list node, a skiplist node, a field's entry */
+    | 'node'
+    /** the page such a node was allocated on: the pointer chase, made visible */
+    | 'hop'
     | 'reply'
     | null
 
@@ -190,8 +217,26 @@ export interface StoryStep {
      * The next step starts with the same object still in the air.
      */
     freezeAt?: Exclude<RidePhase, null>
+    /**
+     * What the FROZEN instant must show, in words — or why it does not.
+     *
+     * `freezeAt` says which stop to wait for and this says what the caption then
+     * claims is on screen, which catches the case where the two agree on a label
+     * and disagree about the picture. When it returns a string the panel shows
+     * `wrong instant · <that>` and the step never reports itself as described, so a
+     * drifted stop is a visible failure instead of a plausible drawing.
+     */
+    assert?: (c: StoryFacts) => string | null
 
-    /** the caption is only honest when this holds */
+    /**
+     * The caption is only honest when this holds.
+     *
+     * A step that freezes the clock is mid-command BY DEFINITION, so a claim about
+     * the command having finished (`rdOps > 0`) is false at exactly the instant the
+     * caption describes — the panel sat on `not yet` while the picture was already
+     * right. A claim on such a step belongs to the frozen instant: where the packet
+     * is, what the drawing shows.
+     */
     expect: (c: StoryFacts) => boolean
     /** short description of `expect`, shown while it is not yet true */
     waitFor: string

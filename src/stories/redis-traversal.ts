@@ -1,4 +1,5 @@
 import type { StoryStep } from './types'
+import { frozeAt } from './stop'
 
 /**
  * One deep read of a long list, followed end to end.
@@ -24,8 +25,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
-        waitFor: 'a read entering the cage',
+        expect: (c) => c.rdPhase === 'socket',
+        waitFor: 'a read sitting in a socket',
+        freezeAt: 'socket',
+        assert: frozeAt('socket', 'the socket the request came in on'),
     },
     {
         title: 'the key becomes a bucket, the bucket a page',
@@ -41,8 +44,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0 && c.rdKeys > 40,
-        waitFor: 'a read hashing into the table',
+        expect: (c) => c.rdPhase === 'page',
+        waitFor: 'the bucket pointing at a page',
+        freezeAt: 'page',
+        assert: frozeAt('page', 'the page the bucket points at'),
     },
     {
         title: 'a list is a chain, and the chain is on the heap',
@@ -58,8 +63,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'node',
         waitFor: 'the walk starting at the head node',
+        freezeAt: 'node',
+        assert: frozeAt('node', 'the head node of the chain'),
     },
     {
         title: 'node after node, page after page',
@@ -75,8 +82,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'hop',
         waitFor: 'the chain being walked, a node at a time',
+        freezeAt: 'hop',
+        assert: frozeAt('hop', 'a node’s page, the jump the walk makes'),
     },
     {
         title: 'found, and back out through the socket',
@@ -92,7 +101,9 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'reply',
         waitFor: 'the reply leaving the loop',
+        freezeAt: 'reply',
+        assert: frozeAt('reply', 'the reply on its way out'),
     },
 ]

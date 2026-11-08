@@ -1,4 +1,5 @@
 import type { StoryStep } from './types'
+import { frozeAt } from './stop'
 
 /**
  * One lookup, end to end — the whole path a single GET takes.
@@ -28,8 +29,10 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
+        expect: (c) => c.rdPhase === 'socket',
         waitFor: 'a request on its way in',
+        freezeAt: 'socket',
+        assert: frozeAt('socket', 'the socket the request came in on'),
     },
     {
         title: 'bucket → page → object → back out',
@@ -45,7 +48,9 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         sustainWhileOpen: true,
         delay: 600,
         speed: 0.4,
-        expect: (c) => c.rdOps > 0,
-        waitFor: 'the lookup and its reply',
+        expect: (c) => c.rdPhase === 'value',
+        waitFor: 'the object header and its reply',
+        freezeAt: 'value',
+        assert: frozeAt('value', 'the object header that carries the encoding'),
     },
 ]

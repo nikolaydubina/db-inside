@@ -2242,6 +2242,19 @@ export class RedisInstance {
         return live[randInt(0, live.length - 1)]
     }
 
+    /**
+     * A live key that is not one of the big values.
+     *
+     * Ambient traffic must not delete or expire a big value: a story forces one
+     * as its subject, and a DEL that happens to land on it removes the thing the
+     * caption is about — the story then waits forever for a key that is gone.
+     */
+    randomLiveSmallKey(): RedisKey | null {
+        const live = this.keys.filter((k) => k.live && !k.big)
+        if (live.length === 0) return null
+        return live[randInt(0, live.length - 1)]
+    }
+
     /** First dead slot — a key created rather than updated. */
     freeKey(): RedisKey | null {
         return this.keys.find((k) => !k.live) ?? null

@@ -133,6 +133,7 @@ export function createStory({
             rdSubs: r?.subscribers ?? 0,
             rdFanouts: r?.fanouts ?? 0,
             rdPhase: redis?.phase() ?? null,
+            rdStopGap: redis?.rideState().gap ?? null,
         }
     }
 
@@ -180,8 +181,15 @@ export function createStory({
             },
             facts: f,
             claim: { holds: step.expect(f), expects: step.waitFor },
+            /**
+             * null when the frozen instant is the one the caption describes.
+             * Checked only while the clock is stopped: mid-ride the packet is
+             * always between stops, and calling that wrong would paint the panel
+             * red for the whole of every ride.
+             */
+            wrong: frozen ? (step.assert?.(f) ?? null) : null,
             /** the whole step is honest only when both halves hold */
-            ok: arrived && step.expect(f),
+            ok: arrived && step.expect(f) && !(frozen && step.assert?.(f)),
         }
     }
 
@@ -205,10 +213,21 @@ export function createStory({
             }
         }
         const ok = a.camera.arrived && demonstrated
-        stateEl.classList.toggle('ok', ok)
-        stateEl.textContent = !a.camera.arrived
-            ? `camera → ${a.subject ?? a.view ?? '…'}`
-            : !demonstrated
+        stateEl.classList.toggle('ok', ok && !a.wrong)
+        stateEl.classList.toggle('wrong', !!a.wrong)
+        stateEl.textContent = a.wrong
+            ? // the clock stopped, the camera arrived, the claim holds — and the
+              // picture is of a different instant than the words. Saying so is the
+              // whole point of asserting on a step.
+              `wrong instant · ${a.wrong}`
+            : !a.camera.arrived
+              ? stepNow?.subject && !a.subject
+                  ? // a ride is between commands: the last one has left the socket and
+                    // the next has not been cued yet. That is the story working, not
+                    // the camera failing, so it says so.
+                    `waiting · ${stepNow.waitFor ?? 'the next command'}`
+                  : `camera → ${a.subject ?? a.view ?? '…'}`
+              : !demonstrated
                 ? `not yet · ${a.claim.expects}`
                 : 'as described'
     }
@@ -286,17 +305,26 @@ export function createStory({
      * The next step starts from that instant, with the same packet still in the
      * air, and lets it move again.
      */
-    const watchPhase = (step: StoryStep, mine: number) => {
+    const watchPhase = (step: StoryStep, mine: number, left = false) => {
         if (mine !== token || !running || frozen) return
         if (redis?.phase() === step.freezeAt) {
-            frozen = true
-            setSpeed?.(0)
-            return
+            // A frozen ride SITS on the phase the last step stopped at, so a step
+            // that opens there would freeze on its first poll and stay stopped for
+            // good — the clock would never restart and `next` would do nothing
+            // visible. The step has to watch the packet leave that phase before it
+            // is allowed to stop on it again.
+            if (left) {
+                frozen = true
+                setSpeed?.(0)
+                return
+            }
+        } else {
+            left = true
         }
         // polling, not an event: the sim is a frame loop, and this is a story
         // watching it, so the cheapest honest thing is to look. 80 ms is under a
         // frame of slack at the quarter speed these steps run at.
-        window.setTimeout(() => watchPhase(step, mine), 80)
+        window.setTimeout(() => watchPhase(step, mine, left), 80)
     }
 
     /**
@@ -407,6 +435,11 @@ export function createStory({
         if (rate <= 0) return
         const beat = () => {
             if (mine !== token || !running) return
+            // A stopped clock is a still frame, and a command sent into it would
+            // fall in from the sky for as long as the caption is being read — and
+            // TAKE THE FOCUS from the very ride the step stopped on. The panel asks
+            // for the next one when the reader presses next.
+            if (frozen) return window.setTimeout(beat, 1000 / rate)
             if (!step.sustainWhileOpen && step.expect(facts())) return
             tap(step)
             window.setTimeout(beat, 1000 / rate)
