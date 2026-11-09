@@ -8,6 +8,7 @@ import { BACKEND_ORIGIN, BACKEND_SLOTS, BLOCK_PICK_RANGE, PALETTE } from '../pos
 import type { Info } from '../postgresql/instance'
 import { BigValues, BIG_SPOT } from './values'
 import type { BigKind } from './values'
+import { verifyDisk } from './verify'
 export { BIG_SPOT }
 export type { BigKind }
 import {
@@ -2863,110 +2864,20 @@ export class RedisInstance {
     }
 
     verify(): string[] {
-        const bad: string[] = []
-        const s = this.disk.instanceMatrix.array
-        const scale = (id: number) => s[id * 16 + 5]
-        const pos = (id: number) =>
-            new THREE.Vector3(s[id * 16 + 12], s[id * 16 + 13], s[id * 16 + 14])
-
-        const aofDrawn = new Set<number>()
-        for (let k = 0; k <= this.aofHead; k++) {
-            const id = this.aofOrder[k]
-            if (id === undefined) {
-                bad.push(`log block ${k} has no floor slot`)
-                continue
-            }
-            if (Math.abs(scale(id) - 1) > 2e-3) {
-                bad.push(
-                    `log block ${k} (id ${id}) should be drawn, scale is ${scale(id).toFixed(3)}`,
-                )
-            }
-            const want = this.aofBlockPos(k)
-            if (pos(id).distanceTo(want) > 1e-3) {
-                bad.push(
-                    `log block ${k} sits at ${pos(id)
-                        .toArray()
-                        .map((n) =>
-                            n.toFixed(2),
-                        )}, expected ${want.toArray().map((n) => n.toFixed(2))}`,
-                )
-            }
-            aofDrawn.add(id)
-        }
-        for (
-            let k = this.aofHead + 1;
-            k <= Math.min(this.aofHead + 4, this.aofOrder.length - 1);
-            k++
-        ) {
-            const id = this.aofOrder[k]
-            if (scale(id) > 1e-2)
-                bad.push(`log block ${k} is drawn, but the file ends at ${this.aofHead}`)
-        }
-        for (let k = 0; k < this.rdbLen; k++) {
-            const id = this.rdbOrder[k]
-            if (scale(id) < 0.1) bad.push(`base block ${k} (id ${id}) is missing`)
-        }
-        for (let k = this.rdbLen; k < Math.min(this.rdbLen + 3, this.rdbOrder.length); k++) {
-            const id = this.rdbOrder[k]
-            if (scale(id) > 1e-2)
-                bad.push(`base block ${k} is drawn, but the file ends at ${this.rdbLen - 1}`)
-        }
-        for (let k = 0; k < this.rdbLen; k++) {
-            if (aofDrawn.has(this.rdbOrder[k]))
-                bad.push(`block ${k} of the base file is also in the log`)
-        }
-        const col = this.disk.instanceColor?.array
-        if (col) {
-            const lit = (id: number) => col[id * 3] + col[id * 3 + 1] + col[id * 3 + 2]
-            let blackAof = 0
-            let blackRdb = 0
-            for (let k = 0; k <= this.aofHead; k++) {
-                const id = this.aofOrder[k]
-                if (id !== undefined && scale(id) > 0.5 && lit(id) < 1e-4) blackAof++
-            }
-            for (let k = 0; k < this.rdbLen; k++) {
-                const id = this.rdbOrder[k]
-                if (scale(id) > 0.1 && lit(id) < 1e-4) blackRdb++
-            }
-            if (blackAof > 0) bad.push(`${blackAof} block(s) of the log are drawn but black`)
-            if (blackRdb > 0) bad.push(`${blackRdb} block(s) of the base file are drawn but black`)
-        }
-        if (this.aofHead >= 0 && this.aofOrder.length > 0) {
-            let minC = COLS
-            let maxC = -1
-            let minR = ROWS
-            let maxR = -1
-            for (let k = 0; k <= this.aofHead; k++) {
-                const id = this.aofOrder[k]
-                if (id === undefined) continue
-                const c = id % COLS
-                const r = Math.floor(id / COLS)
-                minC = Math.min(minC, c)
-                maxC = Math.max(maxC, c)
-                minR = Math.min(minR, r)
-                maxR = Math.max(maxR, r)
-            }
-            const wantW = (maxC - minC + 1) * CELL
-            const wantD = (maxR - minR + 1) * CELL
-            if (Math.abs(this.aofEdge.w - wantW) > 1e-3) {
-                bad.push(
-                    `log cage width ${this.aofEdge.w.toFixed(2)} ≠ the file's ${wantW.toFixed(2)}`,
-                )
-            }
-            if (Math.abs(this.aofEdge.d - wantD) > 1e-3) {
-                bad.push(
-                    `log cage depth ${this.aofEdge.d.toFixed(2)} ≠ the file's ${wantD.toFixed(2)}`,
-                )
-            }
-        }
-        if (!this.rewriting) {
-            for (let k = 0; k < 16; k++) {
-                if (scale(this.stagingId(k)) > 1e-2) {
-                    bad.push(`staging block ${k} is still drawn after the rewrite finished`)
-                }
-            }
-        }
-        return bad
+        return verifyDisk({
+            disk: this.disk,
+            aofHead: this.aofHead,
+            aofOrder: this.aofOrder,
+            aofBlockPos: (k) => this.aofBlockPos(k),
+            aofEdge: this.aofEdge,
+            rdbLen: this.rdbLen,
+            rdbOrder: this.rdbOrder,
+            rewriting: this.rewriting,
+            stagingId: (k) => this.stagingId(k),
+            cols: COLS,
+            rows: ROWS,
+            cell: CELL,
+        })
     }
 
     private assertInvariants(where: string) {
