@@ -150,35 +150,13 @@ export const VIEWS: ViewDef[] = [
         pose: () =>
             shot(REDIS_ORIGIN.clone().add(V(0, 3.4, -2.6)), [-7.5, 6.5, 15.5], 40, [0, 0.8, 0]),
     },
-    {
-        id: 'big-zset',
-        label: 'sorted set · big',
-        slug: 'zset',
-        db: 'redis',
-        entity: 'a big sorted set',
-        hint: 'a skiplist with the dict beside it — one key, 1.4 M members',
-        // above the keys plane and looking down: from any lower the plane hangs
-        // between the camera and the tower
-        pose: () => shot(REDIS_ANCHOR.bigZset, [0.6, 8.0, 5.2], 34, [0, 0.3, 0]),
-    },
-    {
-        id: 'big-hash',
-        label: 'hash · big',
-        slug: 'hash',
-        db: 'redis',
-        entity: 'a big hash',
-        hint: 'a bucket array with chains — one key, 5.3 M fields',
-        pose: () => shot(REDIS_ANCHOR.bigHash, [0.6, 7.4, 5.2], 34, [0, 0.2, 0]),
-    },
-    {
-        id: 'big-list',
-        label: 'list · big',
-        slug: 'list',
-        db: 'redis',
-        entity: 'a big list',
-        hint: 'a chain of quicklist nodes — one key, 2.1 M elements',
-        pose: () => shot(REDIS_ANCHOR.bigList, [0.6, 7.6, 7.2], 34, [0, 0.2, 0]),
-    },
+    // The three `big-*` views are gone with the cages they framed.
+    //
+    // A big value used to stand at the back of the cage as an exhibit you could ask
+    // the camera to show you. It does not stand anywhere now: the structure is what a
+    // read carries while it walks, so it exists only while a story is following that
+    // read. A view is a promise that pointing the camera somewhere shows something,
+    // and there is nothing at those coordinates any more.
     {
         id: 'redis-disk',
         label: 'redis disk',
@@ -262,11 +240,13 @@ export const VIEWS: ViewDef[] = [
         db: 'redis',
         entity: 'one value object',
         hint: 'sixteen bytes: a header, and a payload that is sometimes inside it',
-        // The cage now sits at heap level, so the shot is low: the page the read
-        // lands on, the object section above it, and the dict at the top edge —
-        // bucket → page → object, with both ends in frame.
-        pose: () =>
-            shot(REDIS_ORIGIN.clone().add(V(-8.0, 3.6, -1.6)), [3.8, 3.0, 9.4], 40),
+        // Aimed at the PAGE, not at a place beside the bucket array. The value
+        // object is an allocation inside one 4 kB block, so this shot is a zoom:
+        // 0.9 units from a 0.23-unit page is where the block, the header and the
+        // payload inside it all read. It used to be a 10-unit shot of a section
+        // that no longer exists — a view is only worth keeping if its anchor is a
+        // thing in the scene.
+        pose: () => shot(REDIS_ANCHOR.inline, [0.34, 0.6, 0.56], 34),
     },
     {
         id: 'redis-pubsub',
@@ -551,7 +531,8 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
      * the aim point onto the subject itself — one rule per frame, no tween to
      * fight, and it settles instead of lagging a fixed fraction behind.
      */
-    let ride: { target: THREE.Object3D; dir: THREE.Vector3; dist: number } | null = null
+    let ride: { target: THREE.Object3D; dir: THREE.Vector3; dist: number; base: number; near: number } | null =
+        null
     const rideAt = new THREE.Vector3()
     const rideWant = new THREE.Vector3()
     const RIDE_RATE = 6
@@ -803,6 +784,22 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
         /** What the camera is currently holding on to, if anything. */
         following: () => followName,
         /**
+         * Move a ride's standoff, keeping its direction.
+         *
+         * A ride is a fixed distance from its subject, which is right for a shot
+         * of one thing — but the thing being ridden changes scale as it travels: a
+         * request crossing the cage is seen from ~10 units, and the same request
+         * standing inside a 0.23-unit heap page has to be seen from ~0.6. `depth`
+         * is 0 outside and 1 at the bottom, so the caller owns the mapping and this
+         * only does the interpolation — the per-frame ease then turns a step change
+         * in depth into a camera that flies in.
+         */
+        holdDepth(depth: number) {
+            if (!ride) return
+            const want = ride.base + (ride.near - ride.base) * THREE.MathUtils.clamp(depth, 0, 1)
+            ride.dist = Math.max(0.06, want)
+        },
+        /**
          * The slow drift: turn the camera about the aim point.
          *
          * The aim point is the centre of what the shot is about — a cage-level shot
@@ -846,7 +843,7 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
          * tracks. Panning the camera by hand from a 200 ms poll instead leaves it
          * lagging a fixed fraction behind its subject, which reads as jitter.
          */
-        hold(target: THREE.Object3D | null, shot?: { dir: [number, number, number]; dist: number; fov?: number }) {
+        hold(target: THREE.Object3D | null, shot?: { dir: [number, number, number]; dist: number; near?: number; fov?: number }) {
             if (!target || !shot) {
                 ride = null
                 followPoint = null
@@ -861,7 +858,14 @@ export function createCameraRig({ camera, controls, ticker, beforeNavigate }: Ri
             ride = {
                 target,
                 dir: new THREE.Vector3(...shot.dir).normalize(),
-                dist: Math.max(1.2, shot.dist),
+                // The floor used to be 1.2 units, which is a wide shot of anything
+                // smaller than a cage. A heap page is 0.23 across and the value
+                // cage inside it is 0.13, so a story that looks into a block has to
+                // be able to stand ~0.4 units away. The camera's near plane is 0.1,
+                // so 0.06 is the honest limit.
+                dist: Math.max(0.06, shot.dist),
+                base: Math.max(0.06, shot.dist),
+                near: Math.max(0.06, shot.near ?? shot.dist),
             }
             followName = 'riding'
             if (shot.fov !== undefined && Math.abs(camera.fov - shot.fov) > 0.01) {

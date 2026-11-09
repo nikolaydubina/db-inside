@@ -2,6 +2,7 @@ import * as THREE from 'three'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
 import type { BigKind, KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { BIG_REAL } from './redis'
+import { HEAP_PAGE } from './layout'
 import { QueryChain, pathCurve } from '../core/flow'
 import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from '../core/util'
 
@@ -139,20 +140,49 @@ const pickCommand = (): Command => {
  */
 const SKY_ABOVE_PORT = 32
 
+/**
+ * How wide a packet is drawn: one heap page.
+ *
+ * Packets used to be 0.42 and 0.26 — bigger than the blocks they landed on, so a
+ * read arriving at a page looked like something that could not fit in it. The scene's
+ * unit is the 4 kB block, and a marker for "the read is here" belongs in that grid.
+ */
+const PACKET = HEAP_PAGE
+
+/** Clearance between a packet's underside and the surface it stops on. */
+const PACKET_GAP = 0.05
+
 function makePacket(color: number, size: number, parent: THREE.Object3D) {
+    // A small packet is a marker seen from close up, not a light source. At full
+    // strength with a 5x halo a 0.04-unit marker still filled a third of the frame
+    // and hid the page it was standing on, which is the opposite of the point of
+    // zooming in. Same shape, dimmer, with a halo that stays near the core.
+    const small = size < 0.19
     const g = new THREE.Group()
+    // The marker lives INSIDE the packet, in a group of its own.
+    //
+    // The packet is the thing things attach to — a read carries the value's
+    // structure with it — so the packet's own scale stays 1. Shrinking the packet
+    // itself made everything parented to it shrink too, which is why a carried
+    // cage vanished as the camera went in. What shrinks is the marker.
+    const marker = new THREE.Group()
+    g.add(marker)
     const core = new THREE.Mesh(
         new THREE.BoxGeometry(size, size, size),
         new THREE.MeshStandardMaterial({
             color: 0x0a1118,
             emissive: color,
-            emissiveIntensity: 2.4,
+            emissiveIntensity: small ? 0.45 : 2.4,
             roughness: 0.25,
             metalness: 0.4,
         }),
     )
-    g.add(core)
-    g.add(halo(color, size * 5, 0.55))
+    marker.add(core)
+    // a small marker is a position, not a lamp: at 0.9 emission with a 2.2x halo its
+    // glow was lighting the inside of the glass page and reading as a bright column
+    // standing in it — there was no such object, it was the marker's own bloom
+    marker.add(halo(color, size * (small ? 2.2 : 2.6), small ? 0.18 : 0.4))
+    g.userData.marker = marker
     parent.add(g)
     return g
 }
@@ -304,7 +334,23 @@ export class RedisSim {
      * route runs to the end in a few seconds and every step after the first is a
      * description of something that has already gone.
      */
+    /** the big value currently riding along with a read, if any */
+    private carried: BigKind | null = null
+
     private ridePhase: RidePhase = null
+    /**
+     * How big a packet is drawn, as a multiple of its natural size.
+     *
+     * A packet is 0.42 units and a heap page is 0.23, so at the default size the
+     * marker a read is standing on is nearly twice the block it is standing on —
+     * which makes a zoom into a page impossible: the glow fills the frame and you
+     * cannot see what it landed on. Steps that go close ask for smaller packets;
+     * the story sets it back on the way out.
+     */
+    private packetScale = 1
+    /** what the story asked for; the depth below scales it down from here */
+    private packetBase = 1
+    /** the big value whose cage is riding with the packet, if any */
     /**
      * The point the leg the ride is on was supposed to END at, in cage-local
      * space — the same space the route was drawn in.
@@ -398,11 +444,19 @@ export class RedisSim {
                 walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
             } else {
                 const hops = key.kind === 'string' ? 1 : key.kind === 'hash' ? 2 : 3
-                for (let n = 0; n < hops; n++) {
-                    walk.push({ p: r.nodePoint(key, n), stop: 'node' })
-                    walk.push({ p: r.hopPoint(key, n), stop: 'hop' })
+                // Page to page, and never back to the structure.
+                //
+                // The route used to be node → page → node → page, bouncing to the
+                // drawn cage between every hop. That drew a return trip to a place
+                // the walk never goes back to: a quicklist node or a skiplist node
+                // is ONE allocation on ONE page, and the "next" pointer it follows
+                // is a field inside the node we already have — reading it costs no
+                // access at all. Bouncing also double-counted: the cage was visited
+                // once per hop while the only new address per hop is the next page.
+                // So a walk is a run of pages, each one a node's allocation.
+                for (let n = 0; n <= hops; n++) {
+                    walk.push({ p: r.hopPoint(key, n), stop: 'node' })
                 }
-                walk.push({ p: r.nodePoint(key, hops), stop: 'node' })
             }
         } else if (probe === 'object') {
             // The order is the point: the bucket points at a PAGE, the type is
@@ -410,7 +464,7 @@ export class RedisSim {
             // allocation holds the payload for an inline encoding. So the object
             // section comes after the page, not before it.
             walk.push({ p: r.keyPageTop(key), stop: 'page' })
-            walk.push({ p: r.inlinePoint(), stop: 'value' })
+            walk.push({ p: r.objectPoint(), stop: 'value' })
         } else if (key.aux) {
             // page first: the entry is an allocation, so the bucket points AT the
             // page, and only from there do the entry and its value pointer read
@@ -428,6 +482,16 @@ export class RedisSim {
             walk.push({ p: r.keyPageTop(key), stop: 'page' })
             walk.push({ p: r.keyTop(key), stop: 'value' })
         }
+        // A stop is a point ON the surface it names; the packet is drawn half a box
+        // above it, plus a gap.
+        //
+        // Centred on the face, a page-sized box is EXACTLY the block: its sides are
+        // coplanar with the block's sides and the two shimmer against each other as
+        // the camera moves, and the read reads as sunk into the block rather than
+        // resting on it. Lifting is also what makes "the read is here" honest — the
+        // packet is not made of the page, it is standing on it.
+        const hover = PACKET / 2 + PACKET_GAP
+        for (const w of walk) w.p.y += hover
         return walk
     }
 
@@ -505,7 +569,7 @@ export class RedisSim {
         // socket, exactly as a query does on the postgres side: same packet, same
         // long lean down, same wire drawn behind it. The client is not drawn
         // here either — the packet simply arrives already in flight.
-        const packet = makePacket(PALETTE.magenta, 0.42, cage)
+        const packet = this.packet(PALETTE.magenta, PACKET)
         const sky = portTop.clone().setY(portTop.y + SKY_ABOVE_PORT)
         packet.position.copy(sky)
         // A ride starts in the sky, before the bytes have reached the socket — not
@@ -619,13 +683,37 @@ export class RedisSim {
                     if (this.ownsRide(ride)) {
                         this.setPhase(legStop.stop, legStop.p.clone())
                     }
+                    // The structure is picked up HERE, at the stop that reads the
+                    // object header — not when the walk began.
+                    //
+                    // Attached at the start, a read was carrying a LIST through the
+                    // bucket and the page legs, before anything had told it that the
+                    // value was a list at all: the drawing asserted the type it had
+                    // not read yet, and put the structure in hand before the access
+                    // that produces it. The bucket is 8 bytes, the page holds the
+                    // entry, the header says `quicklist` — and only then is there
+                    // anything to carry.
+                    if (key?.big && !this.carried && legStop.stop === 'value' && this.ownsRide(ride)) {
+                        this.carried = key.big
+                        this.redis.rideBig(key.big, packet)
+                    }
                     await this.ticker.wait(0.22)
                     from = legStop.p
                 }
             } finally {
+                // ALWAYS, on every way out. A story freezes the clock in the middle
+                // of a walk, so "when the walk finishes" is a promise this code
+                // cannot keep: the last card can be left, the story closed, a ride
+                // taken over — and the cage stayed parented to the packet, sitting
+                // inside it forever. The release belongs with the walk's exit, not
+                // after its last leg.
+                this.dropCarried()
                 this.walking = false
             }
-            despawn(this.ticker, packet)
+            // NOT despawned: this packet is the thing that flies home. The reply
+            // below recolours it and sends it back, which is what makes the read one
+            // continuous object instead of a box that vanishes and a green one that
+            // appears at the same instant.
             await this.ticker.wait(0.2)
             while (this.blocked) await this.ticker.wait(0.1)
             this.redis.pulseLoop()
@@ -731,8 +819,19 @@ export class RedisSim {
         const replyFrom = cmd.fanout
             ? this.redis.channelPoint()
             : (chainPts[chainPts.length - 1] ?? loop)
+        // The reply is the SAME object that went in, turned green where it stands.
+        //
+        // It used to be a second packet spawned at the last stop while the first was
+        // despawned: the box disappeared, a green one appeared one frame later, and
+        // the camera — riding a proxy — had nothing to follow across the join. Now
+        // the packet that carried the structure becomes the answer, grows back to its
+        // normal size as the depth drops to 0, and flies home itself.
+        const home = packet.parent ? packet : null
+        if (home) recolorPacket(home, PALETTE.teal)
+        const out = home ?? this.packet(PALETTE.teal, PACKET)
+        if (!home) out.position.copy(replyFrom)
         const replyIn = pathCurve([
-            replyFrom.clone(),
+            out.position.clone(),
             loop.clone(),
             queue.clone(),
             portTop.clone(),
@@ -748,30 +847,22 @@ export class RedisSim {
         const replyChain = new QueryChain(cage)
         replyChain.addCurve(replyIn, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
         replyChain.addCurve(replyOut, PALETTE.teal, { speed: 0.7, opacity: 0.25 })
-        const out = makePacket(PALETTE.teal, 0.26, cage)
-        out.position.copy(replyFrom)
-        // The camera rides a PROXY, not the packet. The proxy travels the same leg
-        // to the socket and then STOPS, while the visible packet carries on out of
-        // the frame — so the ride ends exactly at the socket and the camera holds
-        // there, instead of trailing the packet upward for a poll interval and
-        // jittering when it finally lets go.
-        const proxy = this.ownsRide(ride) ? new THREE.Object3D() : null
-        if (proxy) {
-            proxy.position.copy(replyFrom)
-            cage.add(proxy)
-            this.focusPacket = proxy
-            // 'reply' is the return LEG, not a stop: it is announced as the packet
-            // sets off, and the ride ends at the socket, so there is no point to
-            // measure the packet against while it is in the air.
-            this.setPhase('reply', null)
-        }
-        await Promise.all([
-            travel(this.ticker, out, replyIn, 0.55, easeOutCubic),
-            proxy ? travel(this.ticker, proxy, replyIn, 0.55, easeOutCubic) : Promise.resolve(),
-        ])
-        // the socket is where the ride ends: the bytes are the client's problem now
+        // The camera keeps the packet it already has: no proxy, no hand-off. The ride
+        // ends at the socket, where the camera stops following and the bytes go on
+        // out of frame on their own.
+        //
+        // Ownership has to be captured BEFORE the leg: endRide clears the focus, and
+        // asking afterwards always answers "no".
+        const owned = this.ownsRide(ride)
+        await travel(this.ticker, out, replyIn, 0.55, easeOutCubic)
         this.endRide(ride)
-        if (proxy) cage.remove(proxy)
+        // Announced on ARRIVAL, like every other leg. 'reply' means the answer has
+        // reached the socket — that is the instant a card about the return is about.
+        // Announced when the reply SET OFF, a story froze with the answer in mid-air:
+        // the clock stopped, nothing moved again, and the return leg the card
+        // described never happened. It is set after endRide on purpose, so the phase
+        // survives the ride ending and the freeze can still see it.
+        if (owned) this.setPhase('reply', portTop.clone())
         await travel(this.ticker, out, replyOut, 0.45, easeOutCubic)
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)
@@ -837,11 +928,77 @@ export class RedisSim {
         this.focusNear = false
         this.ridePhase = null
         this.rideStopPoint = null
+        this.dropCarried()
+        this.redis.focusPageAt(null)
+    }
+
+    /**
+     * Put a carried structure back where it lives.
+     *
+     * Called from every end of a walk and every end of a ride, because those are
+     * different events: a ride can be taken over, a story can close mid-walk, and
+     * the packet can be replaced by the reply's proxy — none of which reaches the
+     * end of the loop in the walk branch.
+     */
+    private dropCarried() {
+        if (!this.carried) return
+        this.redis.rideBig(this.carried, null)
+        this.carried = null
     }
 
     /** Which leg of the route the ridden message is on, if any. */
     phase(): RidePhase {
         return this.ridePhase
+    }
+
+    /**
+     * A packet whose marker the sim controls.
+     *
+     * The group is what other things attach to, so it stays at scale 1; the size
+     * lives on the marker inside it (see makePacket). Every spawn goes through here
+     * so an ambient packet is born at the current size and not at the default one.
+     */
+    private packet(color: number, size: number) {
+        const p = makePacket(color, size, this.redis.group)
+        const marker = p.userData.marker as THREE.Group | undefined
+        marker?.scale.setScalar(this.packetScale)
+        return p
+    }
+
+    /**
+     * Draw packets at this multiple of their natural size.
+     *
+     * A story that zooms into a heap block needs the marker on it to be smaller
+     * than the block, or the shot is a pink screen. Applied to the packet already
+     * in the air as well, so the change lands on the frame the step opens.
+     */
+    setPacketScale(v: number) {
+        this.packetBase = v > 0 ? v : 1
+        this.packetScale = this.packetBase
+    }
+
+    /**
+     * How far inside the machine the ride has got: 0 outside, 1 in a heap page.
+     *
+     * This is what a zoom follows. A packet is a marker for "the read is here",
+     * and "here" means two very different scales: a request crossing the cage is
+     * a unit-sized object between structures, and the same request standing on a
+     * heap page is a marker inside a 0.23-unit block whose contents are 0.13. So
+     * the camera comes in and the marker shrinks together, both following this
+     * number, and it goes back out on the way to the reply.
+     */
+    rideDepth(): number {
+        // No zoom, and no shrink with it.
+        //
+        // The camera used to dive into the page a read landed on, the marker shrink
+        // with it, and the block turn to glass so you could see inside. Each of those
+        // needed the others: depth from the phase, a shallow flag for the way home, a
+        // size smoothed on real time because the clock is frozen while it settles, a
+        // tolerance so a stop hovering over a page still counted as being on it. That
+        // is a lot of machinery for one claim — and the claim is already unmissable
+        // without it: the structure appears at the stop that reads the object header,
+        // rides along with the packet, and turns from violet to green on the way home.
+        return 0
     }
 
     /**
@@ -1017,7 +1174,7 @@ export class RedisSim {
             // wire and becomes a value the thread is handing to sockets. The rest
             // are made at the channel, because that is exactly what a copy is.
             const packet =
-                i === 0 && message ? message : makePacket(PALETTE.violet, 0.24, cage)
+                i === 0 && message ? message : this.packet(PALETTE.violet, PACKET)
             if (i === 0 && message) recolorPacket(packet, PALETTE.violet)
             // it leaves from the channel, wherever it was made
             packet.position.copy(from)
@@ -1032,7 +1189,7 @@ export class RedisSim {
                 // does not become busy.
                 this.redis.pulseSend(arc.pod)
                 despawn(this.ticker, packet, 0.15)
-                const away = makePacket(PALETTE.violet, 0.2, cage)
+                const away = this.packet(PALETTE.violet, PACKET * 0.8)
                 away.position.copy(arc.top)
                 if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = away
                 void travel(this.ticker, away, arc.out, 0.6).then(() =>
@@ -1076,7 +1233,7 @@ export class RedisSim {
         const route = pathCurve([portTop, queue.clone(), loop.clone(), channel.clone()])
         const chain = new QueryChain(cage)
         chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.4 })
-        const packet = makePacket(PALETTE.violet, 0.3, cage)
+        const packet = this.packet(PALETTE.violet, PACKET)
         packet.position.copy(portTop)
         void travel(this.ticker, packet, route, 0.55)
 
@@ -1102,7 +1259,7 @@ export class RedisSim {
             portTop.clone().add(new THREE.Vector3(0.35, 4, 0.4)),
             portTop.clone().add(new THREE.Vector3(0.7, 12, 0.7)),
         ])
-        const back = makePacket(PALETTE.teal, 0.2, cage)
+        const back = this.packet(PALETTE.teal, PACKET * 0.8)
         back.position.copy(channel)
         void travel(this.ticker, back, reply, 0.7).then(() => despawn(this.ticker, back, 0.2))
         await this.ticker.wait(0.5)
@@ -1129,7 +1286,7 @@ export class RedisSim {
         const route = pathCurve([portTop, queue.clone(), loop.clone(), channel.clone()])
         const chain = new QueryChain(cage)
         chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.32 })
-        const packet = makePacket(PALETTE.violet, 0.26, cage)
+        const packet = this.packet(PALETTE.violet, PACKET)
         packet.position.copy(portTop)
         void travel(this.ticker, packet, route, 0.5)
         await this.ticker.wait(0.45)
@@ -1401,6 +1558,11 @@ export class RedisSim {
 
     update(dt: number) {
         this.clock += dt
+
+        // No glass page any more: nothing opens, so there is nothing to close either.
+        // The read is legible from the structure that appears at the value stop and
+        // rides with the packet.
+        this.redis.focusPageAt(null)
 
         // A ride survives the hand-off from the inbound packet to the outgoing
         // copies, so a packet disappearing is NOT the end of it — the fan replaces

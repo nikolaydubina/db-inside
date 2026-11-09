@@ -1333,6 +1333,14 @@ function frame() {
   // keep the camera on the subject of the current view while it moves — on real
   // time, not sim time, so the follow feels the same at any clock speed
   rig.follow(raw)
+  // A ride ENDS at the socket, and the camera has to let go there.
+  //
+  // The rig holds an object, not a place: when the reply sets off for the sky the
+  // packet is still a live object, and the runner only notices that the ride is over
+  // on its next 200 ms poll — by which time the camera has chased the bytes out of
+  // the frame. Releasing on the frame the ride ends is what makes the socket the last
+  // thing you see it do.
+  if (storyActive && !redisSim.rideState().hasPacket) rig.hold(null)
 
   // ambient traffic so the machine always feels alive; a story switches it off
   // so the only load on screen is the load it just described

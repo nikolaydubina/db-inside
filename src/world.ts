@@ -52,7 +52,12 @@ export function createWorld(canvas: HTMLCanvasElement, labelHost: HTMLElement): 
   controls.enableDamping = true
   controls.dampingFactor = 0.055
   // wide enough range that walkthrough views can get down to block level
-  controls.minDistance = 1.2
+  // The floor on how close the orbit may sit. It was 1.2 units, which is fine for
+  // a cage and useless for a 0.23-unit heap page: a story that zooms INTO a block
+  // asks for 0.4 and the controls quietly held it at 1.2, so the shot never arrived
+  // and the panel sat on "camera → ride" forever. The camera's near plane is 0.1,
+  // so 0.05 is the honest limit.
+  controls.minDistance = 0.05
   controls.maxDistance = 90
   controls.minPolarAngle = 0.06
   controls.maxPolarAngle = 1.52

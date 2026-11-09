@@ -46,6 +46,8 @@ export interface StoryOptions {
         resumePubSub(): void
         /** which leg of its route the ridden message is on, for `freezeAt` */
         phase(): RidePhase
+        /** how big to draw packets */
+        setPacketScale?(scale: number): void
         /**
          * Where the ridden object actually is, for the step assertions.
          *
@@ -231,10 +233,18 @@ export function createStory({
             `wrong instant · ${a.wrong}`
             : !a.camera.arrived
                 ? stepNow?.subject && !a.subject
-                    ? // a ride is between commands: the last one has left the socket and
+                    ? // A ride is between commands: the last one has left the socket and
                     // the next has not been cued yet. That is the story working, not
-                    // the camera failing, so it says so.
-                    `waiting · ${stepNow.waitFor ?? 'the next command'}`
+                    // the camera failing — but only while the claim is still unmet.
+                    //
+                    // Once the claim HAS held, "waiting" is the panel arguing with
+                    // itself: on a last card, whose clock is running and whose ride is
+                    // over because the answer reached the socket, it sat on
+                    // "waiting · the reply leaving the loop" for as long as the card
+                    // was open, and read as the reply never arriving.
+                    demonstrated
+                        ? 'as described'
+                        : `waiting · ${stepNow.waitFor ?? 'the next command'}`
                     : `camera → ${a.subject ?? a.view ?? '…'}`
                 : !demonstrated
                     ? `not yet · ${a.claim.expects}`
@@ -250,8 +260,21 @@ export function createStory({
         if (titleEl) titleEl.textContent = step.title
         if (bodyEl) bodyEl.textContent = step.body
         if (stepEl) stepEl.textContent = `${index + 1} / ${steps.length}`
-        if (prevBtn) prevBtn.disabled = index === 0
-        if (nextBtn) nextBtn.disabled = index === steps.length - 1
+        // The last card is the end of a journey, not a dead end. A disabled
+        // "next →" on a running scene the reader cannot move either way reads as a
+        // broken panel, so the pair changes meaning there: the left button starts the
+        // journey again from the first card, the right one finishes and closes it.
+        // Restart leads because the panel's left slot is the "go back to the start"
+        // side all the way through, and `done` trails where `next →` has been.
+        const last = index === steps.length - 1
+        if (prevBtn) {
+            prevBtn.textContent = last ? 'restart ↺' : '← back'
+            prevBtn.disabled = false
+        }
+        if (nextBtn) {
+            nextBtn.textContent = last ? 'done' : 'next →'
+            nextBtn.disabled = false
+        }
         refreshState()
     }
 
@@ -283,11 +306,23 @@ export function createStory({
         // camera waited for a message nobody had asked the server to send.
         if (step.publish) window.setTimeout(() => keepPublishing(mine), step.delay ?? 600)
         if (step.subscribe) window.setTimeout(() => keepSubscribing(step, mine), step.delay ?? 600)
-        if (step.speed) setSpeed?.(step.speed)
+        // The LAST card of a journey runs live.
+        //
+        // Every other card stops the clock on the instant it talks about, which is
+        // the point — and on the final card that leaves the reader in a paused
+        // scene with `next →` disabled and no way to start it again. A journey ends
+        // the way the page begins: the machine running, at its own pace. Declaring
+        // `freezeAt` on a last step is therefore ignored rather than obeyed, so a
+        // story cannot end stopped by accident.
+        const last = index === steps.length - 1
+        if (step.speed) setSpeed?.(last ? 1 : step.speed)
+        // Packets are drawn at one size. The marker used to shrink as the camera
+        // went in, which only made sense while there was a zoom to go in with.
+        redis?.setPacketScale?.(1)
         // started before the delay, not after: the message may already be on the
         // leg this step is about, and a step that only starts watching once its
         // caption lands could miss the instant it wants to stop on
-        if (step.freezeAt) watchPhase(step, mine)
+        if (step.freezeAt && !last) watchPhase(step, mine)
         // The cues belong to the STEP, not to the camera code. They used to live
         // in lockOn(), which only runs for steps that follow a live subject — so
         // every `send`/`sustain` on a step with a fixed `view` was silently dead,
@@ -418,6 +453,11 @@ export function createStory({
                 // a subject that moves: no frame tween, just a ride. The camera
                 // eases onto `subject + dir × dist` and holds it, so there is
                 // nothing to re-frame every tick and nothing to jitter.
+                //
+                // `dist` is the WIDE shot and `near` the bottom of the zoom: the rig
+                // interpolates between them every frame from the ride's depth, so one
+                // card opens wide at the socket and ends inside a heap page without
+                // cutting.
                 rig.hold(obj, {
                     dir: step.dir ?? [0, 0.3, 1],
                     dist: step.dist,
@@ -474,17 +514,31 @@ export function createStory({
         running = false
         token++
         if (el) el.hidden = true
+        // a close-up's packet size is the step's, not the scene's
+        redis?.setPacketScale?.(1)
         onExit?.()
     }
 
+    /** Forward, or out: `next` on the last card finishes and closes the journey. */
     const next = () => {
-        if (!running || index >= steps.length - 1) return
+        if (!running) return
+        if (index >= steps.length - 1) {
+            stop()
+            return
+        }
         index++
         play()
     }
 
+    /** Back, or round again: on the last card the left button restarts. */
     const prev = () => {
-        if (!running || index === 0) return
+        if (!running) return
+        if (index >= steps.length - 1) {
+            index = 0
+            play()
+            return
+        }
+        if (index === 0) return
         index--
         play()
     }

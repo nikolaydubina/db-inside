@@ -200,6 +200,14 @@ export interface StoryStep {
     sustainWhileOpen?: boolean
     /** wait before firing, so the caption lands before the motion */
     delay?: number
+    /**
+     * How big to draw the packet, as a multiple of its natural size.
+     *
+     * Almost always left out. It exists because a step CAN be a close-up of a
+     * 0.23-unit block by hand (`dist` small), and at that range the marker's glow
+     * covers what the card is about — one number, rarely used.
+     */
+    packetScale?: number
     /** something to trigger, e.g. a checkpoint */
     act?: (sim: EngineSim) => void
     /**

@@ -93,6 +93,20 @@ test.describe('redis stories', () => {
             await page.waitForTimeout(600)
 
             for (const [i, want] of plan.entries()) {
+                const last = i === plan.length - 1
+                if (last) {
+                    // The last card runs LIVE: the journey ends the way the page
+                    // begins, clock at 1×, and the two buttons become `restart ↺`
+                    // (leading) and `done` (trailing). A last card that froze would
+                    // leave a reader in a paused scene with no way forward.
+                    await page.waitForTimeout(5000)
+                    const end = await state(page)
+                    expect(end.speed, 'the last card left the clock stopped').toBeGreaterThan(0)
+                    expect((await page.textContent('#story-prev'))?.trim()).toContain('restart')
+                    expect((await page.textContent('#story-next'))?.trim()).toContain('done')
+                    expect(await page.locator('#story-next').isEnabled()).toBe(true)
+                    break
+                }
                 const s = await page.evaluate(
                     async ({ budget }) => {
                         const t0 = Date.now()

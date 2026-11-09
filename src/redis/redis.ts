@@ -29,7 +29,7 @@ import {
     setLabelEnabled,
     slotLattice,
 } from '../core/util'
-import { CELL, CHANNEL, FIELD, INLINE, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, keyX, keyZ, xAt, zAt, } from './layout'
+import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, xAt, zAt, } from './layout'
 export * from './layout'
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
@@ -158,17 +158,39 @@ export const REDIS_ANCHOR = {
     /** the floating aof_buf strip — it drifts, so update() rewrites this live */
     aofBuf: new THREE.Vector3(),
     rdb: new THREE.Vector3(),
+    /**
+     * The one heap page drawn open, with the value-object cage inside it.
+     *
+     * The cage used to stand in a section of its own beside the bucket array, and
+     * the `inline value` view aimed at those coordinates. The section is gone — the
+     * object is an allocation on a page — so the view has to aim at the page the
+     * cage was built in, and only the instance knows which page that is: hence an
+     * anchor it writes in place, like `keys` and `aofBuf` above.
+     */
+    inline: new THREE.Vector3(),
     /** the three large values, drawn as their own areas at the back */
     bigHash: new THREE.Vector3(),
     bigZset: new THREE.Vector3(),
     bigList: new THREE.Vector3(),
 }
 
+/**
+ * The page drawn open, in cage-local space.
+ *
+ * Module level because it is decided by the instance (which page is open) but
+ * needed by `rebaseAnchors()`, which runs on load and again whenever the cage is
+ * dragged across the floor — a value only the instance knows, read by a function
+ * that has no instance. Written once, in buildInlineObject. Defaults to the middle
+ * of the arena so an early view call aims somewhere sane.
+ */
+const inlineLocal = new THREE.Vector3(0, HEAP.y, HEAP.cz)
+
 /** local geometry + wherever the cage currently stands = world position */
 function rebaseAnchors() {
     const o = REDIS_ORIGIN
     REDIS_ANCHOR.sky.set(6, 26, 2).add(o)
     REDIS_ANCHOR.keys.set(0, HEAP.y + 0.5, HEAP.cz + 0.4).add(o)
+    REDIS_ANCHOR.inline.copy(inlineLocal).add(o)
     REDIS_ANCHOR.dict.set(0, DICT.y, DICT.cz).add(o)
     REDIS_ANCHOR.loop.copy(LOOP).add(o)
     REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
@@ -207,6 +229,22 @@ export class RedisInstance {
     /** the used pages, in arena order — keys take one each for their allocation */
     private heapPages: number[] = []
     private keysMesh!: THREE.InstancedMesh
+    /**
+     * The page that is currently OPEN — a block turned into a see-through shell so
+     * the entry inside it can be seen.
+     *
+     * A page is a solid cube and its entry is an allocation inside it, so from any
+     * distance the entry is invisible: the block hides the very thing the read
+     * came for. When a route lands on a page the block becomes a glass box and the
+     * cube inside is suddenly the point of the shot. One page at a time, because
+     * two open pages is a diagram and not a crystal.
+     */
+    private pageGhost: THREE.Mesh | null = null
+    private ghostPage: number | null = null
+    /** the page the value-object cage lives inside, and the cage itself */
+    private showcasePage: number = 0
+    /** the top face of the value-object cage: where a read of it stands */
+    private inlineCageTop = new THREE.Vector3()
     /** the second (and for a zset, third) allocation of a converted value */
     private auxMesh!: THREE.InstancedMesh
     /** per-key deploy of a conversion, 0 → 1; the map holds only keys mid-flight */
@@ -221,6 +259,19 @@ export class RedisInstance {
     private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
     /** the volume of each big area, as built — the cage, the pick and the shot all use it */
     private bigAreas: Partial<Record<BigKind, THREE.Box3>> = {}
+    /**
+     * Each big value in a group of its own, so it can be CARRIED.
+     *
+     * The three dashed cages are the value's own structures, and a walk of one of
+     * them used to bounce back to the cage between every hop — a trip to a place
+     * the walk never returns to, because a node's "next" pointer is a field inside
+     * the node you are already holding. So the cage now travels WITH the packet for
+     * the length of the read (see rideBig): the thing that moves is the reader's
+     * working set, and the pages it lands on are the only addresses it touches.
+     */
+    private bigGroups: Partial<Record<BigKind, THREE.Group>> = {}
+    /** the `HASH · 1 KEY` label of each, hidden while the cage is carried */
+    private bigLabels: Partial<Record<BigKind, THREE.Object3D>> = {}
     /** base albedo per instance, so a flash can be undone */
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
@@ -847,6 +898,32 @@ export class RedisInstance {
         heap.userData.infoFor = (hit: THREE.Intersection) => this.heapPageInfo(hit)
         this.pickables.push(heap)
 
+        // The glass page. Same box as a page, a hair larger so it does not fight
+        // with the block it replaces, and invisible until something asks to look
+        // inside.
+        const ghostGeo = new THREE.BoxGeometry(HEAP_PAGE * 1.04, HEAP_PAGE * 1.04, HEAP_PAGE * 1.04)
+        const ghost = new THREE.Mesh(
+            ghostGeo,
+            new THREE.MeshStandardMaterial({
+                color: 0x0a2f38,
+                emissive: PALETTE.ice,
+                emissiveIntensity: 0.3,
+                transparent: true,
+                opacity: 0.14,
+                depthWrite: false,
+            }),
+        )
+        ghost.add(
+            new THREE.LineSegments(
+                new THREE.EdgesGeometry(ghostGeo),
+                new THREE.LineBasicMaterial({ color: PALETTE.ice, transparent: true, opacity: 0.5 }),
+            ),
+        )
+        ghost.visible = false
+        ghost.renderOrder = 2
+        this.group.add(ghost)
+        this.pageGhost = ghost
+
         /* ----------------------------- entries ---------------------------- */
         const kMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
@@ -857,10 +934,13 @@ export class RedisInstance {
         })
         const keys = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows)
         keys.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        this.group.add(keys)
+        // NOT added to the scene. An entry cube is 0.16 across and a page is 0.23,
+        // so a cube placed on its page pokes out of the block's faces: hundreds of
+        // little boxes intersecting the arena, which is exactly what "nothing
+        // should stick out of a heap block" rules out. The entries are positions
+        // and data now (bucket → page → what that page holds); the thing you SEE
+        // inside a page is the object cage, and only in the one page that is open.
         this.keysMesh = keys
-        keys.userData.infoFor = (hit: THREE.Intersection) => this.keyPick(hit)
-        this.pickables.push(keys)
 
         // The other allocation(s) of a converted value. Two slots per key, because
         // a zset converts into two structures at once and the drawing gives it two
@@ -868,22 +948,28 @@ export class RedisInstance {
         // order of magnitude, stacked on top of the entry they extend.
         const aux = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows * 2)
         aux.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        this.group.add(aux)
+        // unparented for the same reason as the entries above
         this.auxMesh = aux
-        // the converted structures answer for the key they belong to: two
-        // instances per key, so the instance id carries the key in its high bits
-        aux.userData.infoFor = (hit: THREE.Intersection) => {
-            if (hit.distance > BLOCK_PICK_RANGE || hit.instanceId === undefined) return null
-            return this.keyInfo(Math.floor(hit.instanceId / 2))
-        }
-        this.pickables.push(aux)
 
         i = 0
         for (let r = 0; r < KEYS.rows; r++) {
             for (let c = 0; c < KEYS.cols; c++) {
-                // The keyspace is a representational plane: each cube is one entry
-                // placed so it can be pointed at. It is not the heap volume below.
-                const home = new THREE.Vector3(keyX(c), KEYS.y, keyZ(r))
+                // The entry stands INSIDE the page it was allocated from.
+                //
+                // It used to float on a representational plane above the bucket
+                // array, which needed a dashed cage and a caption to explain that
+                // the plane was not really there. It is not: a dictEntry is one
+                // allocation, one allocation lives on one page, and the page is
+                // already drawn. Putting the cube inside its block costs nothing
+                // and removes a whole layer of apology from the drawing — what is
+                // left to do is open the block (see pageGhost) when a read lands
+                // on it.
+                const page = this.heapPages[i % this.heapPages.length]
+                const home = new THREE.Vector3(
+                    heapX(page % HEAP.cols),
+                    HEAP.y,
+                    heapZ(Math.floor(page / HEAP.cols)),
+                )
                 // about three quarters of the slots hold a key at boot
                 const live = Math.random() < 0.74
                 const kinds: KeyKind[] = ['string', 'string', 'string', 'hash', 'list', 'set', 'zset']
@@ -904,7 +990,7 @@ export class RedisInstance {
                             : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
-                    page: this.heapPages[i % this.heapPages.length],
+                    page,
                     row: r,
                     col: c,
                     home,
@@ -1007,36 +1093,18 @@ export class RedisInstance {
         this.pointerWeb = web
         this.rebuildPointerWeb()
 
-        const kW = KEYS.cols * PITCH
-        const kD = KEYS.rows * PITCH
-        // Same mechanism as the disk: one pick volume for the whole container.
-        // The key blocks answer per-instance only from up close (see keyPick),
-        // so from a distance you select the keyspace, not a lucky block.
+        // There is no cage or caption over the entry cubes any more.
         //
-        // DASHED, because the volume is ours: the entries are separate
-        // allocations scattered across the heap, and this plane is only where we
-        // put them so they can be pointed at. A solid cage is reserved for
-        // volumes that really exist — the process, the two files, the heap.
-        const keysFrame = this.frame(
-            new THREE.Vector3(0, KEYS.y, KEYS.cz),
-            new THREE.Vector3(kW, 0.9, kD),
-            PALETTE.cyan,
-            { dashed: true },
-        )
-        const keysPick = keysFrame.pick
-        const keysCage = keysFrame.cage
-        this.register(
-            keysPick,
-            {
-                title: 'Keyspace — the database itself, in RAM',
-                body: 'Every block here is one key with its value: strings, hashes, lists, sets, sorted sets. This is the whole database. When the process restarts, whatever was only here is gone — the AOF and the RDB on the floor below are the only things that survive. When maxmemory is reached, keys are evicted from this plane, and eviction is the only thing that ever shrinks it. Two things to be clear about, because the drawing is ours: this is the SAME structure as the bucket array below, not a second arena — the buckets are one array of pointers, and each cube here is the set of allocations a bucket points at: a 24-byte dictEntry holding the key pointer and the value pointer, the key\'s own sds string, the value\'s robj header, and then the bytes of the value itself. The value is not inside the bucket and not even inside the entry: both only point. A converted value adds more allocations, drawn stacked above its cube; a value too big for a cube is one of the dashed areas at the back of the cage. The lattice is only how we place them: in memory those allocations are scattered across whatever pages the allocator handed out, with no order at all. That is what the dashed cage says: the volume is a drawing, the blocks in it are real. The blocks are deliberately small: an entry is a few hundred bytes, while the smallest unit on the floor below is a 4 kB block — at true scale one bucket (8 B) would be a speck beside it.',
-                meta: `${KEYS.cols * KEYS.rows} slots · 3–4 allocations per key · position is representational`,
-            },
-            keysCage,
-        )
-        const keysLab = label('KEYS + VALUES')
-        keysLab.position.set(-kW / 2 - 0.4, KEYS.y + 0.95, KEYS.cz - kD / 2)
-        this.group.add(keysLab)
+        // The dashed volume used to say "this drawing is ours", and a card over it
+        // called it "the keyspace — the database itself, in RAM". Both were a claim
+        // the picture cannot support: redis has ONE keyspace, which is the bucket
+        // array below plus the pages its entries were allocated on. A second,
+        // labelled arena of key-value blocks reads as a second copy of the data.
+        // The cubes stay — they are where a route has to point, and each one has
+        // its own card — but nothing draws a volume around them any more. What is
+        // left to do, when the next pass gets it, is to stand them on the heap
+        // pages they were really allocated from, and then there is nothing left
+        // above the buckets but the buckets.
 
         /* --------------------------- AOF buffer --------------------------- */
         // Same treatment as wal_buffers next door: block-sized cubes of memory
@@ -1420,17 +1488,47 @@ export class RedisInstance {
      * where the header holds an address and the bytes are on another page.
      */
     private buildInlineObject() {
-        const centre = new THREE.Vector3(INLINE.x, INLINE.y, INLINE.z)
+        // The whole cage, one page big.
+        //
+        // This diagram is about 1.5 units across and a heap page is 0.23, so it is
+        // built inside a group at 1/12 scale and dropped into one page: at the
+        // scene's normal zoom it is a speck you can just make out, and when a story
+        // zooms into that block — which opens into a glass shell while a read is
+        // standing on it — it is what you find inside. Nothing is left floating in
+        // the cage, and nothing is drawn across a block's faces.
+        const page = this.heapPages[0] ?? 0
+        this.showcasePage = page
+        const at = new THREE.Vector3(
+            heapX(page % HEAP.cols),
+            HEAP.y,
+            heapZ(Math.floor(page / HEAP.cols)),
+        )
+        // the `inline value` view aims here, so it is a real page and not a pose
+        // with coordinates that used to mean something
+        inlineLocal.copy(at)
+        REDIS_ANCHOR.inline.copy(at).add(REDIS_ORIGIN)
+        // ABOVE the page, not inside it.
+        //
+        // It was built at 1/12 scale inside the block, which only worked while the
+        // block turned to glass on demand. With no glass, a cage inside an opaque cube
+        // is invisible: the object can be seen, or it can be inside the box, not both.
+        // It now stands on the page with a gap the size of the block itself, at a
+        // scale that reads from the `inline value` view's 0.9-unit standoff.
+        const cage = new THREE.Group()
+        cage.position.copy(at).add(new THREE.Vector3(0, HEAP_PAGE * 1.35, 0))
+        cage.scale.setScalar(0.33)
+        this.group.add(cage)
+
         const { pick } = this.frame(
-            centre,
-            new THREE.Vector3(INLINE.w, INLINE.h, INLINE.d),
+            at,
+            new THREE.Vector3(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
             PALETTE.ice,
-            { dashed: true, opacity: 0.2 },
+            { dashed: true, opacity: 0.18 },
         )
         this.register(pick, {
             title: 'Value object — 16 bytes, and sometimes the payload is inside',
             body: 'Every value in this cage is one of these: a fixed header holding the type, the encoding, an lru clock and a refcount — 16 bytes on a 64-bit build — plus a payload. What the encoding decides is where the payload lives. Integer and short-string values keep it in the same allocation: an `int`-encoded value stores the number itself in the header’s pointer field, an `embstr` (up to 44 bytes) is header and bytes in one malloc, and the shared integers 0–9999 are a single global object that every such key points at. Those reads stop here — the entry’s page is the whole story, which is why an ordinary GET of a small value touches no second allocation at all. The lower row is the other case: `raw` strings and converted collections hold an address, and the bytes are a separate allocation on another page. That is the hop the big-value stories draw.',
-            meta: 'robj · type + encoding + lru + refcount · int/embstr inline · raw/converted pointer',
+            meta: 'robj · type + encoding + lru + refcount · int/embstr inline · raw/converted pointer · drawn 1/12 inside one 4 kB page',
         })
 
         const headerMat = new THREE.MeshStandardMaterial({
@@ -1455,17 +1553,17 @@ export class RedisInstance {
         // in the other. The top row is one allocation (header and payload touching),
         // the bottom row is two, and the gap between its blocks is the hop.
         for (const [dy, inline] of [[0.24, true], [-0.26, false]] as const) {
-            const y = centre.y + dy
+            const y = dy
             const header = new THREE.Mesh(headerGeo, headerMat)
-            header.position.set(centre.x - 0.66, y, centre.z)
-            this.group.add(header)
-            const px = inline ? centre.x - 0.33 : centre.x + 0.42
+            header.position.set(-0.66, y, 0)
+            cage.add(header)
+            const px = inline ? -0.33 : 0.42
             const payload = new THREE.Mesh(payloadGeo, payloadMat)
-            payload.position.set(px, y, centre.z)
-            this.group.add(payload)
+            payload.position.set(px, y, 0)
+            cage.add(payload)
             if (!inline) {
                 // the gap is the second hop: the header holds an address, not bytes
-                const from = centre.x - 0.66 + headerGeo.parameters.width / 2
+                const from = -0.66 + headerGeo.parameters.width / 2
                 const to = px - payloadGeo.parameters.width / 2
                 const link = new THREE.Mesh(
                     new THREE.BoxGeometry(to - from, 0.015, 0.015),
@@ -1475,20 +1573,23 @@ export class RedisInstance {
                         opacity: 0.45,
                     }),
                 )
-                link.position.set((from + to) / 2, y, centre.z)
-                this.group.add(link)
+                link.position.set((from + to) / 2, y, 0)
+                cage.add(link)
             }
-            const tag = label(inline ? 'INLINE · 1 ALLOC' : 'POINTER · 2 ALLOC')
-            tag.position.set(centre.x + 1.05, y + 0.02, centre.z)
-            this.group.add(tag)
         }
+        // One label, outside the block and in world units, so it stays readable at
+        // any zoom: the two row tags that used to sit beside the blocks would have
+        // been 12× too small and 12× too close to the page they now live in.
         const title = label('VALUE · 16 B')
-        title.position.set(
-            centre.x - INLINE.w / 2,
-            centre.y + INLINE.h / 2 + 0.32,
-            centre.z,
-        )
+        title.position.set(at.x, at.y + HEAP_PAGE / 2 + 0.24, at.z)
         this.group.add(title)
+
+        // Where a read of this object lands: the top of the cage, in cage-local
+        // units. Measured off the built geometry rather than guessed, so a change to
+        // the blocks cannot leave the route standing inside them.
+        cage.updateWorldMatrix(true, true)
+        const span = new THREE.Box3().setFromObject(cage)
+        this.inlineCageTop.copy(this.group.worldToLocal(span.max.clone()))
     }
 
     /* ------------------------------ big values ------------------------------- */
@@ -1508,10 +1609,95 @@ export class RedisInstance {
      */
     private buildBigKeys() {
         for (const key of this.keys) if (key.big) this.bigKeys[key.big] = key
-        this.buildBigHash()
-        this.buildBigZset()
-        this.buildBigList()
+        // built where it lives, then re-parented into a group of its own: the
+        // builders place their pieces in cage coordinates, and `attach` keeps the
+        // world transform while making the group their parent, so nothing has to be
+        // re-derived by hand for the three of them
+        this.wrapBig('hash', () => this.buildBigHash())
+        this.wrapBig('zset', () => this.buildBigZset())
+        this.wrapBig('list', () => this.buildBigList())
+        // built, then put away: a carried structure is not an exhibit
+        for (const kind of ['hash', 'zset', 'list'] as const) this.rideBig(kind, null)
         this.buildHotHalos()
+    }
+
+    /** Run one big value's builder, then move what it made into its own group. */
+    private wrapBig(kind: BigKind, build: () => void) {
+        const before = new Set(this.group.children)
+        build()
+        const g = new THREE.Group()
+        g.position.copy(BIG_SPOT[kind])
+        this.group.add(g)
+        for (const child of [...this.group.children]) {
+            if (child === g || before.has(child)) continue
+            g.attach(child)
+        }
+        this.bigGroups[kind] = g
+    }
+
+    /**
+     * Carry a big value's cage with the read, or put it back.
+     *
+     * It becomes a child of the packet's MARKER, which is the whole mechanism: the
+     * packet is the object the camera rides and the scene moves, so parenting is what
+     * makes the cage follow through every leg and hand-off with no per-frame work;
+     * and because the marker is where the size lives, the cage shrinks exactly as the
+     * marker does as the camera goes in. Parented to the packet instead, the cage kept
+     * its own size while the marker shrank to a speck, and the "thing being carried"
+     * ended up larger than the thing carrying it.
+     *
+     * Two units across at full size — about five marker-widths — so the read visibly
+     * holds a structure, and the page it lands in still fits inside the frame.
+     */
+    rideBig(kind: BigKind, packet: THREE.Object3D | null) {
+        const g = this.bigGroups[kind]
+        if (!g) return
+        if (!packet) {
+            // Home is now HIDDEN, not a display.
+            //
+            // The three dashed cages used to stand at the back of the cage as
+            // exhibits you could walk up to, which meant the same structure was drawn
+            // twice: once on display and once in the read's hands. A big value is not
+            // an object that sits somewhere — it is what a read is holding while it
+            // walks — so the geometry exists only while it is being carried.
+            this.group.add(g)
+            g.position.copy(BIG_SPOT[kind])
+            g.scale.setScalar(1)
+            g.visible = false
+            const lab = this.bigLabels[kind]
+            if (lab) setLabelEnabled(lab as CSS2DObject, false)
+            return
+        }
+        g.visible = true
+        const host = (packet.userData.marker as THREE.Object3D | undefined) ?? packet
+        host.add(g)
+        // Through the LABEL system, not `visible`: updateLabelLOD recomputes every
+        // tag's visibility each frame from `labelEnabled` and its distance, so a
+        // plain `.visible = false` here is undone by the next frame and the label
+        // stays. `labelEnabled` is the flag that survives that pass.
+        const lab = this.bigLabels[kind]
+        if (lab) setLabelEnabled(lab as CSS2DObject, false)
+        const area = this.bigAreas[kind]
+        const size = area?.getSize(new THREE.Vector3())
+        const longest = size ? Math.max(size.x, size.y, size.z) : 2
+        const s = 2 / (longest || 1)
+        g.scale.setScalar(s)
+        // Padded clear of the marker, not centred on it.
+        //
+        // At the packet's own centre the cage's meshes and the marker occupy the same
+        // space, and the read looks like it is reading through its cargo. The cage is
+        // lifted so its bottom face sits a small gap above the marker, and shifted so
+        // its own centre is over the marker horizontally: the packet reads as being
+        // carried ON the structure rather than inside it.
+        //
+        // All of these numbers are in the marker's space, which is then scaled by the
+        // marker — so the gap and the cage shrink together as the camera goes in.
+        const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
+        const local = centre.sub(BIG_SPOT[kind])
+        const MARKER_HALF = HEAP_PAGE / 2
+        const GAP = 0.1
+        const lift = MARKER_HALF + GAP + (size ? (size.y / 2) * s : 0)
+        g.position.set(-local.x * s, lift - local.y * s, -local.z * s)
     }
 
     private bigMaterial(kind: BigKind): THREE.MeshStandardMaterial {
@@ -1582,6 +1768,7 @@ export class RedisInstance {
         const lab = label(`${kind.toUpperCase()} · 1 KEY`)
         lab.position.set(at.x - w / 2 - 0.45, at.y + cy + h / 2 + 0.3, at.z - d / 2 - 0.1)
         this.group.add(lab)
+        this.bigLabels[kind] = lab
     }
 
     /** A hashtable: the bucket array, and the chains hanging off it. */
@@ -1829,15 +2016,6 @@ export class RedisInstance {
                 meta: 'dump.rdb · state, not history · loaded on start',
             }
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
-    }
-
-    private keyPick(hit: THREE.Intersection) {
-        // same rule: a key is only selectable from close up, otherwise you are
-        // pointing at the keyspace as a whole
-        if (hit.distance > BLOCK_PICK_RANGE) return null
-        const i = this.instanceAt(hit, this.keys.length)
-        if (i === null) return null
-        return this.keyInfo(i)
     }
 
     /**
@@ -2260,19 +2438,99 @@ export class RedisInstance {
         return this.keys.find((k) => !k.live) ?? null
     }
 
+    /**
+     * Open the page a point is standing on, or close whatever is open.
+     *
+     * Called with the point the ride has stopped at: if that point is inside a
+     * used page, the block becomes a glass shell and the entry cube inside it is
+     * visible. Passing null closes it. One page at a time — the point of the shot
+     * is "look what is in THIS page", and ten open pages say nothing.
+     */
+    focusPageAt(at: THREE.Vector3 | null) {
+        const page = at ? this.pageAtPoint(at) : null
+        if (page === this.ghostPage) return
+        if (this.ghostPage !== null) this.closeGhost()
+        this.ghostPage = page
+        this.applyGhost()
+    }
+
+    /** Which used page a cage-local point falls inside, if any. */
+    private pageAtPoint(at: THREE.Vector3): number | null {
+        // A page is a block at one height, and a stop can sit a little above it: the
+        // object header, the value's own bucket array and a node beside it are all
+        // read standing on the same page, a few tenths up. Two pages of slack covers
+        // those and still refuses a big value's own cage, which used to sit units
+        // higher — and never appears here any more now that it is carried.
+        if (Math.abs(at.y - HEAP.y) > HEAP_PAGE * 2) return null
+        const c = Math.round(at.x / CELL + (HEAP.cols - 1) / 2)
+        const r = Math.round((at.z - HEAP.cz) / CELL + (HEAP.rows - 1) / 2)
+        if (c < 0 || c >= HEAP.cols || r < 0 || r >= HEAP.rows) return null
+        const page = r * HEAP.cols + c
+        return this.heapMask?.[page] === 1 ? page : null
+    }
+
+    /** Put the opened block's cube back. */
+    private closeGhost() {
+        const page = this.ghostPage
+        this.ghostPage = null
+        if (page === null) return
+        this.paintPage(page)
+        if (this.pageGhost) this.pageGhost.visible = false
+    }
+
+    /**
+     * Draw the open page: a glass box where the block was, and no block.
+     *
+     * The block is not made transparent in place — an InstancedMesh has one
+     * material, so per-instance opacity is not a thing. It is collapsed to nothing
+     * and a glass shell is drawn in its place, which looks the same and costs one
+     * extra mesh for the one page that is open.
+     */
+    private applyGhost() {
+        const page = this.ghostPage
+        if (page === null || !this.pageGhost) return
+        const col = page % HEAP.cols
+        const row = Math.floor(page / HEAP.cols)
+        const at = new THREE.Vector3(heapX(col), HEAP.y, heapZ(row))
+        this.pageGhost.position.copy(at)
+        this.pageGhost.visible = true
+        this.tmpObj.position.copy(at)
+        this.tmpObj.scale.setScalar(0.0001)
+        this.tmpObj.rotation.set(0, 0, 0)
+        this.tmpObj.updateMatrix()
+        this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
+        this.heapMesh.instanceMatrix.needsUpdate = true
+    }
+
+    /** One page back to the cube its mask says it should be. */
+    private paintPage(page: number) {
+        if (!this.heapMesh) return
+        const col = page % HEAP.cols
+        const row = Math.floor(page / HEAP.cols)
+        const used = this.heapMask?.[page] === 1
+        this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
+        this.tmpObj.scale.setScalar(used ? 1 : 0.001)
+        this.tmpObj.rotation.set(0, 0, 0)
+        this.tmpObj.updateMatrix()
+        this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
+        this.heapMesh.instanceMatrix.needsUpdate = true
+    }
+
     keyTop(key: RedisKey): THREE.Vector3 {
         if (key.big) {
             const at = BIG_SPOT[key.big]
             return new THREE.Vector3(at.x, at.y + 0.5, at.z)
         }
-        return key.home.clone().add(new THREE.Vector3(0, KEY.h / 2 + 0.04, 0))
+        // the entry IS the page: there is no second object to stand on, so the
+        // route's entry stop is the top face of the page that holds it
+        return this.keyPageTop(key).add(new THREE.Vector3(0, 0.001, 0))
     }
 
     /**
-     * The heap page this entry's bytes actually sit on. This is the far end of
-     * the pointer: a bucket points at a dictEntry, and the dictEntry (and the
-     * key and value it names) live on a page in the heap. The dashed key cube is
-     * the representation of the entry; this is where the memory is.
+     * The page this entry's bytes actually sit on — the block its cube now stands
+     * inside. This is the far end of the pointer: a bucket points at a dictEntry,
+     * and the dictEntry (with the key and the value it names) is an allocation on
+     * one of these pages.
      */
     keyPageTop(key: RedisKey): THREE.Vector3 {
         const row = Math.floor(key.page / HEAP.cols)
@@ -2281,29 +2539,63 @@ export class RedisInstance {
     }
 
     /**
-     * The value-object section beside the keyspace.
+     * The value object, standing on the one page that is drawn open.
      *
-     * A read of a compact value ends here: the bucket named an object, the object
-     * holds its payload, and the only page involved is the one the object was
-     * allocated on. The section is a projection — the object really sits on that
-     * page — but it is the only place in the drawing where the payload can be
-     * seen, so the route visits it before the page.
+     * It used to be a section of its own floating beside the bucket array, which
+     * needed a dashed cage and an explanation to say what it was doing there. It
+     * is not a section: a value object is an allocation, the allocation is on a
+     * page, and the page is already drawn. So the cage is built at 1/12 scale
+     * inside `showcasePage`, and the route's object stop is the top face of that
+     * page — nothing is drawn outside a heap block, and zooming in on the block
+     * shows what it holds.
      */
     inlinePoint(): THREE.Vector3 {
-        return new THREE.Vector3(INLINE.x, INLINE.y, INLINE.z)
+        const row = Math.floor(this.showcasePage / HEAP.cols)
+        const col = this.showcasePage % HEAP.cols
+        // The CENTRE of the page: the camera aims where the packet is, and the shot
+        // is about what the open block holds — a point hovering above the block put
+        // the cage just outside the bottom of the frame at this zoom. The marker is
+        // 1/zoom² down there, so it no longer covers anything.
+        return new THREE.Vector3(heapX(col), HEAP.y, heapZ(row))
     }
 
     /**
-     * A compact string key whose entry page sits on the left of the arena.
+     * The object the read lands on — the top of the value-object cage.
      *
-     * The inline story draws the hop from the object section down to a page, and
-     * the section is on the left of the cage, so the page is chosen to land in the
-     * same frame. Which key is used is our choice, not redis's: every compact key
-     * reads the same way.
+     * Not the page CENTRE, which is what this stop used to be. The cage is drawn
+     * above the page, because there is no glass shell to look through any more, so
+     * "the object header" is up there. A route sent to the centre of the block put
+     * the read inside a solid cube, with its own faces coplanar with the block's.
+     */
+    objectPoint(): THREE.Vector3 {
+        return this.inlineCageTop.clone()
+    }
+
+    /**
+     * The page that is drawn open, as a cage-local point.
+     *
+     * One page is always open so the object inside it can be seen without a story:
+     * the `inline value` view stands 0.9 units from this point, and a solid block
+     * there would be a shot of a cube. While a read is riding, the page under the
+     * packet takes over (see the sim's focusPageAt call).
+     */
+    showcasePoint(): THREE.Vector3 {
+        return this.inlinePoint()
+    }
+
+    /**
+     * A compact string key on the page that hosts the value-object cage.
+     *
+     * The inline story visits one page and one object, so the key it reads has to
+     * be the key allocated on the page where the cage was built — otherwise the
+     * caption says "one page, one object" over two different pages. Which key is
+     * used is our choice, not redis's: every compact key reads the same way.
      */
     compactKeyLeft(): RedisKey | null {
         const live = this.keys.filter((k) => k.live && !k.aux && !k.big && k.kind === 'string')
         if (live.length === 0) return null
+        const host = live.find((k) => k.page === this.showcasePage)
+        if (host) return host
         return live.reduce((a, b) => ((b.page % HEAP.cols) > (a.page % HEAP.cols) ? a : b))
     }
 
@@ -2318,12 +2610,19 @@ export class RedisInstance {
      */
     valuePoint(key: RedisKey): THREE.Vector3 {
         if (key.big) {
-            const at = BIG_SPOT[key.big]
-            return new THREE.Vector3(at.x, at.y + 0.22, at.z)
+            // The structure is CARRIED by the read, so the stop that means "this is
+            // the value's structure" is the page where it is picked up — the entry's
+            // page, just above the object header that points at it. It used to be
+            // BIG_SPOT, which is where the cage is DRAWN while idle: the journey flew
+            // to the back of the cage to visit a place the ride had just taken the
+            // structure away from, and then flew back.
+            return this.keyPageTop(key).add(new THREE.Vector3(0, 0.14, 0))
         }
         if (key.aux) {
-            // same placement rule as paintAuxKey(): first block above the entry
-            return key.home.clone().add(new THREE.Vector3(0, KEY.h + 0.02, 0))
+            // the converted structure is a second allocation, but it is drawn on
+            // the same open page rather than floating above the entry: nothing may
+            // stick out of a heap block
+            return this.keyPageTop(key).add(new THREE.Vector3(0, 0.045, 0))
         }
         return this.keyTop(key)
     }
@@ -2341,24 +2640,10 @@ export class RedisInstance {
             // one block above the entry: the walk is inside that single allocation
             return this.valuePoint(key).add(new THREE.Vector3(0, 0.05 * (n + 1), 0))
         }
-        const at = BIG_SPOT[key.big]
-        if (key.big === 'zset') {
-            // along the tower, a level per hop: the drawn heights are 5,1,2,1,4…
-            const x = ((n % 5) - 2) * 0.9
-            const y = Math.min(4, n + 1) * 0.32
-            return new THREE.Vector3(at.x + x, at.y + y, at.z)
-        }
-        if (key.big === 'list') {
-            // along the quicklist chain, stepping over the drawn gap
-            const x = n >= 2 ? n * 1.1 - 1.0 : n * 1.1 - 2.0
-            return new THREE.Vector3(at.x + x, at.y, at.z)
-        }
-        // a hashtable: along the bucket array, then up a chain
-        return new THREE.Vector3(
-            at.x + ((n % 5) - 2) * 0.72,
-            at.y + (n % 2) * 0.26,
-            at.z + 0.26,
-        )
+        // A node of a carried structure is not an address in the cage any more: it is
+        // the entry page, where the read picked the structure up and where the node
+        // beside it is what gets read.
+        return this.keyPageTop(key).add(new THREE.Vector3(0, 0.18 + 0.04 * n, -0.06))
     }
 
     /**
@@ -2373,10 +2658,9 @@ export class RedisInstance {
         if (key.kind !== 'hash' && key.kind !== 'zset') return null
         if (!key.aux && !key.big) return null
         if (!key.big) return this.valuePoint(key)
-        const at = BIG_SPOT[key.big]
-        return key.big === 'zset'
-            ? new THREE.Vector3(at.x, at.y - 0.45, at.z + 0.95)
-            : new THREE.Vector3(at.x, at.y + 0.05, at.z + 0.3)
+        // the value's own bucket array is part of the structure the read is holding,
+        // so it is a point beside the entry page — not a place at the back of the cage
+        return this.keyPageTop(key).add(new THREE.Vector3(0.1, 0.24, 0.06))
     }
 
     /**
@@ -2388,8 +2672,14 @@ export class RedisInstance {
      * draws the same path twice.
      */
     hopPoint(key: RedisKey, n: number): THREE.Vector3 {
-        const pageCount = HEAP.cols * HEAP.rows
-        const page = (((key.page + 97 * (n + 1)) % pageCount) + pageCount) % pageCount
+        // A walk lands on USED pages. The arithmetic below picks a page 97 slots
+        // apart, which spread the hops out nicely and then landed them on whatever
+        // the mask had there — free pages, most of the time, so the block never
+        // opened and the story froze on a page that does not exist. Indexing the
+        // used pages instead keeps the spread AND makes every hop a page in use,
+        // which is also the only thing that can be true: a node was allocated.
+        const used = this.heapPages.length > 0 ? this.heapPages : [0]
+        const page = used[(((key.page + 97 * (n + 1)) % used.length) + used.length) % used.length]
         const row = Math.floor(page / HEAP.cols)
         const col = page % HEAP.cols
         return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
@@ -2809,6 +3099,10 @@ export class RedisInstance {
         }
         this.heapMesh.instanceMatrix.needsUpdate = true
         if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
+        // a repaint puts every block back, including the one that was open — so the
+        // open page is re-hidden here, or the entry it is meant to show disappears
+        // the next time the arena is painted
+        this.applyGhost()
     }
 
     /**

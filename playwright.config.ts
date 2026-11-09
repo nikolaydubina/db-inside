@@ -14,8 +14,17 @@ export default defineConfig({
     // 0.4× on purpose, so the budget is generous and every wait is bounded below
     timeout: 120_000,
     expect: { timeout: 20_000 },
-    fullyParallel: false,
-    workers: 1,
+    // One tab per story, in parallel.
+    //
+    // Each test drives its own page against the shared dev server, so the four
+    // stories have nothing to say to each other and can run at once. The catch is
+    // the GPU: every tab boots the whole scene (two cages, thousands of instanced
+    // meshes), and the freeze is frame-driven, so a starved tab walks its route
+    // slower in wall-clock terms. Two workers halves the wall time with the frame
+    // rate intact; four is the fastest the four stories can go and is what a dev
+    // machine with a real GPU should use. Drop to 2 on anything slower.
+    fullyParallel: true,
+    workers: 4,
     retries: 0,
     reporter: [['list']],
     use: {
