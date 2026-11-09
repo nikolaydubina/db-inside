@@ -12,8 +12,8 @@
     "preview": "vite preview",
     "test": "playwright test",
     "deploy": "wrangler deploy",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format": "prettier --write \"src/**/*.{ts,css}\" \"tests/**/*.ts\" \"*.ts\" index.html",
+    "format:check": "prettier --check \"src/**/*.{ts,css}\" \"tests/**/*.ts\" \"*.ts\" index.html"
   },
   "dependencies": {
     "three": "^0.187.0"
