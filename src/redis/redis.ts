@@ -6,6 +6,10 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import type { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { BACKEND_ORIGIN, BACKEND_SLOTS, BLOCK_PICK_RANGE, PALETTE } from '../postgresql/instance'
 import type { Info } from '../postgresql/instance'
+import { BigValues, BIG_SPOT } from './values'
+import type { BigKind } from './values'
+export { BIG_SPOT }
+export type { BigKind }
 import {
     BLOCK_LIFT,
     FLOOR_Y,
@@ -42,7 +46,6 @@ export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
  * back of the cage, its own dashed cage, and a drawing that is a SLICE: the
  * shape is the real structure, the count is not.
  */
-export type BigKind = 'hash' | 'zset' | 'list'
 /**
  * The value object's companion cage: air on every face, and how wide it is carried.
  *
@@ -54,12 +57,6 @@ export type BigKind = 'hash' | 'zset' | 'list'
  */
 const OBJECT_PAD = 0.06
 const OBJECT_ACROSS = 1.0
-
-export const BIG_SPOT: Record<BigKind, THREE.Vector3> = {
-    hash: new THREE.Vector3(-8.6, 3.4, -6.2),
-    zset: new THREE.Vector3(0, 3.4, -6.2),
-    list: new THREE.Vector3(8.6, 3.4, -6.2),
-}
 /** What each big value really is, for its card. */
 export const BIG_REAL: Record<BigKind, { entries: number; mb: number; unit: string }> = {
     hash: { entries: 5_300_000, mb: 412, unit: 'fields' },
@@ -269,42 +266,16 @@ export class RedisInstance {
     private auxAnim = new Map<number, number>()
     /** the few keys the traffic actually goes to */
     private hotKeys: RedisKey[] = []
-    private hotHalos: THREE.Sprite[] = []
-    /** one material per big value, so a touch can light the whole structure */
-    private bigMats: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
-    /** the trail behind the read's cursor, and the cursor itself */
-    private bigWarm: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
-    private bigHot: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
-    /**
-     * The cells of each structure, grouped into the STEPS a read takes through it.
-     *
-     * One step is one thing the algorithm touches: a bucket and its chain, one
-     * quicklist node and the elements inside it, one skiplist node and the tower it
-     * was promoted to. The read moves one step per hop, so the animation is not
-     * decoration — it is the walk, drawn inside the thing being walked.
-     */
-    private bigSteps: Partial<Record<BigKind, THREE.Mesh[][]>> = {}
-    /** which step the carried read is on; -1 when nothing is being read */
-    private bigStep: Record<BigKind, number> = { hash: -1, zset: -1, list: -1 }
-    private bigPulse: Record<BigKind, number> = { hash: 0, zset: 0, list: 0 }
     /** the keys drawn as their own areas, by kind */
     private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
-    /** the volume of each big area, as built — the cage, the pick and the shot all use it */
-    private bigAreas: Partial<Record<BigKind, THREE.Box3>> = {}
     /**
-     * Each big value in a group of its own, so it can be CARRIED.
+     * The three large values, and the mechanism that carries them.
      *
-     * The three dashed cages are the value's own structures, and a walk of one of
-     * them used to bounce back to the cage between every hop — a trip to a place
-     * the walk never returns to, because a node's "next" pointer is a field inside
-     * the node you are already holding. So the cage now travels WITH the packet for
-     * the length of the read (see rideBig): the thing that moves is the reader's
-     * working set, and the pages it lands on are the only addresses it touches.
+     * Not a builder and not a diagram: a big value is what a read is HOLDING while it
+     * walks, so the structures, the dashed cages, the cursor and the halos live in their
+     * own module and this instance only builds them and passes the calls on.
      */
-    private bigGroups: Partial<Record<BigKind, THREE.Group>> = {}
-    /** the `HASH · 1 KEY` label of each, hidden while the cage is carried */
-    private bigLabels: Partial<Record<BigKind, THREE.Object3D>> = {}
-    /** base albedo per instance, so a flash can be undone */
+    private readonly values: BigValues
     /** decaying pulse per disk instance — the one marker for "this block was touched" */
     private diskBoost = new Map<number, { v: number; hex: number }>()
 
@@ -434,6 +405,21 @@ export class RedisInstance {
     rewrites = 0
 
     constructor(private ticker: Ticker) {
+        // The big values are a collaborator, not a corner of this class.
+        //
+        // They need five things from the instance and nothing else: somewhere to put
+        // geometry, the one way this scene frames a volume, the one way it registers a
+        // pick, a key's card, and the keys themselves. Everything they own — the
+        // structures, the dashed cages, the cursor, the halos — is theirs.
+        this.values = new BigValues({
+            group: this.group,
+            frame: (centre, size, colour, opts) => this.frame(centre, size, colour, opts),
+            addPick: (pick) => {
+                this.pickables.push(pick)
+            },
+            keyInfo: (i) => this.keyInfo(i),
+            bigKeys: this.bigKeys,
+        })
         this.group.position.copy(REDIS_ORIGIN)
         this.buildShell()
         this.buildDisk()
@@ -443,7 +429,7 @@ export class RedisInstance {
         this.buildPipeline()
         this.buildInlineObject()
         this.buildReadiness()
-        this.buildBigKeys()
+        this.values.build(this.keys, this.hotKeys)
         this.buildAgents()
 
         // the base file is whatever the keyspace encodes to: its length comes
@@ -465,6 +451,43 @@ export class RedisInstance {
         if (outline) obj.userData.outline = outline
         this.pickables.push(obj)
         return obj
+    }
+
+    /**
+     * One volume, and everything that has to agree about it.
+     *
+     * A framed thing in this scene has three descriptions of the same volume: the dashed
+     * cage you see, the invisible box you pick, and the box the camera frames. Typed out
+     * twice they drift — a pick 0.8 tall inside a cage 0.9 tall makes the hover
+     * highlight sit inside its own outline instead of on it.
+     *
+     * So they are not typed out twice. The cage and the pick are built from the same
+     * `size`, both are placed at the same `centre`, and the pick is handed that box AND
+     * the cage itself: hovering or focusing draws the cage, never a second box derived
+     * from a different number.
+     */
+    private frame(
+        centre: THREE.Vector3,
+        size: THREE.Vector3,
+        colour: number,
+        opts: { dashed?: boolean; opacity?: number } = {},
+    ): { cage: OutlineBox; pick: THREE.Mesh; box: THREE.Box3 } {
+        const cage = new OutlineBox(size.x, size.y, size.z, colour, opts.opacity ?? 0.26, {
+            dashed: opts.dashed,
+        }).centre(centre.x, centre.y, centre.z)
+        this.group.add(cage)
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(size.x, size.y, size.z),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.copy(centre)
+        this.group.add(pick)
+        // the highlight IS the cage
+        pick.userData.outline = cage
+        // and this is one of the volumes where the pick and the cage are the same box by
+        // construction, which is what assertFrames() holds us to
+        pick.userData.framed = true
+        return { cage, pick, box: new THREE.Box3().setFromCenterAndSize(centre, size) }
     }
 
     /**
@@ -1683,456 +1706,6 @@ export class RedisInstance {
         return area.translate(row.position)
     }
 
-    /* ------------------------------ big values ------------------------------- */
-    /**
-     * The three large values.
-     *
-     * A plane of small cubes can say "there are many keys" and "this one is
-     * bigger", but it cannot say what a 5-million-field hash IS — and that shape
-     * is the whole answer to "so this is what my big list looks like?". So each
-     * big value is drawn as its own structure, in its own dashed cage at the back
-     * of the cage: a bucket array with chains, a skiplist with the dict beside it,
-     * a chain of quicklist nodes.
-     *
-     * What is drawn is a SLICE. The shapes are the real ones; the counts are not,
-     * and every card says the real number so the drawing can never be mistaken
-     * for the size.
-     */
-    private buildBigKeys() {
-        for (const key of this.keys) if (key.big) this.bigKeys[key.big] = key
-        // built where it lives, then re-parented into a group of its own: the
-        // builders place their pieces in cage coordinates, and `attach` keeps the
-        // world transform while making the group their parent, so nothing has to be
-        // re-derived by hand for the three of them
-        this.wrapBig('hash', () => this.buildBigHash())
-        this.wrapBig('zset', () => this.buildBigZset())
-        this.wrapBig('list', () => this.buildBigList())
-        // the cells are drawn; the two extra brightnesses they can be lit with come
-        // after, from the base material each builder just made
-        this.buildBigTiers()
-        // built, then put away: a carried structure is not an exhibit
-        for (const kind of ['hash', 'zset', 'list'] as const) this.rideBig(kind, null)
-        this.buildHotHalos()
-    }
-
-    /** Run one big value's builder, then move what it made into its own group. */
-    private wrapBig(kind: BigKind, build: () => void) {
-        const before = new Set(this.group.children)
-        build()
-        const g = new THREE.Group()
-        g.position.copy(BIG_SPOT[kind])
-        this.group.add(g)
-        for (const child of [...this.group.children]) {
-            if (child === g || before.has(child)) continue
-            g.attach(child)
-        }
-        this.bigGroups[kind] = g
-    }
-
-    /**
-     * Carry a big value's cage with the read, or put it back.
-     *
-     * It becomes a child of the packet's MARKER, which is the whole mechanism: the
-     * packet is the object the camera rides and the scene moves, so parenting is what
-     * makes the cage follow through every leg and hand-off with no per-frame work;
-     * and because the marker is where the size lives, the cage shrinks exactly as the
-     * marker does as the camera goes in. Parented to the packet instead, the cage kept
-     * its own size while the marker shrank to a speck, and the "thing being carried"
-     * ended up larger than the thing carrying it.
-     *
-     * Two units across at full size — about five marker-widths — so the read visibly
-     * holds a structure, and the page it lands in still fits inside the frame.
-     */
-    rideBig(kind: BigKind, packet: THREE.Object3D | null) {
-        const g = this.bigGroups[kind]
-        if (!g) return
-        if (!packet) {
-            // Home is now HIDDEN, not a display.
-            //
-            // The three dashed cages used to stand at the back of the cage as
-            // exhibits you could walk up to, which meant the same structure was drawn
-            // twice: once on display and once in the read's hands. A big value is not
-            // an object that sits somewhere — it is what a read is holding while it
-            // walks — so the geometry exists only while it is being carried.
-            this.group.add(g)
-            g.position.copy(BIG_SPOT[kind])
-            g.scale.setScalar(1)
-            g.visible = false
-            // and the cursor is put back to rest with it: a lit trail on a structure
-            // nobody is reading describes a walk that has already finished
-            this.setBigStep(kind, -1)
-            const lab = this.bigLabels[kind]
-            if (lab) setLabelEnabled(lab as CSS2DObject, false)
-            return
-        }
-        g.visible = true
-        // Through the LABEL system, not `visible`: updateLabelLOD recomputes every
-        // tag's visibility each frame from `labelEnabled` and its distance, so a
-        // plain `.visible = false` here is undone by the next frame and the label
-        // stays. `labelEnabled` is the flag that survives that pass.
-        const lab = this.bigLabels[kind]
-        if (lab) setLabelEnabled(lab as CSS2DObject, false)
-        const area = this.bigAreas[kind]
-        const size = area?.getSize(new THREE.Vector3()) ?? null
-        // the box is in cage coordinates; the group stands at BIG_SPOT, so what
-        // matters for placement is the box centre relative to that
-        const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
-        centre.sub(BIG_SPOT[kind])
-        const longest = size ? Math.max(size.x, size.y, size.z) : 2
-        this.carry(g, size, centre, packet, 2 / (longest || 1))
-    }
-
-    /**
-     * Put a structure in the read's hands: sized, and lifted clear of the packet.
-     *
-     * Shared by every structure a read can pick up — a hash's bucket array, a
-     * skiplist, a quicklist, and the value object itself — because "the read is
-     * holding something" has to look the same in all of them. Parenting to the
-     * MARKER is the whole mechanism: the packet is the object the camera rides and
-     * the scene moves, so a child follows through every leg and hand-off with no
-     * per-frame work, and because the marker is where the size lives, the structure
-     * shrinks exactly as the marker does as the camera goes in.
-     *
-     * Two units across at full size — about five marker-widths — so the read visibly
-     * holds a structure and the page it lands in still fits inside the frame. All of
-     * these numbers are in the marker's space, which is then scaled by the marker.
-     */
-    private carry(
-        g: THREE.Object3D,
-        size: THREE.Vector3 | null,
-        centre: THREE.Vector3,
-        packet: THREE.Object3D,
-        scale: number,
-    ) {
-        const host = (packet.userData.marker as THREE.Object3D | undefined) ?? packet
-        host.add(g)
-        g.scale.setScalar(scale)
-        // Padded clear of the marker, not centred on it.
-        //
-        // At the packet's own centre the structure's meshes and the marker occupy the
-        // same space, and the read looks like it is reading through its cargo. The
-        // structure is lifted so its bottom face sits a small gap above the marker,
-        // and shifted so its own centre is over the marker horizontally: the packet
-        // reads as being carried ON the structure rather than inside it.
-        const local = centre
-        const MARKER_HALF = HEAP_PAGE / 2
-        const GAP = 0.1
-        const lift = MARKER_HALF + GAP + (size ? (size.y / 2) * scale : 0)
-        g.position.set(-local.x * scale, lift - local.y * scale, -local.z * scale)
-    }
-
-    private bigMaterial(kind: BigKind): THREE.MeshStandardMaterial {
-        const mat = new THREE.MeshStandardMaterial({
-            color: 0x0d0a16,
-            emissive: KIND_COLOR[kind],
-            emissiveIntensity: 0.42,
-            roughness: 0.4,
-            metalness: 0.35,
-        })
-        this.bigMats[kind] = mat
-        return mat
-    }
-
-    /**
-     * The three brightnesses a cell of a carried structure can be in.
-     *
-     * rest — not touched by this read: the structure's own slow breathing.
-     * warm — the read has been here and moved on: it stays lit, so the cells behind
-     *        the cursor are the algorithm's history, not a hint.
-     * hot  — the cell the read is ON right now.
-     *
-     * Three materials per kind rather than one per cell. A cell's brightness is one
-     * of three values and swapping materials is free, while ~110 private materials
-     * with their own uniforms updated every frame is real cost on the one thread
-     * this whole drawing is trying to say something about.
-     */
-    private buildBigTiers() {
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
-            const base = this.bigMats[kind]
-            if (!base) continue
-            const warm = base.clone()
-            warm.emissiveIntensity = 0.95
-            const hot = base.clone()
-            hot.emissiveIntensity = 2.4
-            this.bigWarm[kind] = warm
-            this.bigHot[kind] = hot
-        }
-    }
-
-    /**
-     * Move the read's cursor through the structure it is holding.
-     *
-     * `n` is the hop the walk just landed on and `of` the last hop of that walk, so
-     * the cursor is SPREAD over the drawn cells: a range scan of a nine-bucket array
-     * drawn as nine columns reaches the last column on its last hop instead of
-     * crawling through the first three. Called with no `of`, the read landed on a
-     * single bucket — a field lookup — and the cursor goes to one column of its own,
-     * derived from the key so it lands on the same bucket twice in a row and does not
-     * flicker between reads that are meant to be identical.
-     *
-     * A negative `n` puts the structure back to rest: the cage is being put away, or
-     * the ride is over, and a lit trail left behind would describe a read that has
-     * already finished.
-     */
-    setBigStep(kind: BigKind, n: number, of?: number) {
-        const steps = this.bigSteps[kind]
-        if (!steps || steps.length === 0) return
-        const rest = this.bigMats[kind]
-        if (n < 0) {
-            this.bigStep[kind] = -1
-            for (const cells of steps) for (const cell of cells) if (rest) cell.material = rest
-            return
-        }
-        const col = this.bigBucketFor(kind, steps.length)
-        const at =
-            of === undefined
-                ? col
-                : Math.min(steps.length - 1, Math.floor((n * steps.length) / (of + 1)))
-        this.bigStep[kind] = at
-        const warm = this.bigWarm[kind]
-        const hot = this.bigHot[kind]
-        steps.forEach((cells, i) => {
-            const mat = i < at ? warm : i === at ? hot : rest
-            if (!mat) return
-            for (const cell of cells) cell.material = mat
-        })
-    }
-
-    /** Which bucket a fixed key hashes to, stable across reads of it. */
-    private bigBucketFor(kind: BigKind, buckets: number): number {
-        const i = this.bigKeys[kind]?.i ?? 0
-        return Math.abs((i * 2654435761) % buckets)
-    }
-
-    /**
-     * Where the read's cursor is inside a carried structure, as numbers.
-     *
-     * The animation is a claim about the algorithm — this many buckets scanned,
-     * this many nodes read — so it is readable the same way the phase and the gap
-     * are: from outside, without looking at the picture.
-     */
-    bigStepOf(kind: BigKind): { step: number; steps: number } {
-        return { step: this.bigStep[kind], steps: this.bigSteps[kind]?.length ?? 0 }
-    }
-
-    /**
-     * One volume, and everything that has to agree about it.
-     *
-     * A framed thing in this scene has three descriptions of the same volume: the
-     * dashed cage you see, the invisible box you pick, and the box the camera
-     * frames. Typed out twice they drift — a pick 0.8 tall inside a cage 0.9 tall
-     * makes the hover highlight sit inside its own outline instead of on it.
-     *
-     * So they are not typed out twice. The cage and the pick are built from the
-     * same `size`, both are placed at the same `centre`, and the pick is handed
-     * that box AND the cage itself: hovering or focusing draws the cage, never a
-     * second box derived from a different number.
-     */
-    private frame(
-        centre: THREE.Vector3,
-        size: THREE.Vector3,
-        colour: number,
-        opts: { dashed?: boolean; opacity?: number } = {},
-    ): { cage: OutlineBox; pick: THREE.Mesh; box: THREE.Box3 } {
-        const cage = new OutlineBox(size.x, size.y, size.z, colour, opts.opacity ?? 0.26, {
-            dashed: opts.dashed,
-        }).centre(centre.x, centre.y, centre.z)
-        this.group.add(cage)
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(size.x, size.y, size.z),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.copy(centre)
-        this.group.add(pick)
-        // the highlight IS the cage
-        pick.userData.outline = cage
-        // and this is one of the volumes where the pick and the cage are the same
-        // box by construction, which is what assertFrames() holds us to
-        pick.userData.framed = true
-        return { cage, pick, box: new THREE.Box3().setFromCenterAndSize(centre, size) }
-    }
-
-    /** The dashed cage, the pick box and the label for one big value. */
-    private bigFrame(kind: BigKind, w: number, h: number, d: number, cy: number) {
-        const at = BIG_SPOT[kind]
-        const centre = new THREE.Vector3(at.x, at.y + cy, at.z)
-        const size = new THREE.Vector3(w, h, d)
-        const { pick, box } = this.frame(centre, size, KIND_COLOR[kind], {
-            dashed: true,
-            opacity: 0.2,
-        })
-        // the camera frames exactly this volume, and the card reports it
-        this.bigAreas[kind] = box
-        const key = this.bigKeys[kind]
-        if (key) {
-            pick.userData.infoFor = () => this.keyInfo(key.i)
-            this.pickables.push(pick)
-        }
-        const lab = label(`${kind.toUpperCase()} · 1 KEY`)
-        lab.position.set(at.x - w / 2 - 0.45, at.y + cy + h / 2 + 0.3, at.z - d / 2 - 0.1)
-        this.group.add(lab)
-        this.bigLabels[kind] = lab
-    }
-
-    /** A hashtable: the bucket array, and the chains hanging off it. */
-    private buildBigHash() {
-        const at = BIG_SPOT.hash
-        const mat = this.bigMaterial('hash')
-        const cols = 9
-        const rows = 3
-        const pitch = 0.36
-        // One STEP per column: the three rows are the same bucket slot drawn with
-        // depth, and the chain hangs off the back of it. A read that hashes a field
-        // lands on one column and follows its chain; a range scan walks the columns
-        // left to right. Both are the same step — "this bucket and everything in it".
-        const steps: THREE.Mesh[][] = Array.from({ length: cols }, () => [])
-        const bucketGeo = new RoundedBoxGeometry(0.24, 0.07, 0.24, 1, 0.01)
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                const tile = new THREE.Mesh(bucketGeo, mat)
-                tile.position.set(
-                    at.x + (c - (cols - 1) / 2) * pitch,
-                    at.y,
-                    at.z + (r - (rows - 1) / 2) * pitch,
-                )
-                this.group.add(tile)
-                steps[c].push(tile)
-            }
-        }
-        // one entry per bucket, two in a few, none in others — the chains are the
-        // reason the array stays small while the value grows
-        const eGeo = new RoundedBoxGeometry(0.15, 0.15, 0.15, 1, 0.01)
-        for (let c = 0; c < cols; c++) {
-            const links = c % 4 === 1 ? 2 : c % 5 === 2 ? 0 : 1
-            for (let k = 0; k < links; k++) {
-                const e = new THREE.Mesh(eGeo, mat)
-                e.position.set(
-                    at.x + (c - (cols - 1) / 2) * pitch,
-                    at.y + 0.28 + k * 0.17,
-                    at.z + ((rows - 1) / 2) * pitch + 0.26,
-                )
-                this.group.add(e)
-                steps[c].push(e)
-            }
-        }
-        this.bigSteps.hash = steps
-        this.bigFrame('hash', cols * pitch + 0.5, 1.6, rows * pitch + 1.2, 0.34)
-    }
-
-    /** A sorted set: a skiplist tower, and the dict beside it. */
-    private buildBigZset() {
-        const at = BIG_SPOT.zset
-        const mat = this.bigMaterial('zset')
-        const pitch = 0.42
-        // Heights per column, as a skiplist really builds them: every node is at
-        // the bottom level, and each one is promoted a few levels with probability
-        // 1/4. The result is what makes the picture mean something — a link two
-        // levels up skips over whole runs of the list, which is the entire idea.
-        const heights = [5, 1, 2, 1, 4, 1, 3, 1, 2, 1, 5]
-        const cols = heights.length
-        const levels = 5
-        // One STEP per column: the node, its tower, and the links that arrive at it.
-        // A skiplist scan is exactly that — step right along a level, and the tower
-        // is what the node you stepped onto was promoted to.
-        const steps: THREE.Mesh[][] = Array.from({ length: cols }, () => [])
-        const nodeGeo = new RoundedBoxGeometry(0.17, 0.17, 0.17, 1, 0.01)
-        for (let lv = 0; lv < levels; lv++) {
-            const y = at.y + lv * 0.32
-            let prev = NaN
-            for (let c = 0; c < cols; c++) {
-                if (heights[c] <= lv) continue
-                const x = at.x + (c - (cols - 1) / 2) * pitch
-                const node = new THREE.Mesh(nodeGeo, mat)
-                node.position.set(x, y, at.z)
-                this.group.add(node)
-                steps[c].push(node)
-                if (!Number.isNaN(prev) && x - prev > 0.1) {
-                    const link = new THREE.Mesh(new THREE.BoxGeometry(x - prev - 0.14, 0.02, 0.02), mat)
-                    link.position.set((prev + x) / 2, y, at.z)
-                    this.group.add(link)
-                    // the link belongs to the column it ARRIVES at: the trail then
-                    // shows the ground already covered, not the ground ahead
-                    steps[c].push(link)
-                }
-                prev = x
-            }
-        }
-        this.bigSteps.zset = steps
-        // the other half of the value: a dict for "score of this member"
-        const dictGeo = new RoundedBoxGeometry(0.2, 0.06, 0.2, 1, 0.01)
-        for (let c = 0; c < 6; c++) {
-            const tile = new THREE.Mesh(dictGeo, mat)
-            tile.position.set(at.x - 0.75 + c * 0.3, at.y - 0.55, at.z + 0.95)
-            this.group.add(tile)
-        }
-        this.bigFrame('zset', 5.0, 2.7, 2.5, 0.5)
-    }
-
-    /** A long list: a chain of quicklist nodes, each a small listpack. */
-    private buildBigList() {
-        const at = BIG_SPOT.list
-        const mat = this.bigMaterial('list')
-        const nodes = 5
-        // One STEP per node: the node, the elements packed inside it, and the link
-        // that got us here. Stepping a quicklist is reading one node's listpack and
-        // following its "next" pointer, so the cursor is one node wide.
-        const steps: THREE.Mesh[][] = Array.from({ length: nodes }, () => [])
-        const nodeGeo = new RoundedBoxGeometry(0.72, 0.22, 0.34, 1, 0.02)
-        const sliceGeo = new THREE.BoxGeometry(0.19, 0.23, 0.35)
-        let x = at.x - 2.3
-        for (let n = 0; n < nodes; n++) {
-            const node = new THREE.Mesh(nodeGeo, mat)
-            node.position.set(x, at.y, at.z)
-            this.group.add(node)
-            steps[n].push(node)
-            // the listpack inside the node, drawn as the pack of elements it is
-            for (let k = -1; k <= 1; k++) {
-                const slice = new THREE.Mesh(sliceGeo, mat)
-                slice.position.set(x + k * 0.21, at.y, at.z)
-                this.group.add(slice)
-                steps[n].push(slice)
-            }
-            if (n < nodes - 1) {
-                // the third gap is drawn long: that is where the drawing stops and
-                // the real chain runs on for tens of thousands more nodes
-                const skip = n === 2 ? 1.5 : 0
-                const link = new THREE.Mesh(new THREE.BoxGeometry(0.34 + skip, 0.03, 0.03), mat)
-                link.position.set(x + 0.53 + skip / 2, at.y, at.z)
-                this.group.add(link)
-                // arriving at the NEXT node, like the skiplist's links
-                steps[n + 1].push(link)
-                x += 1.02 + skip
-            }
-        }
-        this.bigSteps.list = steps
-        this.bigFrame('list', 7.4, 1.4, 1.9, 0.1)
-    }
-
-    /**
-     * Hot keys. Nothing about them is special in memory — that IS the point:
-     * a 200-byte string can carry most of the traffic in a keyspace of millions,
-     * and every request for it goes through the same one thread.
-     */
-    private buildHotHalos() {
-        for (const [i, key] of this.hotKeys.entries()) {
-            const sprite = new THREE.Sprite(
-                new THREE.SpriteMaterial({
-                    map: radialTexture(),
-                    color: PALETTE.ice,
-                    transparent: true,
-                    opacity: 0.26,
-                    depthWrite: false,
-                    blending: THREE.AdditiveBlending,
-                }),
-            )
-            sprite.scale.setScalar(0.62)
-            sprite.position.copy(key.home).add(new THREE.Vector3(0, KEY.h * 0.7, 0))
-            sprite.userData.hot = i
-            this.group.add(sprite)
-            this.hotHalos.push(sprite)
-        }
-    }
-
     private buildAgents() {
         this.bgsaveDrone = this.makeAgent(
             this.rdbHome.clone(),
@@ -2834,7 +2407,7 @@ export class RedisInstance {
         const longest = size ? Math.max(size.x, size.y, size.z) : 1
         // OBJECT_ACROSS, not the big structures' two units: this one is two blocks, and
         // at their size the read looked like it was carrying a crate.
-        this.carry(g, size, centre, packet, OBJECT_ACROSS / (longest || 1))
+        this.values.carryInto(g, size, centre, packet, OBJECT_ACROSS / (longest || 1))
     }
 
     /**
@@ -2994,7 +2567,7 @@ export class RedisInstance {
 
     /** The volume one big value occupies, cage-local — its dashed cage, in a box. */
     private bigBox(kind: BigKind): THREE.Box3 {
-        return (this.bigAreas[kind] ?? new THREE.Box3()).clone()
+        return this.values.box(kind)
     }
 
     /**
@@ -3492,7 +3065,22 @@ export class RedisInstance {
      * on the one thread, and every other client waits.
      */
     pulseBig(kind: BigKind) {
-        this.bigPulse[kind] = 1
+        this.values.touched(kind)
+    }
+
+    /** Carry a big value's cage with the read, or put it back. */
+    rideBig(kind: BigKind, packet: THREE.Object3D | null) {
+        this.values.ride(kind, packet)
+    }
+
+    /** Move the read's cursor through the structure it is holding. */
+    setBigStep(kind: BigKind, n: number, of?: number) {
+        this.values.setStep(kind, n, of)
+    }
+
+    /** Where the read's cursor is inside a carried structure, as numbers. */
+    bigStepOf(kind: BigKind): { step: number; steps: number } {
+        return this.values.stepOf(kind)
     }
 
     /* ----------------------------------- AOF --------------------------------- */
@@ -4378,37 +3966,9 @@ export class RedisInstance {
         // and the air moves, exactly as it does in the other cage
         driftDust(this.motes, dt, time)
 
-        // a big value that was touched burns for a beat and settles back
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
-            this.bigPulse[kind] = Math.max(0, this.bigPulse[kind] - dt * 2.2)
-            const mat = this.bigMats[kind]
-            if (!mat) continue
-            mat.emissiveIntensity = 0.42 + 0.1 * breathe(time, 1.4, kind.length) + this.bigPulse[kind] * 2.2
-        }
-
-        // The read's cursor, moving through the structure in its hands.
-        //
-        // The cells it has left stay lit, so the trail is the algorithm's history —
-        // which buckets a field lookup hashed past, how many nodes of a quicklist
-        // this GET has already read. The cell it is ON pulses faster than the rest of
-        // the structure, at a rate the eye reads as "working" rather than "settled".
-        // Driven by real time (the `time` this update is handed), because the story
-        // stops the SIM clock for a caption and a cursor that freezes mid-pulse looks
-        // like the read has died rather than paused.
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
-            const hot = this.bigHot[kind]
-            if (hot) hot.emissiveIntensity = 2.0 + 0.9 * breathe(time, 5.5, kind.length)
-            const warm = this.bigWarm[kind]
-            if (warm) warm.emissiveIntensity = 0.95 + 0.12 * this.bigPulse[kind]
-        }
-
-        // hot keys glow softly, and stop glowing when they are gone
-        this.hotHalos.forEach((s, i) => {
-            const key = this.hotKeys[i]
-            const on = !!key && key.live
-            s.visible = on
-            if (on) s.material.opacity = 0.16 + 0.12 * breathe(time, 1.6, i)
-        })
+        // the structures a read can hold: their breathing, the cursor inside one of
+        // them, and the halos that mark the hot keys
+        this.values.update(dt, time, this.hotKeys)
 
         // the dict's cron: while a rehash is running it migrates a burst of
         // buckets on a timer, and once the load factor passes 1 it starts one
