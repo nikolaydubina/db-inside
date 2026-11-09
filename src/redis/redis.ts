@@ -33,31 +33,67 @@ import {
     setLabelEnabled,
     slotLattice,
 } from '../core/util'
-import { CELL, CHANNEL, FIELD, KEY, LOOP, PITCH, RDB, SHELL, BLOCK, checkInvariants, AGENT_SPEED, AOF_BUF_CELLS, AOF_BUF_Y, AOF_C0, AOF_FILL_BRIGHT, AOF_FILL_DARK, AOF_RECORD_TIME, AOF_ROW, AOF_SEED, BLOCK_BYTES, BLOCK_TOP, COLS, DICT, DISK_LABEL_PAD, EPOLL, FLOOR_LABEL_Y, HASH_MAX, HASH_SIZES, HEAP, HEAP_OCCUPANCY, HEAP_PAGE, KEYS, KIND_COLOR, PAGE_Y, QUEUE, QUEUE_EMPTY, QUEUE_HEAD, RDB_BLOCK_TIME, RDB_CENTRE, RDB_FILL_BRIGHT, RDB_FILL_DARK, REDIS_ORIGIN, ROWS, STAGING_ROW, VALUE_BYTES, dictX, dictZ, encodingLimit, heapOccupancyMask, heapX, heapZ, xAt, zAt, } from './layout'
+import {
+    CELL,
+    CHANNEL,
+    FIELD,
+    KEY,
+    LOOP,
+    PITCH,
+    RDB,
+    SHELL,
+    BLOCK,
+    checkInvariants,
+    AGENT_SPEED,
+    AOF_BUF_CELLS,
+    AOF_BUF_Y,
+    AOF_C0,
+    AOF_FILL_BRIGHT,
+    AOF_FILL_DARK,
+    AOF_RECORD_TIME,
+    AOF_ROW,
+    AOF_SEED,
+    BLOCK_BYTES,
+    BLOCK_TOP,
+    COLS,
+    DICT,
+    DISK_LABEL_PAD,
+    EPOLL,
+    FLOOR_LABEL_Y,
+    HASH_MAX,
+    HASH_SIZES,
+    HEAP,
+    HEAP_OCCUPANCY,
+    HEAP_PAGE,
+    KEYS,
+    KIND_COLOR,
+    PAGE_Y,
+    QUEUE,
+    QUEUE_EMPTY,
+    QUEUE_HEAD,
+    RDB_BLOCK_TIME,
+    RDB_CENTRE,
+    RDB_FILL_BRIGHT,
+    RDB_FILL_DARK,
+    REDIS_ORIGIN,
+    ROWS,
+    STAGING_ROW,
+    VALUE_BYTES,
+    dictX,
+    dictZ,
+    encodingLimit,
+    heapOccupancyMask,
+    heapX,
+    heapZ,
+    xAt,
+    zAt,
+} from './layout'
 export * from './layout'
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
-/**
- * A value too big to be a block in the keyspace plane.
- *
- * These are ordinary keys in the dict — that is exactly what a skewed keyspace
- * is — but their SHAPE is what matters, and a plane of small cubes cannot say
- * "this one is a skiplist with 1.4 million nodes". Each gets its own area at the
- * back of the cage, its own dashed cage, and a drawing that is a SLICE: the
- * shape is the real structure, the count is not.
- */
-/**
- * The value object's companion cage: air on every face, and how wide it is carried.
- *
- * OBJECT_PAD is the same on all six faces, so the dashed box hugs the blocks it holds
- * — elongated in x, one block high in y, one block deep in z. OBJECT_ACROSS is
- * deliberately under the two units every other companion spans: a hash's bucket array
- * is dozens of cells, this is two blocks, and at the big structures' size it read as a
- * crate on the packet's back.
- */
 const OBJECT_PAD = 0.06
 const OBJECT_ACROSS = 1.0
-/** What each big value really is, for its card. */
+
 export const BIG_REAL: Record<BigKind, { entries: number; mb: number; unit: string }> = {
     hash: { entries: 5_300_000, mb: 412, unit: 'fields' },
     zset: { entries: 1_400_000, mb: 168, unit: 'members' },
@@ -69,49 +105,31 @@ export interface RedisKey {
     row: number
     col: number
     home: THREE.Vector3
-    /** the heap page this entry's allocation lives on */
+
     page: number
     kind: KeyKind
     live: boolean
-    /** seconds left, 0 = no expiry */
+
     ttl: number
     heat: number
     shade: number
-    /**
-     * What this key and its value cost when the RDB encoder writes them, in
-     * bytes. Values are not all the same size, so a block holds a different
-     * number of keys depending on what happens to be next in the walk — that is
-     * the only variation a dense file has.
-     */
+
     bytes: number
-    /** elements in the value; 0 for a string, which has no element count */
+
     entries: number
-    /**
-     * True once the value was converted out of its compact encoding. Redis never
-     * converts back: a hash that became a hashtable stays one until the key is
-     * deleted and rebuilt.
-     */
+
     aux: boolean
-    /** set when this key is drawn as its own area instead of a block in the plane */
+
     big?: BigKind
-    /**
-     * The payload is NOT in the object's own allocation.
-     *
-     * A string over 44 bytes is `raw`: the header holds a pointer and the bytes are
-     * a second allocation on another page, which is one more hop than an `int` or an
-     * `embstr` ever takes. Conversions are the same story for collections, and they
-     * are marked by `aux`.
-     */
+
     raw?: boolean
-    /** one of the few keys that take most of the traffic */
+
     hot?: boolean
 }
 
-/** How a value is actually stored, as `OBJECT ENCODING` would report it. */
 function encodingOf(key: RedisKey): string {
     switch (key.kind) {
         case 'string':
-            // embstr: header and bytes in one allocation (up to 44 B), else raw
             return key.bytes <= 44 ? 'embstr' : 'raw'
         case 'hash':
             return key.aux ? 'hashtable' : 'listpack'
@@ -120,23 +138,14 @@ function encodingOf(key: RedisKey): string {
         case 'zset':
             return key.aux ? 'skiplist + dict' : 'listpack'
         case 'list':
-            // a big list is a chain of many listpacks; the two stacked blocks are
-            // the drawn slice, not the node count
             return key.big
                 ? 'quicklist · listpacks'
                 : key.aux
-                    ? 'quicklist · 2 nodes'
-                    : 'quicklist · 1 node'
+                  ? 'quicklist · 2 nodes'
+                  : 'quicklist · 1 node'
     }
 }
 
-/**
- * How many allocations the value's structure is drawn as. A compact encoding is
- * one block — a single listpack, one contiguous run of bytes. Converted, a hash
- * or a set becomes a bucket array plus per-entry nodes and a zset becomes TWO
- * structures at once (a dict for O(1) by member and a skiplist for the range),
- * so the drawing gives it two blocks: there really are two allocations.
- */
 function auxBlocks(key: RedisKey): number {
     if (!key.aux || key.kind === 'string') return 0
     return key.kind === 'zset' ? 2 : 1
@@ -150,22 +159,10 @@ export interface RedisPort {
     busy: boolean
     active: boolean
     pulse: number
-    /**
-     * True while this connection is in subscriber mode.
-     *
-     * A subscribed Redis connection is not a key-space client at all: while it
-     * holds subscriptions it may only issue SUBSCRIBE, UNSUBSCRIBE and PING. So
-     * this is not a decoration on an ordinary socket — it is a different kind of
-     * client, drawn differently and never handed a GET.
-     */
+
     subs: boolean
 }
 
-/**
- * World-space points the sim and the camera views aim at. Kept as stable
- * Vector3 instances and rewritten in place by rebaseAnchors(), because views
- * and the sim hold references to them and must follow the cage when it moves.
- */
 export const REDIS_ANCHOR = {
     sky: new THREE.Vector3(),
     keys: new THREE.Vector3(),
@@ -173,19 +170,15 @@ export const REDIS_ANCHOR = {
     loop: new THREE.Vector3(),
     ports: new THREE.Vector3(),
     aof: new THREE.Vector3(),
-    /** the floating aof_buf strip — it drifts, so update() rewrites this live */
+
     aofBuf: new THREE.Vector3(),
     rdb: new THREE.Vector3(),
-    /** the three large values, drawn as their own areas at the back */
+
     bigHash: new THREE.Vector3(),
     bigZset: new THREE.Vector3(),
     bigList: new THREE.Vector3(),
 }
 
-/**
- * The page drawn open, in cage-local space.
- */
-/** local geometry + wherever the cage currently stands = world position */
 function rebaseAnchors() {
     const o = REDIS_ORIGIN
     REDIS_ANCHOR.sky.set(6, 26, 2).add(o)
@@ -212,192 +205,148 @@ export class RedisInstance {
     readonly keys: RedisKey[] = []
     readonly ports: RedisPort[] = []
 
-    /**
-     * The 4 kB block every file on this floor is made of: half the depth of the
-     * 8 kB page next door, so two of them fill one cell of the shared lattice.
-     */
     readonly blockGeo = new RoundedBoxGeometry(BLOCK.w, BLOCK.h, BLOCK.d, 1, 0.02)
-    /** One key. Deliberately much smaller than a block — see KEY above. */    readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
+    readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
 
     private disk!: THREE.InstancedMesh
     private dictMesh!: THREE.InstancedMesh
-    /** the 4 kB pages the entries are allocated in, under the keyspace cage */
+
     private heapMesh!: THREE.InstancedMesh
-    /** 1 = page in use; seeded once, so the heap does not shimmer */
+
     private heapMask?: Uint8Array
-    /** the used pages, in arena order — keys take one each for their allocation */
+
     private heapPages: number[] = []
     private keysMesh!: THREE.InstancedMesh
-    /**
-     * The page that is currently OPEN — a block turned into a see-through shell so
-     * the entry inside it can be seen.
-     *
-     * A page is a solid cube and its entry is an allocation inside it, so from any
-     * distance the entry is invisible: the block hides the very thing the read
-     * came for. When a route lands on a page the block becomes a glass box and the
-     * cube inside is suddenly the point of the shot. One page at a time, because
-     * two open pages is a diagram and not a crystal.
-     */
+
     private pageGhost: THREE.Mesh | null = null
     private ghostPage: number | null = null
-    /** the page the value-object cage lives inside, and the cage itself */
+
     private showcasePage: number = 0
-    /** the small string the inline story reads: bytes in the header's allocation */
+
     private inlineKey: RedisKey | null = null
-    /** the large string the raw story reads: bytes behind a pointer */
+
     private rawKey: RedisKey | null = null
-    /** the value-object diagram, drawn only while a read holds it */
+
     private objectCage: THREE.Group | null = null
-    /** its two layouts — one per place a payload can be — drawn one at a time */
+
     private objectRow: Record<'inline' | 'pointer', THREE.Group> | null = null
-    /** the extent of the dashed cage it is carried in */
+
     private objectArea: Record<'inline' | 'pointer', THREE.Box3> | null = null
-    /** the dashed cage of each layout, drawn with the row it belongs to */
+
     private objectOutline: Record<'inline' | 'pointer', THREE.Object3D | null> | null = null
-    /** the header and payload materials, so the read can light the part it reached */
+
     private objectHeaderMat: THREE.MeshStandardMaterial | null = null
     private objectPayloadMat: THREE.MeshStandardMaterial | null = null
-    /** where it is built from, and the stop a read picks it up at */
+
     private objectHome = new THREE.Vector3()
     private objectStop = new THREE.Vector3()
-    /** the second (and for a zset, third) allocation of a converted value */
+
     private auxMesh!: THREE.InstancedMesh
-    /** per-key deploy of a conversion, 0 → 1; the map holds only keys mid-flight */
+
     private auxAnim = new Map<number, number>()
-    /** the few keys the traffic actually goes to */
+
     private hotKeys: RedisKey[] = []
-    /** the keys drawn as their own areas, by kind */
+
     private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
-    /**
-     * The three large values, and the mechanism that carries them.
-     *
-     * Not a builder and not a diagram: a big value is what a read is HOLDING while it
-     * walks, so the structures, the dashed cages, the cursor and the halos live in their
-     * own module and this instance only builds them and passes the calls on.
-     */
+
     private readonly values: BigValues
-    /** decaying pulse per disk instance — the one marker for "this block was touched" */
+
     private diskBoost = new Map<number, { v: number; hex: number }>()
 
-    /* --------------------------- the dict's two tables --------------------------- */
-    /** buckets in the live table; always one of HASH_SIZES */
     private htSize = 32
-    /** buckets in the table being filled during a rehash, 0 when not rehashing */
+
     private ht1Size = 0
-    /** the next bucket of ht[0] to migrate; -1 when not rehashing */
+
     private rehashIdx = -1
-    /** which half of the lattice the live table occupies: it alternates per growth */
+
     private htHalf: 0 | 1 = 0
-    /** stable per-tile shade, so repainting does not make the table shimmer */
+
     private dictShade: number[] = []
     private dictTableLab!: CSS2DObject
-    /**
-     * One line per live entry: bucket → the entry it points at. The dict is only
-     * a table of pointers, and this is what makes that literal — the memory is
-     * at the far end of the line, not in the tile.
-     */
+
     private pointerWeb?: LineSegments2
-    /** seconds to the next rehash cron burst */
+
     private rehashTimer = 0.6
 
-    /** instance ids of the AOF run, oldest → newest */
     private aofOrder: number[] = []
-    /** instance id → position in the log */
+
     private aofIndex = new Map<number, number>()
-    /** AOF blocks the file has reached, and blocks currently drawn */
+
     private aofHead = 0
     private aofDrawn = 0
-    /** The floor is full: the file cannot grow, so appends have nowhere to go. */
+
     aofFull = false
     private aofEdge!: OutlineBox
     private aofPick!: THREE.Mesh
-    /** the "this is a new file" tag over the staging area, shown only while rewriting */
+
     private stagingLab!: CSS2DObject
 
-    /** The base file's blocks in the order the encoder writes them. */
     private rdbOrder: number[] = []
-    /** instance id → position in the file */
+
     private rdbIndex = new Map<number, number>()
-    /** blocks the base file currently occupies, and how full the last one is */
+
     private rdbLen = 0
     private rdbTail = 1
-    /** which keys landed in each block — the encoder is sequential, not aligned */
+
     private rdbBlocks: number[][] = []
-    /** the outline around the base file, regrown as the file's length changes */
+
     private rdbEdge!: OutlineBox
-    /** the volume you point at to read about the dump — gone while it is empty */
+
     private rdbPick!: THREE.Mesh
-    /** per-instance base tint, so the RDB keeps its own shade across relayouts */
+
     private rdbBase: number[] = []
-    /** true while a save or a load is walking the file */
+
     savingRdb = false
     loading = false
-    /**
-     * What memory holds right now. The files are older than this: the dump is a
-     * past state and the log is the difference, and together they have to
-     * reproduce exactly this — that is what durable means.
-     */
+
     get dataset(): boolean[] {
         return this.keys.map((k) => k.live)
     }
-    /** aof_buf: the cubes hover above wherever the end of the file is. */
+
     private aofBufGroup!: THREE.Group
     private aofBufCells: THREE.Mesh[] = []
     private aofBufMats: THREE.MeshStandardMaterial[] = []
-    /** bytes sitting in aof_buf, as a fraction of the strip */
+
     private aofBuffered = 0
-    /** records in aof_buf that have not reached the file yet */
+
     private aofPending = 0
     private aofPendingBytes = 0
 
     private queueCells: THREE.Mesh[] = []
     private queueMats: THREE.MeshStandardMaterial[] = []
-    /** How many commands are waiting right now. 0 = the queue is empty. */
+
     private queueDepth = 0
-    /** epoll's fd tiles, one per connection, and the flash of a completed read */
+
     private fdMats: THREE.MeshStandardMaterial[] = []
     private fdPulse: number[] = []
     private loopCore!: THREE.MeshStandardMaterial
     private loopRing!: THREE.Mesh
-    /** the channel's ring, and how hard it was just hit by a publish */
+
     private channelRing!: THREE.Mesh
     private channelPulse = 0
     private bgsaveDrone!: THREE.Group
     private rewriteDrone!: THREE.Group
-    /**
-     * The saving agent belongs to the base file, not to the keyspace: the dump is
-     * the thing it is responsible for, so it patrols an ellipse around that run —
-     * the same deal the rewrite agent has with the log.
-     */
+
     private readonly rdbHome = new THREE.Vector3(RDB_CENTRE.x, 1.45, RDB_CENTRE.z)
     private readonly rdbIdle = new THREE.Vector3()
-    /** where its work currently aims it */
+
     private readonly rdbAim = new THREE.Vector3().copy(this.rdbHome)
-    /**
-     * Where the rewrite agent patrols while idle: the middle of the log it is
-     * responsible for, not some abstract home point. Its idle orbit and its work
-     * both happen over the same file.
-     */
-    private readonly rewriteHome = new THREE.Vector3(
-        xAt(AOF_C0 + 4),
-        AOF_BUF_Y + 0.9,
-        zAt(AOF_ROW),
-    )
-    /** Where the agent is heading right now — the only thing its work sets. */
+
+    private readonly rewriteHome = new THREE.Vector3(xAt(AOF_C0 + 4), AOF_BUF_Y + 0.9, zAt(AOF_ROW))
+
     private readonly rewriteAim = new THREE.Vector3().copy(this.rewriteHome)
     private readonly rewriteIdle = new THREE.Vector3()
     private readonly rewriteStep = new THREE.Vector3()
-    /** True while bgrewriteaof is running — the agent drives itself then. */
+
     rewriting = false
 
     private tmpColor = new THREE.Color()
     private pulseColor = new THREE.Color()
     private tmpObj = new THREE.Object3D()
     private tmpBox = new THREE.Box3()
-    /** the ambient dust in this cage — same field, same drift, as postgres */
+
     private motes!: THREE.Points
 
-    /** counters the HUD reads */
     evictions = 0
     saves = 0
     aofBytes = 0
@@ -405,12 +354,6 @@ export class RedisInstance {
     rewrites = 0
 
     constructor(private ticker: Ticker) {
-        // The big values are a collaborator, not a corner of this class.
-        //
-        // They need five things from the instance and nothing else: somewhere to put
-        // geometry, the one way this scene frames a volume, the one way it registers a
-        // pick, a key's card, and the keys themselves. Everything they own — the
-        // structures, the dashed cages, the cursor, the halos — is theirs.
         this.values = new BigValues({
             group: this.group,
             frame: (centre, size, colour, opts) => this.frame(centre, size, colour, opts),
@@ -432,8 +375,6 @@ export class RedisInstance {
         this.values.build(this.keys, this.hotKeys)
         this.buildAgents()
 
-        // the base file is whatever the keyspace encodes to: its length comes
-        // from the data, not from a constant
         this.writeRdbNow()
 
         this.openPort()
@@ -444,8 +385,6 @@ export class RedisInstance {
         if (checkInvariants) this.assertFrames()
     }
 
-    /* -------------------------------- building ------------------------------- */
-
     private register(obj: THREE.Object3D, info: Info, outline?: OutlineBox) {
         obj.userData.info = info
         if (outline) obj.userData.outline = outline
@@ -453,19 +392,6 @@ export class RedisInstance {
         return obj
     }
 
-    /**
-     * One volume, and everything that has to agree about it.
-     *
-     * A framed thing in this scene has three descriptions of the same volume: the dashed
-     * cage you see, the invisible box you pick, and the box the camera frames. Typed out
-     * twice they drift — a pick 0.8 tall inside a cage 0.9 tall makes the hover
-     * highlight sit inside its own outline instead of on it.
-     *
-     * So they are not typed out twice. The cage and the pick are built from the same
-     * `size`, both are placed at the same `centre`, and the pick is handed that box AND
-     * the cage itself: hovering or focusing draws the cage, never a second box derived
-     * from a different number.
-     */
     private frame(
         centre: THREE.Vector3,
         size: THREE.Vector3,
@@ -482,27 +408,13 @@ export class RedisInstance {
         )
         pick.position.copy(centre)
         this.group.add(pick)
-        // the highlight IS the cage
+
         pick.userData.outline = cage
-        // and this is one of the volumes where the pick and the cage are the same box by
-        // construction, which is what assertFrames() holds us to
+
         pick.userData.framed = true
         return { cage, pick, box: new THREE.Box3().setFromCenterAndSize(centre, size) }
     }
 
-    /**
-     * A pick built by `frame()` must be picked over exactly the cage it draws.
-     *
-     * The hover highlight IS that cage, so a pick volume from different numbers
-     * does not throw or warn anywhere — it just puts the highlight inside its own
-     * outline, which reads as a rendering glitch. `?debug` runs this once the
-     * cage is built and refuses to start if a framed pick and its cage disagree.
-     *
-     * Only framed picks are checked. A file outline (the AOF, the RDB) is a
-     * different relationship on purpose: the outline is the file's exact extent,
-     * while the pick is deliberately generous so the file is easy to hit — two
-     * volumes, describing two different things.
-     */
     private assertFrames() {
         const a = new THREE.Box3()
         const b = new THREE.Box3()
@@ -524,7 +436,7 @@ export class RedisInstance {
                 const name = (obj.userData.info as Info | undefined)?.title ?? 'unnamed pick'
                 throw new Error(
                     `[redis] pick and its cage disagree by ${d.toFixed(3)} — ${name}. ` +
-                    'Build both with frame(): one centre, one size.',
+                        'Build both with frame(): one centre, one size.',
                 )
             }
         }
@@ -540,8 +452,6 @@ export class RedisInstance {
             meta: 'one process · one command thread · dataset in RAM',
         })
 
-        // Same sticker treatment as the postgres cage: painted on the +x wall, in
-        // its top-left corner, at the same text height as the floor labels.
         const inset = 0.45
         const sticker = floorLabel('REDIS', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
         const ink = sticker.userData.ink as { x0: number; x1: number; y0: number; y1: number }
@@ -551,21 +461,14 @@ export class RedisInstance {
             SHELL.h - inset - ink.y1,
             SHELL.d / 2 - inset + ink.x0,
         )
-            ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
+        ;(sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
         this.group.add(sticker)
 
-        // The air in the room. Both cages are the same volume and stand in the
-        // same hall, so both get the same dust from the same definition in
-        // util.ts — a cage with clean air reads as a diagram, not a place.
         this.motes = dustField(SHELL.w, SHELL.h, SHELL.d)
         this.group.add(this.motes)
     }
 
     private buildDisk() {
-        // No platform and no slab: the blocks are the disk, and the global floor
-        // grid is the only surface under them. Anything raised here would put the
-        // file on a pedestal and leave the DISK label floating above the grid it
-        // is supposed to be painted on.
         const platePick = new THREE.Mesh(
             new THREE.BoxGeometry(FIELD.w, 0.3, FIELD.d),
             new THREE.MeshBasicMaterial({ visible: false }),
@@ -575,8 +478,6 @@ export class RedisInstance {
 
         const mat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
-            // neutral emissive: albedo carries the meaning (amber = append log,
-            // teal = snapshot), and an amber emissive here would tint the RDB olive
             emissive: 0x0a141a,
             emissiveIntensity: 1,
             roughness: 0.5,
@@ -598,19 +499,9 @@ export class RedisInstance {
                 const onRdb = r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1
 
                 this.tmpObj.position.copy(home)
-                // Every file block starts absent: a block is drawn when the file
-                // reaches it, and the log reaches a new one on every append. A
-                // block that is not part of a file is collapsed on ALL three axes,
-                // so the plate and the slot lattice show and no flattened sliver
-                // is left.
                 this.tmpObj.scale.setScalar(0.001)
                 this.tmpObj.updateMatrix()
                 field.setMatrixAt(i, this.tmpObj.matrix)
-                // The file blocks get their colour from layoutAof()/layoutRdb(),
-                // which know which of them the file has reached. A block that is
-                // IN a file is a FULL block: 4 kB is the whole unit here, so it
-                // sits at the bright end of the ramp. Small shade variation only,
-                // because the records in a block are not all the same size.
                 if (onRdb) {
                     this.rdbBase[i] = mixHex(RDB_FILL_DARK, RDB_FILL_BRIGHT, rand(0.94, 1.04))
                 }
@@ -619,11 +510,6 @@ export class RedisInstance {
         }
         if (field.instanceColor) field.instanceColor.needsUpdate = true
 
-        // Where the log grows: cell row by cell row from the front edge. Within a
-        // row it fills one 4 kB cell per column, and because an 8 kB page is two
-        // cells wide, x-first also fills a page before moving on. This is the
-        // order it takes the empty cells in; it never wraps and never drops, and
-        // only a rewrite makes it shorter.
         this.aofOrder = []
         this.aofIndex.clear()
         let leftToRight = true
@@ -631,7 +517,6 @@ export class RedisInstance {
             const cols: number[] = []
             for (let c = 0; c < COLS; c++) {
                 if (r === AOF_ROW && c < AOF_C0) continue
-                // the base file lives on this floor too: the log grows around it
                 if (r >= RDB.r0 && r <= RDB.r1 && c >= RDB.c0 && c <= RDB.c1) continue
                 cols.push(c)
             }
@@ -644,17 +529,9 @@ export class RedisInstance {
             }
         }
 
-        // The log starts part-written: the file has reached the first N of these
-        // blocks, and the rest are not drawn at all (see layoutAof). The layout
-        // runs once the log's outline exists — fitAofEdge() is what sizes it.
         this.aofHead = AOF_SEED
-        // A file with blocks but no length is not a file: the boot log already
-        // has bytes in it, one full block per block drawn.
         this.aofBytes = this.aofUsed * BLOCK_BYTES
 
-        // The base file is one sequential write, so it takes its cells row by
-        // row, left to right and then right to left. A file is a stream, so the
-        // columns snake rather than jumping back to the left edge at every row.
         this.rdbOrder = []
         for (let r = RDB.r0; r <= RDB.r1; r++) {
             const cols: number[] = []
@@ -667,30 +544,19 @@ export class RedisInstance {
             }
         }
 
-        // The log gets an extent outline: a file should be a thing you can point
-        // at and read about, not a patch of blocks you have to guess the meaning
-        // of. Unlike the base file, its length is not the size of the data — it
-        // is the size of the HISTORY, so it grows with every append and only a
-        // rewrite takes it back down. The cage is fitted to the blocks the file
-        // has actually reached (see fitAofEdge), so "where the file ends" and
-        // "where the outline ends" are the same fact.
         const ax0 = xAt(AOF_C0) - CELL / 2
         const ax1 = xAt(AOF_C0 + AOF_SEED) + CELL / 2
         const az0 = zAt(AOF_ROW) - CELL / 2
         const az1 = zAt(AOF_ROW) + CELL / 2
-        const aofEdge = new OutlineBox(
-            ax1 - ax0,
-            CELL,
-            az1 - az0,
-            PALETTE.amber,
-            0.75,
-        ).centre((ax0 + ax1) / 2, PAGE_Y, (az0 + az1) / 2)
+        const aofEdge = new OutlineBox(ax1 - ax0, CELL, az1 - az0, PALETTE.amber, 0.75).centre(
+            (ax0 + ax1) / 2,
+            PAGE_Y,
+            (az0 + az1) / 2,
+        )
         this.group.add(aofEdge)
         this.aofEdge = aofEdge
 
         const aofPick = new THREE.Mesh(
-            // unit box, scaled to the file's extent by fitAofEdge(): a real-size
-            // geometry scaled again would make the pick far larger than the file
             new THREE.BoxGeometry(1, 1.4, 1),
             new THREE.MeshBasicMaterial({ visible: false }),
         )
@@ -712,33 +578,24 @@ export class RedisInstance {
                         { label: 'total', value: fmtBytes(total) },
                         { label: 'file length', value: fmtBytes(this.aofBytes) },
                         { label: 'filled', value: `${Math.round(fill * 100)}%` },
-                        { label: 'pending', value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}` },
+                        {
+                            label: 'pending',
+                            value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}`,
+                        },
                     ]
                 },
             },
             aofEdge,
         )
 
-        // Now that the outline and the pick volume exist, draw the blocks the
-        // file has reached: layoutAof() fits both to the file.
         this.layoutAof()
 
-        // The rewrite writes a *different* file, so it needs somewhere to write
-        // that the parent is not appending to. That floor is marked while it is
-        // in use, and only while it is in use — an empty area labelled "new file"
-        // would be a permanent claim about nothing.
         const stagingLab = label('AOF REWRITE · new file')
         stagingLab.position.set(xAt(AOF_C0) + 0.2, 1.1, zAt(STAGING_ROW) - 0.45)
         setLabelEnabled(stagingLab, false)
         this.group.add(stagingLab)
         this.stagingLab = stagingLab
 
-        // The base file gets the same treatment as the log: an extent outline, so
-        // the file is a thing you can point at and read about rather than a patch
-        // of blocks you have to guess the meaning of. Unlike the log, this file's
-        // length IS a property of the data — it is rewritten from scratch by every
-        // save — so the cage is regrown to hug whatever the file currently covers
-        // (see fitRdbEdge).
         const rdbW = (RDB.c1 - RDB.c0 + 1) * CELL
         const rdbD = (RDB.r1 - RDB.r0 + 1) * CELL
         const rdbEdge = new OutlineBox(rdbW, CELL, rdbD, PALETTE.teal, 0.7).centre(
@@ -766,9 +623,7 @@ export class RedisInstance {
                     const blocks = this.rdbLen
                     const total = blocks * BLOCK_BYTES
                     const fill = total > 0 ? Math.min(1, this.rdbBytes / total) : 0
-                    const keys = this.rdbBlocks
-                        .slice(0, blocks)
-                        .reduce((n, b) => n + b.length, 0)
+                    const keys = this.rdbBlocks.slice(0, blocks).reduce((n, b) => n + b.length, 0)
                     return [
                         { label: 'blocks', value: `${blocks} × 4 kB` },
                         { label: 'total', value: fmtBytes(total) },
@@ -781,10 +636,6 @@ export class RedisInstance {
             rdbEdge,
         )
 
-        // The slot lattice, over the whole field and from the same builder the
-        // postgres disk uses: one square 4 kB address lattice for both disks,
-        // covering every place a block can be. An 8 kB page next door covers
-        // two cells along x; a redis file block covers one.
         this.group.add(
             slotLattice(
                 xAt(0) - CELL / 2,
@@ -796,16 +647,6 @@ export class RedisInstance {
             ),
         )
 
-        // There is no write-head marker, and deliberately so. A frame, a blade,
-        // a highlighted "selected" block — all of them claim something the log
-        // does not do: that one block is special, or that it is about to be
-        // swapped out. Appending touches exactly one block, and the honest way
-        // to show that is the same way an edited page is shown next door: a
-        // single pulse, then the block goes back to being an ordinary block.
-        // The end of the file is readable from the log itself — the run stops
-        // where the blocks stop.
-
-        // floor labels, painted on the same ground as the postgres ones
         const diskLab = floorLabel('DISK', { height: 0.475, color: 'rgba(170, 220, 242, 0.9)' })
         diskLab.rotation.z = Math.PI / 2
         const ink = diskLab.userData.ink as { x0: number; x1: number; y0: number; y1: number }
@@ -832,30 +673,26 @@ export class RedisInstance {
         freeLab.position.set(xAt(56), FLOOR_LABEL_Y, zAt(12))
         this.group.add(freeLab)
 
-        this.register(
-            platePick,
-            {
-                title: 'Disk — persistence only',
-                body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 kB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
-                meta: 'appendonlydir · base rdb + incr aof · the rest is unused',
-                stats: () => {
-                    const cells = COLS * ROWS
-                    const total = cells * BLOCK_BYTES
-                    const usedCells = this.aofUsed + this.rdbLen
-                    const usedBytes = this.aofBytes + this.rdbBytes
-                    return [
-                        { label: 'cells', value: `${cells} × 4 kB` },
-                        { label: 'total', value: fmtBytes(total) },
-                        { label: 'files', value: `${usedCells} cells · ${fmtBytes(usedBytes)}` },
-                        { label: 'free', value: fmtBytes(Math.max(0, total - usedBytes)) },
-                    ]
-                },
+        this.register(platePick, {
+            title: 'Disk — persistence only',
+            body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 kB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
+            meta: 'appendonlydir · base rdb + incr aof · the rest is unused',
+            stats: () => {
+                const cells = COLS * ROWS
+                const total = cells * BLOCK_BYTES
+                const usedCells = this.aofUsed + this.rdbLen
+                const usedBytes = this.aofBytes + this.rdbBytes
+                return [
+                    { label: 'cells', value: `${cells} × 4 kB` },
+                    { label: 'total', value: fmtBytes(total) },
+                    { label: 'files', value: `${usedCells} cells · ${fmtBytes(usedBytes)}` },
+                    { label: 'free', value: fmtBytes(Math.max(0, total - usedBytes)) },
+                ]
             },
-        )
+        })
     }
 
     private buildMemory() {
-        /* -------------------------- bucket array -------------------------- */
         const dGeo = new RoundedBoxGeometry(0.3, 0.07, 0.3, 1, 0.015)
         const dMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
@@ -881,15 +718,10 @@ export class RedisInstance {
             }
         }
         if (dict.instanceColor) dict.instanceColor.needsUpdate = true
-        // the table's extent and which buckets hold entries are painted from the
-        // dict's own state, so the picture cannot claim a size the dict does not have
         this.paintDict()
 
         const dW = DICT.cols * PITCH
         const dD = DICT.rows * PITCH
-        // No permanent outline: the bucket array is not a selected thing, it is
-        // just there. Hovering it selects the whole table, and that is when the
-        // cage is drawn — by the hover highlight, not by the group itself.
         const dictPick = new THREE.Mesh(
             new THREE.BoxGeometry(dW, 0.6, dD),
             new THREE.MeshBasicMaterial({ visible: false }),
@@ -905,39 +737,25 @@ export class RedisInstance {
         const dictLab = label('DICT · BUCKETS')
         dictLab.position.set(-dW / 2 - 0.3, DICT.y + 0.55, DICT.cz - dD / 2)
         this.group.add(dictLab)
-        // the size line, rewritten as the tables change
         const tableLab = label('')
         tableLab.position.set(-dW / 2 - 0.3, DICT.y + 0.22, DICT.cz - dD / 2)
         this.group.add(tableLab)
         this.dictTableLab = tableLab
         this.paintDict()
 
-        /* ------------------------- heap: page cubes ----------------------- */
-        // The arena comes first, because it is where the entries are: 768 pages
-        // of 4 kB in one contiguous address space, below the hash table. The
-        // page cubes are the same 4 kB block as the disk's, so RAM and disk
-        // speak the same unit; what differs is that nothing here is a file and
-        // nothing is sorted — used pages are scattered through the arena and
-        // never compacted, because the OS does not defragment RAM.
         const pageCount = HEAP.cols * HEAP.rows
-        // Seeded once: the same pages are in use on every frame and every load.
         this.heapMask = heapOccupancyMask(pageCount, HEAP_OCCUPANCY)
         this.heapPages = []
         for (let p = 0; p < pageCount; p++) if (this.heapMask[p] === 1) this.heapPages.push(p)
-        // A page is a cube, not a plate: small enough that the 4 kB cell keeps a
-        // visible gap, so the arena reads as pages rather than one slab.
         const heapGeo = new RoundedBoxGeometry(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE, 1, 0.01)
         const heapMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
             emissive: PALETTE.cyan,
-            // almost no emission: the per-instance colour is the only thing that
-            // may separate a used page from a free one
             emissiveIntensity: 0.05,
             roughness: 0.5,
             metalness: 0.3,
         })
         const heap = new THREE.InstancedMesh(heapGeo, heapMat, pageCount)
-        // free pages are collapsed, so their matrices change with the dataset
         heap.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
         for (let r = 0; r < HEAP.rows; r++) {
             for (let c = 0; c < HEAP.cols; c++) {
@@ -953,9 +771,6 @@ export class RedisInstance {
         heap.userData.infoFor = (hit: THREE.Intersection) => this.heapPageInfo(hit)
         this.pickables.push(heap)
 
-        // The glass page. Same box as a page, a hair larger so it does not fight
-        // with the block it replaces, and invisible until something asks to look
-        // inside.
         const ghostGeo = new THREE.BoxGeometry(HEAP_PAGE * 1.04, HEAP_PAGE * 1.04, HEAP_PAGE * 1.04)
         const ghost = new THREE.Mesh(
             ghostGeo,
@@ -971,7 +786,11 @@ export class RedisInstance {
         ghost.add(
             new THREE.LineSegments(
                 new THREE.EdgesGeometry(ghostGeo),
-                new THREE.LineBasicMaterial({ color: PALETTE.ice, transparent: true, opacity: 0.5 }),
+                new THREE.LineBasicMaterial({
+                    color: PALETTE.ice,
+                    transparent: true,
+                    opacity: 0.5,
+                }),
             ),
         )
         ghost.visible = false
@@ -979,7 +798,6 @@ export class RedisInstance {
         this.group.add(ghost)
         this.pageGhost = ghost
 
-        /* ----------------------------- entries ---------------------------- */
         const kMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
             emissive: PALETTE.cyan,
@@ -989,60 +807,41 @@ export class RedisInstance {
         })
         const keys = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows)
         keys.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        // NOT added to the scene. An entry cube is 0.16 across and a page is 0.23,
-        // so a cube placed on its page pokes out of the block's faces: hundreds of
-        // little boxes intersecting the arena, which is exactly what "nothing
-        // should stick out of a heap block" rules out. The entries are positions
-        // and data now (bucket → page → what that page holds); the thing you SEE
-        // inside a page is the object cage, and only in the one page that is open.
         this.keysMesh = keys
 
-        // The other allocation(s) of a converted value. Two slots per key, because
-        // a zset converts into two structures at once and the drawing gives it two
-        // blocks. Same geometry as a key block: these are allocations of the same
-        // order of magnitude, stacked on top of the entry they extend.
         const aux = new THREE.InstancedMesh(this.keyGeo, kMat, KEYS.cols * KEYS.rows * 2)
         aux.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        // unparented for the same reason as the entries above
         this.auxMesh = aux
 
         i = 0
         for (let r = 0; r < KEYS.rows; r++) {
             for (let c = 0; c < KEYS.cols; c++) {
-                // The entry stands INSIDE the page it was allocated from.
-                //
-                // It used to float on a representational plane above the bucket
-                // array, which needed a dashed cage and a caption to explain that
-                // the plane was not really there. It is not: a dictEntry is one
-                // allocation, one allocation lives on one page, and the page is
-                // already drawn. Putting the cube inside its block costs nothing
-                // and removes a whole layer of apology from the drawing — what is
-                // left to do is open the block (see pageGhost) when a read lands
-                // on it.
                 const page = this.heapPages[i % this.heapPages.length]
                 const home = new THREE.Vector3(
                     heapX(page % HEAP.cols),
                     HEAP.y,
                     heapZ(Math.floor(page / HEAP.cols)),
                 )
-                // about three quarters of the slots hold a key at boot
                 const live = Math.random() < 0.74
-                const kinds: KeyKind[] = ['string', 'string', 'string', 'hash', 'list', 'set', 'zset']
+                const kinds: KeyKind[] = [
+                    'string',
+                    'string',
+                    'string',
+                    'hash',
+                    'list',
+                    'set',
+                    'zset',
+                ]
                 const kind = kinds[randInt(0, kinds.length - 1)]
                 const size = VALUE_BYTES[kind]
-                // A long-running instance is a mix, not a fresh start: most values
-                // sit somewhere in the middle of their encoding's range, some
-                // already went through the conversion, and a few are one write away
-                // from the limit — which is exactly where the conversion happens, so
-                // that is where a visitor should be able to see it.
                 const limit = encodingLimit(kind)
                 const near = Math.random() < 0.18
                 const entries =
                     kind === 'string'
                         ? 0
                         : near
-                            ? Math.max(1, limit - randInt(1, 4))
-                            : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
+                          ? Math.max(1, limit - randInt(1, 4))
+                          : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
                     page,
@@ -1069,13 +868,8 @@ export class RedisInstance {
             }
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
-        // the converted values' extra allocations, in their base colours
         this.paintAux()
 
-        // The skew. A real keyspace is not uniform: a handful of keys take most
-        // of the traffic, and a few values are so large that they are their own
-        // structure rather than an entry. Both are drawn differently from the
-        // ordinary block, and both are ordinary keys in the dict all the same.
         for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
             const key = this.keys.find((k) => k.live && !k.big && k.kind === kind)
             if (!key) continue
@@ -1083,9 +877,6 @@ export class RedisInstance {
             key.big = kind
             key.aux = true
             key.entries = real.entries
-            // what the FILE pays for it on this floor: the block is 4 kB and the
-            // lattice is finite, so a 412 MB value cannot be drawn in it — a few
-            // blocks is the sample. The card says the real number.
             key.bytes = 9000 + randInt(0, 3000)
             this.tmpObj.position.copy(key.home)
             this.tmpObj.scale.setScalar(0.001)
@@ -1094,70 +885,39 @@ export class RedisInstance {
         }
         keys.instanceMatrix.needsUpdate = true
 
-        // the hot keys: small, boring, and the reason there is a cache line's
-        // worth of traffic in a million-entry keyspace
         this.hotKeys = this.keys
             .filter((k) => k.live && !k.big && k.kind === 'string')
             .filter((_, n) => n % 7 === 0)
             .slice(0, 4)
         for (const key of this.hotKeys) {
             key.hot = true
-            // a hotter base colour, so the plane itself shows which entries the
-            // traffic is actually about
             key.shade = 1.62
             keys.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
 
-        // The two places a string's payload can be, made findable.
-        //
-        // A string is not "16 bytes plus bytes": up to 44 bytes the bytes live in the
-        // header's own allocation (embstr) or the number lives in its pointer field
-        // (int), and the read is over. Past 44 it is `raw`, the header holds an
-        // address, and the bytes are a second allocation on a second page — one more
-        // hop than a small value ever takes. The two stories are about those two
-        // shapes, so the drawing needs one honest key of each rather than whichever
-        // string happens to be nearest, and neither may be a hot key: those are
-        // already carrying a different point.
         const strings = this.keys.filter((k) => k.live && !k.big && !k.hot && k.kind === 'string')
         this.inlineKey = strings[0] ?? null
         this.rawKey = strings.find((k) => k !== this.inlineKey) ?? null
         if (this.inlineKey) {
-            // 24 bytes: fits in the header's allocation, so nothing is fetched twice
             this.inlineKey.live = true
             this.inlineKey.bytes = 24
             this.inlineKey.raw = false
         }
         if (this.rawKey) {
-            // a block's worth at the real encoding, so the second allocation is a
-            // page and not a fraction of one
             this.rawKey.live = true
             this.rawKey.bytes = 2048
             this.rawKey.raw = true
         }
 
-        /* --------------------------- heap volume -------------------------- */
-        // The pages are lit from the dataset's bytes; nothing is placed on them —
-        // the keyspace above stays a dashed representation, this is the memory.
         this.paintHeap()
 
         const hW = (HEAP.cols - 1) * CELL + HEAP_PAGE
         const hD = (HEAP.rows - 1) * CELL + HEAP_PAGE
-        // No pick plate and no separate cage. The page cubes are the pick
-        // surface: from far away they answer for the arena and the outline is
-        // the arena's bounds — a box that wraps every cube, taller than a block
-        // and wide enough in x/z. From close up they answer for one page. A
-        // plate under the cubes would cut the volume in half and a taller box
-        // would swallow the page clicks; neither is a cage around the pages.
         const heapLab = label('HEAP')
         heapLab.position.set(-hW / 2 - 0.42, HEAP.y + 0.34, HEAP.cz - hD / 2)
         this.group.add(heapLab)
 
-        // Every entry is tethered to the bucket that points at it. One hairline
-        // per live entry, coloured by kind, so a collision reads as several
-        // lines landing on one tile — the chain — and a big value reads as one
-        // line running off to a whole area, which is exactly the asymmetry
-        // between a 1 kB bucket array and hundreds of megabytes of payload.
         const webGeo = new LineSegmentsGeometry()
         const webMat = new LineMaterial({
             vertexColors: true,
@@ -1175,31 +935,6 @@ export class RedisInstance {
         this.pointerWeb = web
         this.rebuildPointerWeb()
 
-        // There is no cage or caption over the entry cubes any more.
-        //
-        // The dashed volume used to say "this drawing is ours", and a card over it
-        // called it "the keyspace — the database itself, in RAM". Both were a claim
-        // the picture cannot support: redis has ONE keyspace, which is the bucket
-        // array below plus the pages its entries were allocated on. A second,
-        // labelled arena of key-value blocks reads as a second copy of the data.
-        // The cubes stay — they are where a route has to point, and each one has
-        // its own card — but nothing draws a volume around them any more. What is
-        // left to do, when the next pass gets it, is to stand them on the heap
-        // pages they were really allocated from, and then there is nothing left
-        // above the buckets but the buckets.
-
-        /* --------------------------- AOF buffer --------------------------- */
-        // Same treatment as wal_buffers next door: block-sized cubes of memory
-        // floating above the run, each with its own edges, bobbing and swaying,
-        // drifting along with the end of the file. Deliberately not a box with
-        // cubes inside it — these bytes are in RAM only, so they should read as
-        // only half in this world.
-        //
-        // CYAN, not amber. In this scene amber means one thing: these bytes are in
-        // the file. aof_buf is the opposite of that, and painting it amber made
-        // the same colour claim both states at once. Cyan is the memory tint it
-        // shares with wal_buffers, because it IS the same thing: a log tail that
-        // has not reached the disk.
         const bufGroup = new THREE.Group()
         this.aofBufGroup = bufGroup
         bufGroup.position.set(this.aofHeadX(), AOF_BUF_Y, zAt(AOF_ROW))
@@ -1208,8 +943,6 @@ export class RedisInstance {
             const mat = new THREE.MeshStandardMaterial({
                 color: 0x0b2a36,
                 emissive: PALETTE.cyan,
-                // dim at rest: adjacent emissive cubes at full strength bloom
-                // into one white slab and stop reading as separate pages
                 emissiveIntensity: 0.5,
                 roughness: 0.35,
                 metalness: 0.45,
@@ -1239,13 +972,17 @@ export class RedisInstance {
                 return [
                     { label: 'cubes', value: `${AOF_BUF_CELLS} × 4 kB` },
                     { label: 'total', value: fmtBytes(total) },
-                    { label: 'occupied', value: `${fmtBytes(fill * total)} · ${Math.round(fill * 100)}%` },
-                    { label: 'pending', value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}` },
+                    {
+                        label: 'occupied',
+                        value: `${fmtBytes(fill * total)} · ${Math.round(fill * 100)}%`,
+                    },
+                    {
+                        label: 'pending',
+                        value: `${this.aofPending} rec · ${fmtBytes(this.aofPendingBytes)}`,
+                    },
                 ]
             },
         })
-        // the label hangs UNDER the strip: the space above it belongs to the
-        // AOF REWRITE agent, which works directly above the end of the log
         const bufLab = label('AOF BUFFER')
         bufLab.position.set(0, -0.62, 0)
         bufGroup.add(bufLab)
@@ -1305,14 +1042,6 @@ export class RedisInstance {
         }
     }
 
-    /**
-     * The channel. One ring, floating in the thread's own air.
-     *
-     * Everything pub/sub owns is here: a name, and the list of sockets on it. No
-     * block on the floor, no page, no record — a publish looks the name up, walks
-     * the list and writes to both directions of each socket. Nothing about the
-     * message survives the moment.
-     */
     private buildPubSub() {
         const ring = new THREE.Mesh(
             new THREE.TorusGeometry(0.4, 0.013, 6, 56),
@@ -1325,8 +1054,6 @@ export class RedisInstance {
             }),
         )
         ring.position.copy(CHANNEL.at)
-        // left in its own plane: a ring standing on edge, facing the front of the
-        // cage, so it is a circle from the house shot and a thin line from above
         this.group.add(ring)
         this.channelRing = ring
 
@@ -1335,9 +1062,7 @@ export class RedisInstance {
         this.group.add(glow)
 
         const lab = label(`CHANNEL · ${CHANNEL.name}`)
-        // under the ring, not beside it: to the side it collided with the KEYS
-        // label, which lives further back and lands in the same place from the
-        // house shot
+
         lab.position.copy(CHANNEL.at).add(new THREE.Vector3(0, -0.82, 0))
         this.group.add(lab)
 
@@ -1347,9 +1072,6 @@ export class RedisInstance {
         )
         pick.position.copy(CHANNEL.at)
         this.group.add(pick)
-        // The cage is the ring's own plane, not the floor's: a vertical ring of
-        // radius 0.4 is a square standing on edge, so the box is tall, wide and
-        // thin — a flat XZ box would draw a lid over a ring that stands up.
         const cage = new OutlineBox(0.96, 0.96, 0.2, PALETTE.violet, 0.28, {
             dashed: true,
         }).centre(CHANNEL.at.x, CHANNEL.at.y, CHANNEL.at.z)
@@ -1365,27 +1087,19 @@ export class RedisInstance {
         )
     }
 
-    /** Where a publish is addressed, in cage-local units: the channel. */
     channelPoint(): THREE.Vector3 {
         return CHANNEL.at.clone()
     }
 
-    /** The channel's name, for the status line and for a story's caption. */
     get channelName() {
         return CHANNEL.name
     }
 
-    /** A fan just left the channel. */
     pulseChannel() {
         this.channelPulse = 1
     }
 
     private buildPipeline() {
-        // The shared queue: everything the connections wrote, waiting for the loop.
-        // Each slot gets its own material, because the whole point of a queue is
-        // that slots differ: occupied ones are commands waiting their turn, empty
-        // ones are just room. One shared material could only ever flash the strip
-        // as a single object.
         const cellGeo = new THREE.BoxGeometry(0.36, 0.16, 0.52)
         for (let n = 0; n < QUEUE.cells; n++) {
             const mat = new THREE.MeshStandardMaterial({
@@ -1402,8 +1116,6 @@ export class RedisInstance {
             this.queueMats.push(mat)
         }
         const qW = QUEUE.cells * 0.52 + 0.14
-        // same rule as the bucket array: the queue is a container, not a marked
-        // thing. Its cage appears when you hover it, never before.
         const qPick = new THREE.Mesh(
             new THREE.BoxGeometry(qW, 0.55, 0.62),
             new THREE.MeshBasicMaterial({ visible: false }),
@@ -1419,7 +1131,6 @@ export class RedisInstance {
         qLab.position.set(-qW / 2 - 0.2, QUEUE.y + 0.4, QUEUE.z)
         this.group.add(qLab)
 
-        // the loop: one core, one ring — no parser, no planner, no executor chain
         const core = new THREE.MeshStandardMaterial({
             color: 0x0d2630,
             emissive: PALETTE.ice,
@@ -1461,7 +1172,6 @@ export class RedisInstance {
         this.group.add(ring)
         this.loopRing = ring
 
-        // a halo so it reads as the one hot thing in the cage
         const aurora = new THREE.Sprite(
             new THREE.SpriteMaterial({
                 map: radialTexture(),
@@ -1480,12 +1190,6 @@ export class RedisInstance {
         loopLab.position.set(LOOP.x + 1.2, LOOP.y + 0.1, LOOP.z)
         this.group.add(loopLab)
 
-        // Everything in the cage passes through this node, so it is a subject
-        // like any other: point at it for the card, double-click to frame it.
-        // A sphere, not a box — the orb and its ring are round, and 0.9 holds
-        // both with room for a pointer. No `outline`: hover then draws the same
-        // generated box every other node gets, and nothing is painted over a
-        // thing whose whole job is to read as the one sun in this cage.
         const loopPick = new THREE.Mesh(
             new THREE.SphereGeometry(0.9, 16, 12),
             new THREE.MeshBasicMaterial({ visible: false }),
@@ -1499,16 +1203,6 @@ export class RedisInstance {
         })
     }
 
-    /**
-     * The kernel's readiness set: one tile per fd the loop has registered.
-     *
-     * A connection in this cage is not a worker, and the missing part of that
-     * claim was this set — the loop does not wait on any one socket, it asks the
-     * kernel which fds are readable and only then reads. That is why a lit tile
-     * can sit there doing nothing for hours, and why the count of tiles is not
-     * the count of threads. Dashed cage: the tiles are real fds, the theatre of
-     * laying them in a row is ours — inside the kernel they are an array.
-     */
     private buildReadiness() {
         const n = BACKEND_SLOTS.length
         const tileGeo = new THREE.BoxGeometry(EPOLL.w, EPOLL.h, EPOLL.d)
@@ -1550,30 +1244,12 @@ export class RedisInstance {
             setCage,
         )
 
-        // under the plate, not beside the loop: the two labels land in the same
-        // screen spot from the wide shots otherwise
         const lab = label('EPOLL · FDS')
         lab.position.set(-setW / 2 - 0.25, EPOLL.y - 0.3, EPOLL.z + 0.45)
         this.group.add(lab)
     }
 
-    /**
-     * The other half of the address chain: the case where it does not continue.
-     *
-     * A value object is a 16-byte header — type, encoding, lru clock, refcount —
-     * and for integers and short strings the payload is inside that allocation.
-     * An `int`-encoded value stores the number in the header's pointer field; an
-     * `embstr` string shares the allocation with the bytes. Shared integers 0–9999
-     * go further and point every key at one global object. Those reads end at the
-     * object: no second allocation, no second page. This volume shows that row
-     * against the one that does continue — `raw` sds, or a converted collection —
-     * where the header holds an address and the bytes are on another page.
-     */
     private buildInlineObject() {
-        // The page it was allocated on: heap page 0. Nothing here is a place in the
-        // cage — a value object is one allocation inside one 4 kB block — so it is
-        // built in diagram units and drawn only while a read is holding it (see
-        // rideObject). The page itself is a page like any other.
         const page = this.heapPages[0] ?? 0
         this.showcasePage = page
         const at = new THREE.Vector3(
@@ -1582,10 +1258,6 @@ export class RedisInstance {
             heapZ(Math.floor(page / HEAP.cols)),
         )
         this.objectHome.copy(at).add(new THREE.Vector3(0, HEAP_PAGE * 1.35, 0))
-        // The stop where a read picks it up: just above the page it lives in. Nothing
-        // is drawn there — the object is in the read's hands — but the leg from the
-        // page to the object needs a length, or "the read has the object now" would be
-        // a caption about not moving.
         this.objectStop.copy(this.objectHome)
 
         const cage = new THREE.Group()
@@ -1594,10 +1266,6 @@ export class RedisInstance {
         this.group.add(cage)
         this.objectCage = cage
 
-        // The block it came out of. Pickable, with the card that explains what a
-        // value object is — but NOT outlined: a dashed box exactly the size of the
-        // page would lie on the block's own edges and shimmer against them, and the
-        // point of this diagram is that there is nothing special about this block.
         const pick = new THREE.Mesh(
             new THREE.BoxGeometry(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
             new THREE.MeshBasicMaterial({ visible: false }),
@@ -1628,10 +1296,6 @@ export class RedisInstance {
         const headerGeo = new THREE.BoxGeometry(0.36, 0.24, 0.32)
         const payloadGeo = new THREE.BoxGeometry(0.3, 0.2, 0.26)
 
-        // The two layouts sit on the same spot and only one is drawn at a time: the
-        // payload is either in the header's own allocation or behind a pointer, never
-        // both, so the top row IS the value for an int or an embstr and the bottom row
-        // is the value for a raw sds.
         const rows: Record<'inline' | 'pointer', THREE.Group> = {
             inline: new THREE.Group(),
             pointer: new THREE.Group(),
@@ -1650,7 +1314,6 @@ export class RedisInstance {
             payload.position.set(px, 0, 0)
             row.add(payload)
             if (!inline) {
-                // the gap is the second hop: the header holds an address, not bytes
                 const from = -0.66 + headerGeo.parameters.width / 2
                 const to = px - payloadGeo.parameters.width / 2
                 const link = new THREE.Mesh(
@@ -1669,13 +1332,6 @@ export class RedisInstance {
         this.objectRow = rows
         this.objectHeaderMat = headerMat
         this.objectPayloadMat = payloadMat
-        // ONE DASHED CAGE PER LAYOUT, each hugging its own row.
-        //
-        // Not one box around both: the two layouts are drawn one at a time, so a box
-        // around their union has air in it where no blocks ever are — tall in y, and
-        // lumpy in x. A cage per layout hugs what is actually there: elongated in x,
-        // one block high in y, the block's depth in z, plus the same fixed pad on
-        // every face.
         this.objectArea = { inline: new THREE.Box3(), pointer: new THREE.Box3() }
         this.objectOutline = { inline: null, pointer: null }
         for (const name of ['inline', 'pointer'] as const) {
@@ -1683,20 +1339,13 @@ export class RedisInstance {
             this.objectArea[name] = box
             const size = box.getSize(new THREE.Vector3())
             const centre = box.getCenter(new THREE.Vector3())
-            const outline = new OutlineBox(size.x, size.y, size.z, PALETTE.ice, 0.26, { dashed: true })
+            const outline = new OutlineBox(size.x, size.y, size.z, PALETTE.ice, 0.26, {
+                dashed: true,
+            })
             outline.centre(centre.x, centre.y, centre.z)
             cage.add(outline)
             this.objectOutline[name] = outline
         }
-        // The blocks are drawn at a quarter size inside a cage that does NOT shrink with
-        // them.
-        //
-        // The cage above is measured from the LAYOUT — the block positions — not from
-        // the scaled meshes, so it keeps its size and all of the difference becomes air.
-        // Sixteen bytes and one pointer are a detail of the object, not the object: at
-        // full size the two blocks filled their own outline and the read looked like it
-        // was carrying a crate. Each row is scaled about its own centre, so it stays in
-        // the middle of the cage instead of clinging to one edge.
         const BLOCK_SCALE = 0.25
         for (const name of ['inline', 'pointer'] as const) {
             const row = rows[name]
@@ -1706,7 +1355,6 @@ export class RedisInstance {
         }
     }
 
-    /** The box one row of the value-object diagram occupies, in cage units. */
     private rowArea(row: THREE.Group): THREE.Box3 {
         const area = new THREE.Box3()
         row.traverse((o) => {
@@ -1716,35 +1364,20 @@ export class RedisInstance {
             const b = m.geometry.boundingBox?.clone()
             if (b) area.union(b.translate(m.position))
         })
-        // The row's OWN offset belongs to the box. Left out, the dashed cage came out
-        // one row high around two rows stacked 0.5 apart, and the blocks stuck out of
-        // the top and bottom of their own outline.
         return area.translate(row.position)
     }
 
     private buildAgents() {
-        this.bgsaveDrone = this.makeAgent(
-            this.rdbHome.clone(),
-            PALETTE.teal,
-            'BGSAVE',
-            {
-                title: 'BGSAVE — a forked child writes the dump',
-                body: 'The snapshot is taken by forking: the child gets a copy-on-write view of the whole keyspace and writes it to a new RDB file while the parent keeps serving. Nothing is locked, not even for an instant, and the queue keeps draining — watch it while this runs. The cost is memory, not time: every page the parent modifies before the child has written it gets duplicated, so a big instance can briefly need close to twice its dataset. SAVE is the same work without the fork, and that one does stop the server.',
-                meta: 'fork() · copy-on-write · no locking, extra memory',
-            },
-        )
-        this.rewriteDrone = this.makeAgent(
-            // it rests over the base file: a rewrite produces exactly that, a new
-            // base written from the current state
-            this.rewriteHome.clone(),
-            PALETTE.amber,
-            'AOF REWRITE',
-            {
-                title: 'AOF rewrite — write the log down to its current state',
-                body: 'The AOF records commands, so it grows without bound: a key set a thousand times is a thousand commands. Rewriting walks the keyspace and writes the minimum set of commands that reproduces it, into a new file, then swaps it in. Same idea as a postgres checkpoint letting old WAL be recycled, except here the log itself is rewritten.',
-                meta: 'bgrewriteaof · new file, then atomic swap',
-            },
-        )
+        this.bgsaveDrone = this.makeAgent(this.rdbHome.clone(), PALETTE.teal, 'BGSAVE', {
+            title: 'BGSAVE — a forked child writes the dump',
+            body: 'The snapshot is taken by forking: the child gets a copy-on-write view of the whole keyspace and writes it to a new RDB file while the parent keeps serving. Nothing is locked, not even for an instant, and the queue keeps draining — watch it while this runs. The cost is memory, not time: every page the parent modifies before the child has written it gets duplicated, so a big instance can briefly need close to twice its dataset. SAVE is the same work without the fork, and that one does stop the server.',
+            meta: 'fork() · copy-on-write · no locking, extra memory',
+        })
+        this.rewriteDrone = this.makeAgent(this.rewriteHome.clone(), PALETTE.amber, 'AOF REWRITE', {
+            title: 'AOF rewrite — write the log down to its current state',
+            body: 'The AOF records commands, so it grows without bound: a key set a thousand times is a thousand commands. Rewriting walks the keyspace and writes the minimum set of commands that reproduces it, into a new file, then swaps it in. Same idea as a postgres checkpoint letting old WAL be recycled, except here the log itself is rewritten.',
+            meta: 'bgrewriteaof · new file, then atomic swap',
+        })
     }
 
     private makeAgent(pos: THREE.Vector3, color: number, text: string, info: Info): THREE.Group {
@@ -1764,11 +1397,6 @@ export class RedisInstance {
         g.add(body)
         g.add(halo(color, 2.0, 0.28))
 
-        // No ring around the agent. A flat torus lying in the XZ plane reads as a
-        // cage drawn around it — the same "this thing is selected" signal the
-        // scene uses for hover — and it was on permanently. The body and the halo
-        // are enough to find it; the pick box below is what makes it selectable.
-
         const tag = label(text)
         tag.position.set(0.5, 0.15, 0)
         g.add(tag)
@@ -1784,28 +1412,18 @@ export class RedisInstance {
         return g
     }
 
-    /* --------------------------------- picking ------------------------------- */
-
     private instanceAt(hit: THREE.Intersection, count: number): number | null {
-        if (hit.instanceId === undefined || hit.instanceId < 0 || hit.instanceId >= count) return null
+        if (hit.instanceId === undefined || hit.instanceId < 0 || hit.instanceId >= count)
+            return null
         return hit.instanceId
     }
 
-    /**
-     * Pick boxes are built in cage-local units, because that is where the blocks
-     * live. The pointer outlines them and the camera flies to them in world
-     * space, so they have to be lifted through the cage's own transform — the
-     * cage is not at the origin any more.
-     */
     private toWorld(box: THREE.Box3): THREE.Box3 {
         this.group.updateMatrixWorld()
         return box.applyMatrix4(this.group.matrixWorld)
     }
 
     private diskPick(hit: THREE.Intersection) {
-        // Nothing inside a container answers for itself until you are close enough
-        // to mean it: from across the room a click is about the file, not about
-        // one 4 kB block. Same range rule as the postgres disk.
         if (hit.distance > BLOCK_PICK_RANGE) return null
         const i = this.instanceAt(hit, COLS * ROWS)
         if (i === null) return null
@@ -1824,27 +1442,21 @@ export class RedisInstance {
         )
         const info: Info = onAof
             ? {
-                title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
-                body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
-                meta: 'appendonly.aof · replayed in order on start',
-            }
+                  title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
+                  body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
+                  meta: 'appendonly.aof · replayed in order on start',
+              }
             : {
-                title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
-                body: 'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' + `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` + 'The block size never varies, only how much of the file is used.',
-                meta: 'dump.rdb · state, not history · loaded on start',
-            }
+                  title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
+                  body:
+                      'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' +
+                      `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` +
+                      'The block size never varies, only how much of the file is used.',
+                  meta: 'dump.rdb · state, not history · loaded on start',
+              }
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
     }
 
-    /**
-     * The whole arena: its card, and the cage that wraps every page cube.
-     *
-     * The box is the pages' bounds, not a plate and not a taller generic
-     * volume — it has the arena's x/z extent and a height above one 4 kB block,
-     * so the outline surrounds the cubes and touches none of them. This is the
-     * same box a far click on any page returns; close up the same mesh answers
-     * for one page instead.
-     */
     private heapInfo() {
         const pageCount = HEAP.cols * HEAP.rows
         const hW = (HEAP.cols - 1) * CELL + HEAP_PAGE
@@ -1857,7 +1469,7 @@ export class RedisInstance {
             key: 'redis-heap',
             info: {
                 title: 'Memory — the heap, a volume of its own',
-                body: 'This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 kB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine\'s RAM.',
+                body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 kB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
                 meta: `heap · ${pageCount} × 4 kB · ${fmtBytes(pageCount * 4096)} arena · scattered pages · separate volume`,
                 stats: () => {
                     const pageBytes = 4096
@@ -1887,11 +1499,6 @@ export class RedisInstance {
         }
     }
 
-    /**
-     * A key was created or loaded: the allocator hands it a free page. The page
-     * appears where the free list had it, not next to the key's neighbours, so
-     * the arena keeps its holes instead of closing up.
-     */
     private occupyHeapPage() {
         if (!this.heapMask) return
         const pageCount = HEAP.cols * HEAP.rows
@@ -1903,7 +1510,6 @@ export class RedisInstance {
         this.fadeHeapPage(page, true)
     }
 
-    /** A key was deleted or evicted: its page is freed and left as a hole. */
     private releaseHeapPage() {
         if (!this.heapMask) return
         const pageCount = HEAP.cols * HEAP.rows
@@ -1915,7 +1521,6 @@ export class RedisInstance {
         this.fadeHeapPage(page, false)
     }
 
-    /** A page appears when allocated and disappears into a hole when freed. */
     private fadeHeapPage(page: number, on: boolean) {
         const row = Math.floor(page / HEAP.cols)
         const col = page % HEAP.cols
@@ -1924,14 +1529,16 @@ export class RedisInstance {
         const hex = on ? mixHex(0x06222c, PALETTE.cyan, 0.82) : mixHex(0x04141c, PALETTE.cyan, 0.07)
         this.heapMesh.setColorAt(page, this.tmpColor.setHex(hex))
         if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        void this.ticker.add(0.32, (k) => {
-            const s = from + (to - from) * Math.min(1, k)
-            this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
-            this.tmpObj.scale.setScalar(Math.max(0.001, s))
-            this.tmpObj.updateMatrix()
-            this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
-            this.heapMesh.instanceMatrix.needsUpdate = true
-        }).then(() => this.paintHeap())
+        void this.ticker
+            .add(0.32, (k) => {
+                const s = from + (to - from) * Math.min(1, k)
+                this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
+                this.tmpObj.scale.setScalar(Math.max(0.001, s))
+                this.tmpObj.updateMatrix()
+                this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
+                this.heapMesh.instanceMatrix.needsUpdate = true
+            })
+            .then(() => this.paintHeap())
     }
     private heapPageInfo(hit: THREE.Intersection) {
         if (hit.distance > BLOCK_PICK_RANGE) return this.heapInfo()
@@ -1959,7 +1566,6 @@ export class RedisInstance {
         }
     }
 
-    /** The inspector payload for one key, shared by its entry block and its structures. */
     private keyInfo(i: number) {
         const key = this.keys[i]
         if (!key || !key.live) return null
@@ -1982,14 +1588,14 @@ export class RedisInstance {
                     (isString
                         ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
                         : key.aux
-                            ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
+                          ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
                             (key.kind === 'zset'
                                 ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
                                 : key.kind === 'list'
-                                    ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
-                                    : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
+                                  ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
+                                  : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
                             ' It never converts back: the bigger encoding is kept until the key is deleted.'
-                            : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
                 meta: isString
                     ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
@@ -1998,13 +1604,6 @@ export class RedisInstance {
         }
     }
 
-    /**
-     * The card for one large value.
-     *
-     * Same rule as the encoding cards: the drawing is a SLICE, so the card carries
-     * the real number and says so. What it can show honestly is the shape — and
-     * the shape is the answer to what a big list or a big sorted set really is.
-     */
     private bigInfo(key: RedisKey) {
         const kind = key.big as BigKind
         const real = BIG_REAL[kind]
@@ -2045,15 +1644,11 @@ export class RedisInstance {
         }
     }
 
-    /* ---------------------------------- ports -------------------------------- */
-
     openPort(): RedisPort | null {
         const pod = this.ports.find((p) => !p.active)
         if (!pod) return null
         pod.active = true
         pod.group.visible = true
-        // a new connection starts as an ordinary client: nothing is subscribed
-        // until it says SUBSCRIBE
         this.setSubscribed(pod, false)
         return pod
     }
@@ -2065,19 +1660,10 @@ export class RedisInstance {
         pod.active = false
         pod.busy = false
         pod.group.visible = false
-        // closing a socket ends its subscriptions: the channel no longer has it
         this.setSubscribed(pod, false)
         return true
     }
 
-    /**
-     * Put a socket into subscriber mode, or take it out.
-     *
-     * Violet, because that is the colour the queue and the loop already speak:
-     * a published message is handed around by the thread and never becomes a
-     * value, a key or a record in a file. What changes on the socket is only its
-     * colour — the connection itself is the same coupling to the same fd set.
-     */
     setSubscribed(pod: RedisPort, on: boolean) {
         if (pod.subs === on) return
         pod.subs = on
@@ -2086,12 +1672,10 @@ export class RedisInstance {
         pod.glow.color.setHex(hex)
     }
 
-    /** The sockets a PUBLISH has to reach: every open connection in subscriber mode. */
     subscribers(): RedisPort[] {
         return this.ports.filter((p) => p.active && p.subs)
     }
 
-    /** Nobody is listening any more: every socket back to an ordinary client. */
     clearSubscribers() {
         for (const pod of this.ports) this.setSubscribed(pod, false)
     }
@@ -2099,32 +1683,20 @@ export class RedisInstance {
     pulsePort(pod: RedisPort) {
         pod.pulse = 1
         pod.busy = true
-        // the loop read this fd: one entry of the readiness set fired
         this.fdPulse[pod.id] = 1
     }
 
-    /**
-     * Bytes were written TO this fd — the other direction of the same readiness
-     * entry. A subscriber's socket only ever receives, so it must not be marked
-     * busy: nothing is being read from it and the command thread is not in it.
-     */
     pulseSend(pod: RedisPort) {
         pod.pulse = 1
         this.fdPulse[pod.id] = 1
     }
 
-    /**
-     * No listener at all. A process that has not finished loading is not
-     * accepting connections, and that is the whole visible difference between a
-     * start (nothing runs until the files are in) and a save (nothing stops).
-     */
     shutPorts() {
         for (const pod of this.ports) {
             pod.active = false
             pod.busy = false
             pod.pulse = 0
             pod.group.visible = false
-            // subscriptions die with the listener: nothing is left to deliver to
             this.setSubscribed(pod, false)
         }
     }
@@ -2137,8 +1709,6 @@ export class RedisInstance {
         return pod.group.position.clone().add(new THREE.Vector3(0, 0.12, 0))
     }
 
-    /* ---------------------------------- queue -------------------------------- */
-
     queueCellTop(n: number): THREE.Vector3 {
         const cell = this.queueCells[Math.max(0, Math.min(this.queueCells.length - 1, n))]
         return cell.position.clone().add(new THREE.Vector3(0, 0.2, 0))
@@ -2148,12 +1718,6 @@ export class RedisInstance {
         return new THREE.Vector3(0, QUEUE.y + 0.3, QUEUE.z)
     }
 
-    /**
-     * Where a command is executed: the centre of the loop orb itself, not a
-     * point floating above it. Same rule the postgres lanes follow — sim.ts
-     * aims at the parse/plan/exec group positions — so a route visibly enters
-     * the node it is addressed to instead of converging in the air over it.
-     */
     loopPoint(): THREE.Vector3 {
         return LOOP.clone()
     }
@@ -2162,15 +1726,6 @@ export class RedisInstance {
         this.loopCore.emissiveIntensity = 3.4
     }
 
-    /**
-     * A command arrived and joined the back of the queue. Returns its slot, which
-     * is where the request's own path should point.
-     *
-     * The occupied slots always sit at the head end, oldest first: slot 0 is the
-     * command the thread will take next, and a new arrival takes the slot behind
-     * the last one. That is what makes the strip read as a queue and not as a
-     * row of lights.
-     */
     queuePush(): number {
         this.queueDepth = Math.min(this.queueCells.length, this.queueDepth + 1)
         const n = this.queueDepth - 1
@@ -2178,24 +1733,16 @@ export class RedisInstance {
         return n
     }
 
-    /** The thread took the head of the queue; everything behind it moves up one. */
     queuePop(): void {
         if (this.queueDepth <= 0) return
         this.queueDepth -= 1
-        // flash the slot that just became the head: that is the queue advancing
         this.paintQueue(2.0, 0)
     }
 
-    /** How many commands are waiting — the HUD can show it. */
     get queueLength() {
         return this.queueDepth
     }
 
-    /**
-     * Lit from the head backwards, fading with depth: the front command is the
-     * brightest because it is next, and empty slots stay almost dark.
-     * `spike` flashes one slot for a beat (arrival, or the new head).
-     */
     private paintQueue(spike = 0, spikeIndex = -1) {
         this.queueMats.forEach((mat, i) => {
             if (i >= this.queueDepth) {
@@ -2211,18 +1758,12 @@ export class RedisInstance {
             const base = mat.emissiveIntensity
             void this.ticker
                 .add(0.35, (k) => {
-                    // the slot may have been drained while the flash was running;
-                    // writing the old value back would leave a served command lit
                     if (spikeIndex >= this.queueDepth) return
                     mat.emissiveIntensity = base + (spike - base) * (1 - k)
                 })
-                // and re-derive the whole strip from the depth, so a flash can
-                // never be the last word on what is in the queue
                 .then(() => this.paintQueue())
         }
     }
-
-    /* ---------------------------------- keys --------------------------------- */
 
     get capacity() {
         return this.keys.length
@@ -2238,32 +1779,16 @@ export class RedisInstance {
         return live[randInt(0, live.length - 1)]
     }
 
-    /**
-     * A live key that is not one of the big values.
-     *
-     * Ambient traffic must not delete or expire a big value: a story forces one
-     * as its subject, and a DEL that happens to land on it removes the thing the
-     * caption is about — the story then waits forever for a key that is gone.
-     */
     randomLiveSmallKey(): RedisKey | null {
         const live = this.keys.filter((k) => k.live && !k.big)
         if (live.length === 0) return null
         return live[randInt(0, live.length - 1)]
     }
 
-    /** First dead slot — a key created rather than updated. */
     freeKey(): RedisKey | null {
         return this.keys.find((k) => !k.live) ?? null
     }
 
-    /**
-     * Open the page a point is standing on, or close whatever is open.
-     *
-     * Called with the point the ride has stopped at: if that point is inside a
-     * used page, the block becomes a glass shell and the entry cube inside it is
-     * visible. Passing null closes it. One page at a time — the point of the shot
-     * is "look what is in THIS page", and ten open pages say nothing.
-     */
     focusPageAt(at: THREE.Vector3 | null) {
         const page = at ? this.pageAtPoint(at) : null
         if (page === this.ghostPage) return
@@ -2272,13 +1797,7 @@ export class RedisInstance {
         this.applyGhost()
     }
 
-    /** Which used page a cage-local point falls inside, if any. */
     private pageAtPoint(at: THREE.Vector3): number | null {
-        // A page is a block at one height, and a stop can sit a little above it: the
-        // object header, the value's own bucket array and a node beside it are all
-        // read standing on the same page, a few tenths up. Two pages of slack covers
-        // those and still refuses a big value's own cage, which used to sit units
-        // higher — and never appears here any more now that it is carried.
         if (Math.abs(at.y - HEAP.y) > HEAP_PAGE * 2) return null
         const c = Math.round(at.x / CELL + (HEAP.cols - 1) / 2)
         const r = Math.round((at.z - HEAP.cz) / CELL + (HEAP.rows - 1) / 2)
@@ -2287,7 +1806,6 @@ export class RedisInstance {
         return this.heapMask?.[page] === 1 ? page : null
     }
 
-    /** Put the opened block's cube back. */
     private closeGhost() {
         const page = this.ghostPage
         this.ghostPage = null
@@ -2296,14 +1814,6 @@ export class RedisInstance {
         if (this.pageGhost) this.pageGhost.visible = false
     }
 
-    /**
-     * Draw the open page: a glass box where the block was, and no block.
-     *
-     * The block is not made transparent in place — an InstancedMesh has one
-     * material, so per-instance opacity is not a thing. It is collapsed to nothing
-     * and a glass shell is drawn in its place, which looks the same and costs one
-     * extra mesh for the one page that is open.
-     */
     private applyGhost() {
         const page = this.ghostPage
         if (page === null || !this.pageGhost) return
@@ -2320,7 +1830,6 @@ export class RedisInstance {
         this.heapMesh.instanceMatrix.needsUpdate = true
     }
 
-    /** One page back to the cube its mask says it should be. */
     private paintPage(page: number) {
         if (!this.heapMesh) return
         const col = page % HEAP.cols
@@ -2339,64 +1848,25 @@ export class RedisInstance {
             const at = BIG_SPOT[key.big]
             return new THREE.Vector3(at.x, at.y + 0.5, at.z)
         }
-        // the entry IS the page: there is no second object to stand on, so the
-        // route's entry stop is the top face of the page that holds it
         return this.keyPageTop(key).add(new THREE.Vector3(0, 0.001, 0))
     }
 
-    /**
-     * The page this entry's bytes actually sit on — the block its cube now stands
-     * inside. This is the far end of the pointer: a bucket points at a dictEntry,
-     * and the dictEntry (with the key and the value it names) is an allocation on
-     * one of these pages.
-     */
     keyPageTop(key: RedisKey): THREE.Vector3 {
         const row = Math.floor(key.page / HEAP.cols)
         const col = key.page % HEAP.cols
         return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
     }
 
-    /**
-     * The value object, standing on the one page that is drawn open.
-     *
-     * It used to be a section of its own floating beside the bucket array, which
-     * needed a dashed cage and an explanation to say what it was doing there. It
-     * is not a section: a value object is an allocation, the allocation is on a
-     * page, and the page is already drawn. So the cage is built at 1/12 scale
-     * inside `showcasePage`, and the route's object stop is the top face of that
-     * page — nothing is drawn outside a heap block, and zooming in on the block
-     * shows what it holds.
-     */
     inlinePoint(): THREE.Vector3 {
         const row = Math.floor(this.showcasePage / HEAP.cols)
         const col = this.showcasePage % HEAP.cols
-        // The CENTRE of the page: the camera aims where the packet is, and the shot
-        // is about what the open block holds — a point hovering above the block put
-        // the cage just outside the bottom of the frame at this zoom. The marker is
-        // 1/zoom² down there, so it no longer covers anything.
         return new THREE.Vector3(heapX(col), HEAP.y, heapZ(row))
     }
 
-    /**
-     * The object the read lands on.
-     *
-     * A point just above the page it was allocated in, and nothing else: the object
-     * itself is drawn in the read's hands, like every other structure a read finds
-     * in the heap. The stop still needs a place of its own, or the leg from the page
-     * to the object would have no length.
-     */
     objectPoint(): THREE.Vector3 {
         return this.objectStop.clone()
     }
 
-    /**
-     * Carry the value object with the read that found it, or put it away.
-     *
-     * `layout` is the half that is TRUE of this value: `inline` for an int or an
-     * embstr, where the bytes are in the header's own allocation, and `pointer` for a
-     * raw sds, where the header holds an address and the bytes are on another page.
-     * One row is drawn at a time, each with its own hugging cage.
-     */
     rideObject(packet: THREE.Object3D | null, layout: 'inline' | 'pointer' = 'inline') {
         const g = this.objectCage
         if (!g) return
@@ -2421,143 +1891,61 @@ export class RedisInstance {
         const size = area?.getSize(new THREE.Vector3()) ?? null
         const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
         const longest = size ? Math.max(size.x, size.y, size.z) : 1
-        // OBJECT_ACROSS, not the big structures' two units: this one is two blocks, and
-        // at their size the read looked like it was carrying a crate.
         this.values.carryInto(g, size, centre, packet, OBJECT_ACROSS / (longest || 1))
     }
 
-    /**
-     * Light the part of the value object the read has just reached.
-     *
-     * A value read is a sequence of discoveries — here is the header, and here is
-     * where the bytes are — so the drawing says which one just happened. `header` for
-     * the sixteen bytes that carry the encoding, `payload` for the allocation the
-     * pointer led to, `none` while the read is still in the air or when the payload is
-     * not on this page at all.
-     */
     lightObject(part: 'none' | 'header' | 'payload') {
-        if (this.objectHeaderMat) this.objectHeaderMat.emissiveIntensity = part === 'header' ? 2.6 : 0.16
-        if (this.objectPayloadMat) this.objectPayloadMat.emissiveIntensity = part === 'payload' ? 2.6 : 0.36
+        if (this.objectHeaderMat)
+            this.objectHeaderMat.emissiveIntensity = part === 'header' ? 2.6 : 0.16
+        if (this.objectPayloadMat)
+            this.objectPayloadMat.emissiveIntensity = part === 'payload' ? 2.6 : 0.36
     }
 
-    /**
-     * The page that is drawn open, as a cage-local point.
-     *
-     * While a read is riding, the page under the packet takes over (see the sim's
-     * focusPageAt call).
-     */
     showcasePoint(): THREE.Vector3 {
         return this.inlinePoint()
     }
 
-    /**
-     * A compact string key on the page that hosts the value-object cage.
-     *
-     * The inline story visits one page and one object, so the key it reads has to
-     * be the key allocated on the page where the cage was built — otherwise the
-     * caption says "one page, one object" over two different pages. Which key is
-     * used is our choice, not redis's: every compact key reads the same way.
-     */
     compactKeyLeft(): RedisKey | null {
         if (this.inlineKey?.live) return this.inlineKey
-        const live = this.keys.filter((k) => k.live && !k.aux && !k.big && !k.raw && k.kind === 'string')
+        const live = this.keys.filter(
+            (k) => k.live && !k.aux && !k.big && !k.raw && k.kind === 'string',
+        )
         if (live.length === 0) return null
         const host = live.find((k) => k.page === this.showcasePage)
         if (host) return host
-        return live.reduce((a, b) => ((b.page % HEAP.cols) > (a.page % HEAP.cols) ? a : b))
+        return live.reduce((a, b) => (b.page % HEAP.cols > a.page % HEAP.cols ? a : b))
     }
 
-    /**
-     * The large string: same header, but its bytes are on another page.
-     *
-     * A `raw` sds is one more hop than an embstr and one fewer than a collection,
-     * and it is the only read where a value that is not "big" still costs a second
-     * access — which is exactly what makes `raw` worth a story of its own.
-     */
     rawKeyLeft(): RedisKey | null {
         if (this.rawKey?.live) return this.rawKey
         return this.keys.find((k) => k.live && k.raw && !k.big) ?? null
     }
 
-    /**
-     * The value's own structure — the far side of the entry's value pointer.
-     *
-     * A big value is a structure of its own (dashed cage at the back), a
-     * converted small value is the extra block stacked on its entry, and a
-     * compact value has no separate structure at all: the whole payload is in
-     * the entry's allocation, so this returns the entry itself. That difference
-     * is the 2-hop / 3-hop story in one function.
-     */
     valuePoint(key: RedisKey): THREE.Vector3 {
         if (key.big) {
-            // The structure is CARRIED by the read, so the stop that means "this is
-            // the value's structure" is the page where it is picked up — the entry's
-            // page, just above the object header that points at it. It used to be
-            // BIG_SPOT, which is where the cage is DRAWN while idle: the journey flew
-            // to the back of the cage to visit a place the ride had just taken the
-            // structure away from, and then flew back.
             return this.keyPageTop(key).add(new THREE.Vector3(0, 0.14, 0))
         }
         if (key.aux) {
-            // the converted structure is a second allocation, but it is drawn on
-            // the same open page rather than floating above the entry: nothing may
-            // stick out of a heap block
             return this.keyPageTop(key).add(new THREE.Vector3(0, 0.045, 0))
         }
         return this.keyTop(key)
     }
 
-    /**
-     * One node inside a value's structure — where a walk of the value lands.
-     *
-     * A skiplist hop skips a run of members, a quicklist walk steps node to node,
-     * a hashtable walk goes down a chain. These are points INSIDE the drawn
-     * structure, so a route can bounce between it and the heap pages its nodes
-     * were allocated on.
-     */
     nodePoint(key: RedisKey, n: number): THREE.Vector3 {
         if (!key.big) {
-            // one block above the entry: the walk is inside that single allocation
             return this.valuePoint(key).add(new THREE.Vector3(0, 0.05 * (n + 1), 0))
         }
-        // A node of a carried structure is not an address in the cage any more: it is
-        // the entry page, where the read picked the structure up and where the node
-        // beside it is what gets read.
         return this.keyPageTop(key).add(new THREE.Vector3(0, 0.18 + 0.04 * n, -0.06))
     }
 
-    /**
-     * The SECOND hash table — the one inside a converted hash or sorted set.
-     *
-     * A `hashtable`-encoded hash is a dict, and a converted zset carries a dict
-     * beside its skiplist (member → score). Those are real lookups, and they are
-     * not the keyspace dict: they are the value's own bucket arrays, drawn as the
-     * block above the entry, or as the plate beside the tower.
-     */
     innerDictPoint(key: RedisKey): THREE.Vector3 | null {
         if (key.kind !== 'hash' && key.kind !== 'zset') return null
         if (!key.aux && !key.big) return null
         if (!key.big) return this.valuePoint(key)
-        // the value's own bucket array is part of the structure the read is holding,
-        // so it is a point beside the entry page — not a place at the back of the cage
         return this.keyPageTop(key).add(new THREE.Vector3(0.1, 0.24, 0.06))
     }
 
-    /**
-     * The next page a walk of this value reads — a hop through RAM.
-     *
-     * A skiplist node or a quicklist node is its own allocation on its own page;
-     * the chain between them is a set of pointers, so following one is a jump to
-     * an unrelated address. Deterministic per key and step, so the same read
-     * draws the same path twice.
-     */
     hopPoint(key: RedisKey, n: number): THREE.Vector3 {
-        // A walk lands on USED pages. The arithmetic below picks a page 97 slots
-        // apart, which spread the hops out nicely and then landed them on whatever
-        // the mask had there — free pages, most of the time, so the block never
-        // opened and the story froze on a page that does not exist. Indexing the
-        // used pages instead keeps the spread AND makes every hop a page in use,
-        // which is also the only thing that can be true: a node was allocated.
         const used = this.heapPages.length > 0 ? this.heapPages : [0]
         const page = used[(((key.page + 97 * (n + 1)) % used.length) + used.length) % used.length]
         const row = Math.floor(page / HEAP.cols)
@@ -2565,7 +1953,6 @@ export class RedisInstance {
         return new THREE.Vector3(heapX(col), HEAP.y + HEAP_PAGE / 2 + 0.02, heapZ(row))
     }
 
-    /** Height of what this key occupies on screen: its block, plus the structures above it. */
     private keyStack(key: RedisKey): number {
         return KEY.h * (1 + auxBlocks(key)) + 0.02 * auxBlocks(key)
     }
@@ -2581,27 +1968,15 @@ export class RedisInstance {
         )
     }
 
-    /** The volume one big value occupies, cage-local — its dashed cage, in a box. */
     private bigBox(kind: BigKind): THREE.Box3 {
         return this.values.box(kind)
     }
 
-    /**
-     * The colour a key block rests at. Kind is the tint, `shade` is the per-slot
-     * jitter that keeps a plane of identical cubes from reading as one mass.
-     */
     private keyBase(key: RedisKey): number {
         return mixHex(0x06222c, KIND_COLOR[key.kind], 0.55 * key.shade)
     }
 
-    /**
-     * Draw the allocations a converted value has: nothing for a compact encoding,
-     * one block for a hashtable, two for the skiplist + dict pair of a zset. They
-     * stack upward from the entry, so "this value got heavier" is a column height
-     * you can see across the plane.
-     */
     private paintAuxKey(key: RedisKey) {
-        // a big value is its own area, not a stack on a plane block
         const n = key.big ? 0 : auxBlocks(key)
         const deploy = this.auxAnim.get(key.i) ?? 1
         for (let b = 0; b < 2; b++) {
@@ -2622,29 +1997,17 @@ export class RedisInstance {
         for (const key of this.keys) this.paintAuxKey(key)
     }
 
-    /**
-     * A live key of this kind, preferring one still in its compact encoding: those
-     * are the ones a write can still convert, which is the event worth showing.
-     */
     liveOfKind(kind: KeyKind): RedisKey | null {
         const live = this.keys.filter((k) => k.live && k.kind === kind)
         if (live.length === 0) return null
         const compact = live.filter((k) => !k.aux)
         if (compact.length === 0) return live[randInt(0, live.length - 1)]
-        // Half the time, aim at the value closest to its limit. That is a choice of
-        // the simulation, not a claim about redis — nothing in redis prefers a full
-        // key, it simply appends to whatever the client named. Without the bias a
-        // conversion is a rare accident of traffic and you would never see one.
         if (Math.random() < 0.5) {
             return compact.reduce((a, b) => (b.entries > a.entries ? b : a))
         }
         return compact[randInt(0, compact.length - 1)]
     }
 
-    /**
-     * A free slot reused for a value of this type. A created key starts small —
-     * one element — so its encoding budget starts over with it.
-     */
     setKeyKind(key: RedisKey, kind: KeyKind) {
         const range = VALUE_BYTES[kind]
         key.kind = kind
@@ -2657,23 +2020,12 @@ export class RedisInstance {
         this.paintHeap()
     }
 
-    /**
-     * One element written into a collection.
-     *
-     * Returns true when this element pushed the value past its encoding limit. That
-     * is the one write in redis that is O(n): the flat listpack is read, freed, and
-     * the real structure is allocated and filled — on the only thread there is, so
-     * every other client waits for it. Redis never converts back down; a value
-     * keeps the bigger encoding until the key is deleted.
-     */
     growKey(key: RedisKey): boolean {
         if (key.kind === 'string' || !key.live) return false
         key.entries++
         if (key.aux) return false
         if (key.entries <= encodingLimit(key.kind)) return false
         key.aux = true
-        // the converted structure is bigger than the flat buffer it replaced: a
-        // pointer and a node per element, and a second index for a zset
         key.bytes += 400 + key.entries * (key.kind === 'zset' ? 48 : 24)
         this.auxAnim.set(key.i, 0)
         this.flashKey(key, KIND_COLOR[key.kind], 0.9)
@@ -2682,21 +2034,16 @@ export class RedisInstance {
         return true
     }
 
-    /** `OBJECT ENCODING` for a key, for the inspector. */
     encoding(key: RedisKey): string {
         return encodingOf(key)
     }
 
-    /* -------------------------------- the skew ------------------------------- */
-
-    /** A hot key to send a read at — most traffic goes to a few of them. */
     hotKey(): RedisKey | null {
         const live = this.hotKeys.filter((k) => k.live)
         if (live.length === 0) return null
         return live[randInt(0, live.length - 1)]
     }
 
-    /** One of the large values, if the same kind is asked for. */
     bigKey(kind?: BigKind): RedisKey | null {
         const all = Object.values(this.bigKeys) as RedisKey[]
         const live = all.filter((k) => k && k.live && (!kind || k.big === kind))
@@ -2704,7 +2051,6 @@ export class RedisInstance {
         return live[randInt(0, live.length - 1)]
     }
 
-    /** Keys drawn as their own area — the panel counts them. */
     get bigCount() {
         return (Object.values(this.bigKeys) as RedisKey[]).filter((k) => k && k.live).length
     }
@@ -2713,11 +2059,6 @@ export class RedisInstance {
         return this.hotKeys.filter((k) => k.live).length
     }
 
-    /**
-     * Who a write can push out. Never a big or a hot key: both are the point of
-     * this floor, and evicting one would delete the thing being explained. Real
-     * redis would evict whatever the policy picked — including them.
-     */
     evictionVictim(): RedisKey | null {
         const live = this.keys.filter((k) => k.live && !k.big && !k.hot)
         if (live.length === 0) return null
@@ -2727,11 +2068,9 @@ export class RedisInstance {
     setKeyLive(key: RedisKey, live: boolean) {
         key.live = live
         key.heat = live ? 1 : 0
-        // a created key takes a page, a deleted one returns it as a hole
         if (live) this.occupyHeapPage()
         else this.releaseHeapPage()
         if (key.big) {
-            // drawn as its own area, never as a block in the plane
             this.flashKey(key, KIND_COLOR[key.kind], 0.5)
             return
         }
@@ -2741,32 +2080,21 @@ export class RedisInstance {
         this.tmpObj.updateMatrix()
         this.keysMesh.setMatrixAt(key.i, this.tmpObj.matrix)
         this.keysMesh.instanceMatrix.needsUpdate = true
-        // the value's other allocations go with it
         this.paintAuxKey(key)
         this.flashKey(key, live ? KIND_COLOR[key.kind] : PALETTE.magenta, 0.5)
         this.rebuildPointerWeb()
     }
 
-    /* ---------------------------------- dict --------------------------------- */
-
-    /** Which bucket this entry lands in, for a table of `size` buckets. */
     private bucketOf(i: number, size: number): number {
-        // the multiplicative hash, truncated to a uint32 like the real one
         return ((i * 2654435761) >>> 0) % size
     }
 
-    /**
-     * The tile standing for a bucket in one table half. The two tables sit side
-     * by side, each 16 buckets wide, so a growth is a physical expansion inside
-     * its half instead of buckets jumping when the rehash finishes.
-     */
     private bucketTile(half: 0 | 1, bucket: number): number {
         const row = Math.floor(bucket / DICT.tableCols)
         const col = half * DICT.tableCols + (bucket % DICT.tableCols)
         return row * DICT.cols + col
     }
 
-    /** The bucket a tile stands for, or -1 when the tile belongs to the other table. */
     private tileBucket(half: 0 | 1, id: number): number {
         const row = Math.floor(id / DICT.cols)
         const col = id % DICT.cols
@@ -2775,7 +2103,6 @@ export class RedisInstance {
         return row * DICT.tableCols + (col % DICT.tableCols)
     }
 
-    /** Buckets that hold at least one live key, for a table of `size` buckets. */
     private usedBuckets(size: number): Set<number> {
         const s = new Set<number>()
         for (const k of this.keys) if (k.live) s.add(this.bucketOf(k.i, size))
@@ -2786,12 +2113,6 @@ export class RedisInstance {
         return this.htSize
     }
 
-    /**
-     * The bucket array's real numbers. A bucket is one pointer — 8 B on a 64-bit
-     * build — so the array costs capacity × 8 B; the entries themselves are the
-     * key plane above. During a rehash both arrays are live, which is why the
-     * used/available figures cover both halves.
-     */
     private dictStats() {
         const oldSize = this.htSize
         const newSize = this.ht1Size
@@ -2827,7 +2148,10 @@ export class RedisInstance {
             { label: 'array', value: fmtBytes(buckets * slot) },
             { label: 'peak array', value: fmtBytes((HASH_MAX + HASH_MAX / 2) * slot) },
             { label: 'per entry', value: '24 B + key + value' },
-            { label: 'scale', value: `1 MB = ${Math.round((1024 * 1024) / (buckets * slot)).toLocaleString('en-US')} × array` },
+            {
+                label: 'scale',
+                value: `1 MB = ${Math.round((1024 * 1024) / (buckets * slot)).toLocaleString('en-US')} × array`,
+            },
             { label: 'used', value: `${used} / ${buckets} · ${Math.round(fill * 100)}%` },
             { label: 'load factor', value: load.toFixed(2) },
             { label: 'keys', value: String(entries) },
@@ -2835,14 +2159,6 @@ export class RedisInstance {
         ]
     }
 
-    /**
-     * Where a key's bucket sits — the tile the lookup actually lands on.
-     *
-     * During a rehash a key can be in either table, and redis checks both in
-     * order: a key that has already been migrated is found in the new table, the
-     * rest still in the old one. So the path lands where the key really is, which
-     * is the whole reason the rehash is drawn bucket by bucket.
-     */
     bucketTop(key: RedisKey): THREE.Vector3 {
         let half = this.htHalf
         let bucket = this.bucketOf(key.i, this.htSize)
@@ -2865,14 +2181,6 @@ export class RedisInstance {
         return this.rehashIdx >= 0
     }
 
-    /**
-     * Paint the bucket array from the dict's own state.
-     *
-     * An allocated bucket is drawn dim, a bucket holding at least one key bright,
-     * and a bucket that belongs to neither table is not allocated at all and is
-     * collapsed. During a rehash the old table loses buckets from the front while
-     * the new one gains them, in exactly the order rehashStep() migrates them.
-     */
     private paintDict() {
         const N = DICT.cols * DICT.rows
         const usedOld = this.usedBuckets(this.htSize)
@@ -2887,7 +2195,6 @@ export class RedisInstance {
             let live = false
             let used = false
             if (this.ht1Size > 0) {
-                // rehashing: the old table shrinks from the front, the new grows
                 if (bOld >= 0 && bOld < this.htSize && bOld >= this.rehashIdx) {
                     live = true
                     used = usedOld.has(bOld)
@@ -2900,7 +2207,11 @@ export class RedisInstance {
                 used = usedOld.has(bOld)
             }
 
-            this.tmpObj.position.set(dictX(id % DICT.cols), DICT.y, dictZ(Math.floor(id / DICT.cols)))
+            this.tmpObj.position.set(
+                dictX(id % DICT.cols),
+                DICT.y,
+                dictZ(Math.floor(id / DICT.cols)),
+            )
             this.tmpObj.scale.setScalar(live ? 1 : 0.001)
             this.tmpObj.updateMatrix()
             this.dictMesh.setMatrixAt(id, this.tmpObj.matrix)
@@ -2912,7 +2223,6 @@ export class RedisInstance {
         this.dictMesh.instanceMatrix.needsUpdate = true
         if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
 
-        // the size line: what the dict is, not what it might become
         const text =
             this.ht1Size > 0
                 ? `ht[0] ${this.htSize} → ht[1] ${this.ht1Size} · ${this.rehashIdx}/${this.htSize}`
@@ -2920,9 +2230,6 @@ export class RedisInstance {
         const el = this.dictTableLab?.element as HTMLElement | undefined
         if (el && el.textContent !== text) el.textContent = text
 
-        // the buckets just moved (or the table changed size), so the tethers to
-        // the entries have to follow. This runs per rehash step, which is a few
-        // times a second — a couple of hundred segments, not a per-frame cost.
         this.rebuildPointerWeb()
     }
 
@@ -2951,16 +2258,6 @@ export class RedisInstance {
         web.geometry.computeBoundingSphere()
     }
 
-    /**
-     * Paint the arena at its working occupancy.
-     *
-     * A page in use is a full 4 kB cube; a free page is collapsed, so the empty
-     * fifth of the arena shows as holes. The used pages are scattered through the
-     * arena by the allocator's order, not packed from the start, and nothing
-     * reorders them — the OS does not compact RAM. That is the same convention
-     * the postgres disk uses: a mostly-packed volume with fragmentation, not an
-     * empty grid.
-     */
     private paintHeap() {
         if (!this.heapMesh) return
         const free = mixHex(0x04141c, PALETTE.cyan, 0.07)
@@ -2979,16 +2276,9 @@ export class RedisInstance {
         }
         this.heapMesh.instanceMatrix.needsUpdate = true
         if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        // a repaint puts every block back, including the one that was open — so the
-        // open page is re-hidden here, or the entry it is meant to show disappears
-        // the next time the arena is painted
         this.applyGhost()
     }
 
-    /**
-     * Load factor 1: the next insert grows the table. Real dicts check this on
-     * every add; so does this one.
-     */
     private maybeGrow() {
         if (this.rehashIdx >= 0 || this.htSize >= HASH_MAX) return
         if (this.liveKeys <= this.htSize) return
@@ -3000,20 +2290,10 @@ export class RedisInstance {
         this.trace(`dict grow · ${this.htSize} → ${next} buckets`)
     }
 
-    /**
-     * One step of the incremental rehash.
-     *
-     * redis migrates one bucket per command, plus a cron burst of a hundred
-     * buckets per millisecond. Commands arrive here a couple per second, so a
-     * single bucket per command would take minutes on screen: the step size is
-     * raised, the RULE is not. What matters is that the table is never rebuilt in
-     * one go — both tables are live and every lookup checks both.
-     */
     rehashStep(buckets = 1) {
         if (this.rehashIdx < 0) return
         this.rehashIdx = Math.min(this.htSize, this.rehashIdx + buckets)
         if (this.rehashIdx >= this.htSize) {
-            // done: the table that was growing is now the dict
             this.htSize = this.ht1Size
             this.ht1Size = 0
             this.rehashIdx = -1
@@ -3023,7 +2303,6 @@ export class RedisInstance {
         this.paintDict()
     }
 
-    /** The bucket a key hashes to — shown by lighting one dict tile. */
     pulseBucket(key: RedisKey) {
         const bucket = this.bucketOf(key.i, this.htSize)
         const tile = this.bucketTile(this.htHalf, bucket)
@@ -3032,19 +2311,15 @@ export class RedisInstance {
         void this.ticker.add(PULSE_TIME, (k) => {
             this.dictMesh.setColorAt(
                 tile,
-                this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.4)).multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
+                this.tmpColor
+                    .setHex(pulseHex(PALETTE.ice, 0.4))
+                    .multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
             )
             if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
         })
-        // repaint from state rather than restoring a remembered colour
         void this.ticker.wait(PULSE_TIME).then(() => this.paintDict())
     }
 
-    /**
-     * The lookup reached memory: light the page the entry's bytes live on. This
-     * is the access the path is about — the bucket is an index, the page is the
-     * data.
-     */
     pulsePage(key: RedisKey) {
         const page = key.page
         this.heapMesh.setColorAt(page, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.5)))
@@ -3052,7 +2327,9 @@ export class RedisInstance {
         void this.ticker.add(PULSE_TIME, (k) => {
             this.heapMesh.setColorAt(
                 page,
-                this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.5)).multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
+                this.tmpColor
+                    .setHex(pulseHex(PALETTE.ice, 0.5))
+                    .multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
             )
             if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
         })
@@ -3060,7 +2337,6 @@ export class RedisInstance {
     }
 
     flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
-        // a big value is not a block in the plane: the touch lights its structure
         if (key.big) {
             this.pulseBig(key.big)
             return
@@ -3075,43 +2351,30 @@ export class RedisInstance {
         })
     }
 
-    /**
-     * One big value was touched. The whole structure lights at once, because that
-     * is the honest picture: a command against a value like this walks all of it,
-     * on the one thread, and every other client waits.
-     */
     pulseBig(kind: BigKind) {
         this.values.touched(kind)
     }
 
-    /** Carry a big value's cage with the read, or put it back. */
     rideBig(kind: BigKind, packet: THREE.Object3D | null) {
         this.values.ride(kind, packet)
     }
 
-    /** Move the read's cursor through the structure it is holding. */
     setBigStep(kind: BigKind, n: number, of?: number) {
         this.values.setStep(kind, n, of)
     }
 
-    /** Where the read's cursor is inside a carried structure, as numbers. */
     bigStepOf(kind: BigKind): { step: number; steps: number } {
         return this.values.stepOf(kind)
     }
 
-    /* ----------------------------------- AOF --------------------------------- */
-
-    /** How many blocks the log occupies right now. */
     get aofUsed() {
         return this.aofHead + 1
     }
 
-    /** Is there room left in the file for more bytes? */
     get aofCanGrow() {
         return this.aofBytes < this.aofOrder.length * BLOCK_BYTES
     }
 
-    /** Where a block of the log sits, by its position in the file. */
     private aofBlockPos(k: number): THREE.Vector3 {
         const id = this.aofOrder[Math.max(0, Math.min(this.aofOrder.length - 1, k))]
         return new THREE.Vector3(xAt(id % COLS), PAGE_Y, zAt(Math.floor(id / COLS)))
@@ -3121,17 +2384,6 @@ export class RedisInstance {
         return this.aofBlockPos(this.aofHead).x
     }
 
-    /**
-     * Only the blocks the file has actually reached are drawn.
-     *
-     * A block past the end of the log is not "dark", not "empty" and not a flat
-     * plate — it does not exist yet, so it is collapsed to nothing on all three
-     * axes. Flattening only the height was the bug: it left a full-footprint
-     * sliver behind, which reads as a block that is there but switched off.
-     *
-     * The range drawn is `0..aofHead`, and anything drawn beyond it is erased:
-     * that is what a rewrite looks like from the floor's point of view.
-     */
     private layoutAof() {
         const hex = mixHex(AOF_FILL_DARK, AOF_FILL_BRIGHT, 1)
         const drawTo = this.aofHead
@@ -3140,11 +2392,7 @@ export class RedisInstance {
             const i = this.aofOrder[k]
             if (i === undefined) break
             const on = k <= drawTo
-            this.tmpObj.position.set(
-                xAt(i % COLS),
-                on ? PAGE_Y : PAGE_Y,
-                zAt(Math.floor(i / COLS)),
-            )
+            this.tmpObj.position.set(xAt(i % COLS), on ? PAGE_Y : PAGE_Y, zAt(Math.floor(i / COLS)))
             const s = on ? 1 : 0.001
             this.tmpObj.scale.set(s, s, s)
             this.tmpObj.updateMatrix()
@@ -3158,23 +2406,10 @@ export class RedisInstance {
         this.assertInvariants('layoutAof')
     }
 
-    /**
-     * A command's bytes go into aof_buf in memory. Nothing touches the file yet.
-     *
-     * This is the point of the buffer: with `appendfsync everysec` redis does not
-     * write (let alone fsync) per command — it copies into the buffer and lets the
-     * periodic flush carry everything to the file at once. So the bytes on this
-     * strip are exactly the ones a crash would lose.
-     */
     bufferAof(bytes: number) {
         this.aofPending++
         this.aofPendingBytes += bytes
-        // the strip is five 4 kB cubes: its occupancy is the bytes waiting, not
-        // one cube per record
-        this.aofBuffered = Math.min(
-            1,
-            this.aofPendingBytes / (AOF_BUF_CELLS * BLOCK_BYTES),
-        )
+        this.aofBuffered = Math.min(1, this.aofPendingBytes / (AOF_BUF_CELLS * BLOCK_BYTES))
         const mat = this.aofBufMats[this.bufferCubeIndex()]
         if (mat) {
             void this.ticker.add(PULSE_TIME, (k) => {
@@ -3183,23 +2418,10 @@ export class RedisInstance {
         }
     }
 
-    /** Records currently sitting in aof_buf, i.e. not durable yet. */
     get aofPendingRecords() {
         return this.aofPending
     }
 
-    /**
-     * Write buffered bytes into the file.
-     *
-     * A 4 kB block holds several records: the file's length is the byte count,
-     * and a block is allocated only when the write crosses its boundary. The head
-     * therefore moves by ceil(length / 4 kB) − the blocks already drawn, which is
-     * often zero. This is the difference between a byte stream and a list of
-     * blocks, and it is what makes "occupied" a real number in the card.
-     *
-     * Returns the top of the block the bytes landed in, or null when the floor is
-     * full — a log that cannot grow has nowhere to put the bytes.
-     */
     private writeAofBytes(bytes: number): THREE.Vector3 | null {
         const before = this.aofUsed
         const maxBlocks = this.aofOrder.length
@@ -3218,13 +2440,6 @@ export class RedisInstance {
         return this.aofHeadTop()
     }
 
-    /**
-     * Fit the outline and the pick volume to the blocks the file has reached.
-     *
-     * The log snakes across the floor, so its footprint is the bounding box of
-     * everything drawn so far — one row at first, more as it grows, and smaller
-     * again after a rewrite. The cage is the file's length, drawn.
-     */
     private fitAofEdge() {
         const drawTo = this.aofHead
         if (drawTo < 0 || this.aofOrder.length === 0) {
@@ -3256,23 +2471,13 @@ export class RedisInstance {
         const z0 = zAt(minR) - CELL / 2
         const z1 = zAt(maxR) + CELL / 2
         this.aofEdge.visible = true
-        this.aofEdge
-            .resize(x1 - x0, CELL, z1 - z0)
-            .centre((x0 + x1) / 2, PAGE_Y, (z0 + z1) / 2)
+        this.aofEdge.resize(x1 - x0, CELL, z1 - z0).centre((x0 + x1) / 2, PAGE_Y, (z0 + z1) / 2)
         this.aofPick.visible = true
         this.aofPick.scale.set(x1 - x0, 1, z1 - z0)
         this.aofPick.position.set((x0 + x1) / 2, PAGE_Y + 0.5, (z0 + z1) / 2)
-        // keep the anchor on the middle of the file: views frame it
         REDIS_ANCHOR.aof.set((x0 + x1) / 2, BLOCK_TOP, (z0 + z1) / 2).add(REDIS_ORIGIN)
     }
 
-    /**
-     * One block was touched: it lights for PULSE_TIME and settles back.
-     *
-     * The same pulse as a page on the postgres disk and a cube of either buffer —
-     * there is no per-container marker in this scene, because "this was just read
-     * or written" is the same statement everywhere.
-     */
     private pulseDiskBlock(id: number, hex: number) {
         this.diskBoost.set(id, { v: 1, hex: pulseHex(hex) })
     }
@@ -3283,14 +2488,12 @@ export class RedisInstance {
     }
 
     aofBufferTop(): THREE.Vector3 {
-        // cage-local, like every other point the redis sim aims at
         const m = this.aofBufCells[this.bufferCubeIndex()]
         if (!m || !this.aofBufGroup) return this.aofHeadTop()
         const v = this.aofBufGroup.position.clone().add(m.position)
         return v.setY(v.y + BLOCK.h * 0.7)
     }
 
-    /** The cube the next record lands in, mirroring wal_buffers next door. */
     private bufferCubeIndex() {
         return Math.min(
             this.aofBufCells.length - 1,
@@ -3298,18 +2501,6 @@ export class RedisInstance {
         )
     }
 
-    /**
-     * appendfsync: everything in aof_buf is written to the file and fsynced.
-     *
-     * With the default `everysec` this runs once a second, and that interval IS
-     * the durability window — a crash can lose the last second of acknowledged
-     * writes and not one byte more. `always` would drain on every command (no
-     * window, but an fsync per write); `no` would leave the pages to the kernel
-     * (a window nobody controls).
-     *
-     * The buffer is a staging area, not a queue that can overflow: what it holds
-     * is copied into the file and then reused. Nothing is discarded by a flush.
-     */
     flushAofBuffer(): { head: THREE.Vector3; records: number } | null {
         const records = this.aofPending
         const bytes = this.aofPendingBytes
@@ -3319,15 +2510,11 @@ export class RedisInstance {
         this.aofPendingBytes = 0
         this.aofBuffered = 0
 
-        // A 4 kB block holds a whole number of records, never a fraction. The
-        // file grows to the block that contains the new last byte; if the bytes
-        // fit in the block already on the floor, no block moves at all.
         const head = this.writeAofBytes(bytes)
         this.pulseBuffered()
         return head ? { head, records } : null
     }
 
-    /** A single lift of the strip as it empties: "these bytes just became durable". */
     private pulseBuffered() {
         const base = this.aofBufGroup?.position.clone()
         if (!base) return
@@ -3342,20 +2529,6 @@ export class RedisInstance {
         return RDB_CENTRE.clone()
     }
 
-    /* ------------------------------ base file (RDB) --------------------------- */
-
-    /**
-     * The encoder is one sequential pass over the keyspace: each record is
-     * written directly after the last, with no padding and no alignment. So every
-     * 4 kB block but the last is completely full, and which keys land in a block
-     * depends on the size of the values in front of them.
-     *
-     * This is the whole answer to "different block sizes or uniform": the blocks
-     * are uniform — a filesystem only stores 4 kB — the file is densely packed
-     * (it is written fresh each time, so there is nothing to defragment, unlike a
-     * database file with free space inside it), and what varies is the file's
-     * LENGTH, because it tracks the data and not the key count.
-     */
     private packRdb(live: boolean[]): { blocks: number[][]; tail: number } {
         const blocks: number[][] = []
         let cur: number[] = []
@@ -3374,7 +2547,6 @@ export class RedisInstance {
         return { blocks, tail: used / BLOCK_BYTES }
     }
 
-    /** Write the base file from the current dataset, with no animation (boot). */
     private writeRdbNow() {
         const live = this.keys.map((k) => k.live)
         const { blocks, tail } = this.packRdb(live)
@@ -3385,12 +2557,6 @@ export class RedisInstance {
         this.layoutRdb()
     }
 
-    /**
-     * Only the blocks the file has reached are drawn, and the last one is drawn
-     * part-full: that is the one place a block is not the whole 4 kB. A block
-     * past the end of the file does not exist, so it is collapsed on all three
-     * axes — the same rule as the log.
-     */
     private layoutRdb() {
         this.rdbOrder.forEach((id, seq) => {
             const on = seq < this.rdbLen
@@ -3413,7 +2579,6 @@ export class RedisInstance {
         this.fitRdbEdge()
     }
 
-    /** The colour of one block of the base file: bright, except the partial tail. */
     private rdbHexAt(id: number, seq: number): number {
         const tint = this.rdbBase[id] ?? RDB_FILL_BRIGHT
         return seq === this.rdbLen - 1
@@ -3421,14 +2586,6 @@ export class RedisInstance {
             : tint
     }
 
-    /**
-     * The colour a block has when nothing is pulsing on it — the file decides.
-     *
-     * This is DERIVED, never remembered. A remembered copy of "the colour this
-     * block should fall back to" only stays true for the file that wrote it: the
-     * disk's blocks belong to two files whose lengths both change, so a pulse that
-     * decays toward a remembered colour leaves the other file's blocks black.
-     */
     private restingHex(id: number): number {
         const aofSeq = this.aofIndex.get(id)
         if (aofSeq !== undefined && aofSeq <= this.aofHead) {
@@ -3439,18 +2596,9 @@ export class RedisInstance {
         return 0x000000
     }
 
-    /**
-     * Regrow the cage around the base file to exactly the blocks it covers now.
-     *
-     * The file fills row by row, so a partial row can be a single cell. The
-     * cage is computed from the blocks actually in the file rather than from
-     * "whole rows": a row of the file may end in the middle of an 8 kB page.
-     */
     private fitRdbEdge() {
         if (this.rdbLen === 0) {
             this.rdbEdge.visible = false
-            // an empty dump is not a thing to point at: the cage shows the file's
-            // length, and with no blocks there is no file to describe
             this.rdbPick.visible = false
             return
         }
@@ -3478,12 +2626,10 @@ export class RedisInstance {
             .centre((bx0 + bx1) / 2, PAGE_Y, (bz0 + bz1) / 2)
     }
 
-    /** How many blocks the base file occupies right now — the panel shows it. */
     get rdbBlocksUsed() {
         return this.rdbLen
     }
 
-    /** Where a block of the base file sits, by its position in the file. */
     private rdbBlockPos(seq: number): THREE.Vector3 {
         const id = this.rdbOrder[Math.max(0, Math.min(this.rdbOrder.length - 1, seq))]
         const row = Math.floor(id / COLS)
@@ -3491,28 +2637,13 @@ export class RedisInstance {
         return new THREE.Vector3(xAt(col), PAGE_Y, zAt(row))
     }
 
-    /**
-     * SAVE and BGSAVE, in the shape they actually have:
-     *
-     *   1. the keyspace is walked and encoded, in one pass
-     *   2. a new file is written from its first block, replacing the old one
-     *
-     * BGSAVE does this in a forked child: the parent keeps serving the whole
-     * time and nothing is locked. What it costs is memory — every page the parent
-     * modifies while the child writes has to be copied. SAVE does the same work
-     * on the only thread there is, so nothing is served until it finishes. The
-     * shape on screen is identical; what differs is whether the loop is still
-     * draining the queue, and the panel is where that shows.
-     */
     async runRdbSave(): Promise<void> {
         if (this.savingRdb) return
         this.savingRdb = true
-        // the snapshot is the keyspace at fork time, not at completion
         const base = this.keys.map((k) => k.live)
         const { blocks, tail } = this.packRdb(base)
         this.pulseAgent(this.bgsaveDrone)
 
-        // 1. read the keyspace
         this.rdbAim.set(heapX(0), HEAP.y + 0.8, HEAP.cz)
         await this.ticker.wait(0.28)
         await this.ticker.add(1.0, (k) => {
@@ -3525,7 +2656,6 @@ export class RedisInstance {
             this.rdbAim.set(heapX(col), HEAP.y + 0.8, HEAP.cz)
         })
 
-        // 2. write the new file: it starts empty and fills block by block
         const n = Math.min(blocks.length, this.rdbOrder.length)
         this.rdbBlocks = blocks.slice(0, n)
         this.rdbLen = 0
@@ -3552,26 +2682,12 @@ export class RedisInstance {
         this.assertInvariants('bgsave')
     }
 
-    /**
-     * Startup, in the order redis does it:
-     *
-     *   1. the base dump is read into memory, one sequential pass over the file
-     *   2. the AOF is replayed after it, record by record, re-executing each one
-     *   3. only then does it listen
-     *
-     * All of it runs on the thread that would otherwise serve commands, so no
-     * connection is accepted until the last record is in. This is the one
-     * operation here that really does block everything — a save blocks nothing.
-     */
     async runLoad(target: boolean[]): Promise<void> {
         if (this.loading) return
         this.loading = true
-        // the process starts with nothing in memory; the files are the only copy
         this.wipeMemory()
         this.pulseAgent(this.bgsaveDrone)
 
-        // 1. the base file, block by block: each block brings back exactly the
-        //    keys the encoder put in it
         const n = this.rdbLen
         let shown = 0
         if (n > 0) {
@@ -3579,19 +2695,13 @@ export class RedisInstance {
                 const upto = Math.max(1, Math.min(n, Math.ceil(k * n)))
                 for (let b = shown; b < upto; b++) {
                     this.pulseDiskBlock(this.rdbOrder[b], PALETTE.teal)
-                    // a block comes back whole — but only the keys that were still
-                    // in the dataset when the process stopped. The rest were
-                    // deleted later in the log and are never replayed.
                     for (const i of this.rdbBlocks[b] ?? []) if (target[i]) this.reviveKey(i)
                 }
                 shown = Math.max(shown, upto)
             })
         }
 
-        // 2. the log after it: every record re-executed in order, which is why a
-        //    long log is slow to start and why the records must be deterministic
         const m = this.aofUsed
-        // the keys the log has that the dump did not: the writes since the save
         const tail: number[] = []
         target.forEach((on, i) => {
             if (on && !this.keys[i].live) tail.push(i)
@@ -3614,7 +2724,6 @@ export class RedisInstance {
         this.assertInvariants('load')
     }
 
-    /** Nothing is in memory yet: a process that has not loaded has no data. */
     wipeMemory() {
         this.hideAllKeys()
     }
@@ -3630,13 +2739,10 @@ export class RedisInstance {
             this.keysMesh.setMatrixAt(key.i, this.tmpObj.matrix)
         }
         this.keysMesh.instanceMatrix.needsUpdate = true
-        // The arena's other occupants are not keys: wiping the keyspace during a
-        // load does not empty the process heap, so the 80% seed stays.
         this.rebuildPointerWeb()
         this.paintHeap()
     }
 
-    /** One key comes back from the files — no flash, it was never "written". */
     private reviveKey(i: number) {
         const key = this.keys[i]
         if (!key || key.live) return
@@ -3655,40 +2761,14 @@ export class RedisInstance {
         this.rebuildPointerWeb()
     }
 
-    /**
-     * bgrewriteaof, in the three steps it actually performs.
-     *
-     * The direction of data matters here, because it is the thing people get
-     * wrong: nothing is read out of the old file and nothing moves into memory.
-     * The child reads the KEYSPACE — the data in RAM — and writes a new file
-     * containing the minimum set of commands that reproduces that state. Then it
-     * renames the new file over the old one and unlinks the old.
-     *
-     *   1. fork — the child gets a copy-on-write view and WALKS the keyspace
-     *      column by column; nothing is locked, the parent keeps serving
-     *   2. write — the new file lands on free floor beside the log, because it is
-     *      a different file: the old one is still there and still being appended
-     *      to while this happens
-     *   3. swap — rename(2). The new file takes the log's place, and it is
-     *      shorter, so the end of the log moves back to its length
-     *
-     * Writes that land while this runs are not lost: they go to the rewrite
-     * buffer and are replayed into the new file before the swap, so the head can
-     * come out further along than the target. That is why the head is adjusted by
-     * the number of blocks dropped, not set to a constant.
-     */
     async runRewrite(): Promise<void> {
         if (this.rewriting) return
         this.rewriting = true
         this.pulseAgent(this.rewriteDrone)
 
         const oldHead = this.aofHead
-        // the new file is as long as the STATE is, not as long as the history
         const target = Math.max(2, Math.round(oldHead * 0.25))
 
-        // 1. it flies to the keyspace, then sweeps it: the wave is the scan, not
-        //    decoration. The aim point moves, the lerp in update() does the flight,
-        //    so there is no cut between "idle" and "scanning".
         this.rewriteAim.set(heapX(0), HEAP.y + 0.8, HEAP.cz)
         await this.ticker.wait(0.35)
         await this.ticker.add(1.15, (k) => {
@@ -3699,8 +2779,6 @@ export class RedisInstance {
             this.rewriteAim.set(heapX(col), HEAP.y + 0.8, HEAP.cz)
         })
 
-        // 2. it drops to the staging area — free floor in front of the log, not
-        //    the log itself — and writes the new file there, block by block
         setLabelEnabled(this.stagingLab, true)
         this.rewriteAim.copy(this.stagingSlot(0)).setY(1.4)
         await this.ticker.wait(0.45)
@@ -3715,15 +2793,9 @@ export class RedisInstance {
             this.rewriteAim.copy(this.stagingSlot(upto - 1)).setY(1.4)
         })
 
-        // 3. swap: rename(2). The blocks of the new file move into the log's own
-        //    places and the history past them is unlinked — so what disappears is
-        //    the OLD records, not the new ones. Nothing was read back out of the
-        //    old file to do this, and nothing moved into memory: the data came
-        //    from RAM and went to disk.
         const smooth = (t: number) => t * t * (3 - 2 * t)
         await this.ticker.add(0.5, (k) => {
             for (let j = 0; j < staged; j++) {
-                // staggered so the file arrives as a run, not as one slab
                 const t = smooth(Math.max(0, Math.min(1, k * 1.5 - j * 0.05)))
                 const pos = this.stagingSlot(j).lerp(this.aofBlockPos(j), t)
                 this.placeDiskBlock(this.stagingId(j), pos, true)
@@ -3731,14 +2803,8 @@ export class RedisInstance {
             this.rewriteAim.copy(this.aofBlockPos(Math.min(staged - 1, target - 1))).setY(1.4)
         })
 
-        // the length the new file leaves the log with — writes that landed during
-        // the rewrite are already in it, which is why this is a subtraction and
-        // not the target itself
         const newHead = Math.max(target, this.aofHead - (oldHead - target))
 
-        // 4. the records past the new length are unlinked. They fade instead of
-        //    blinking out, because "this history is gone" is the actual event, and
-        //    a frame where blocks simply stop existing reads as a rendering bug.
         if (oldHead > newHead) {
             await this.ticker.add(0.32, (k) => {
                 const sc = Math.max(0.001, 1 - k)
@@ -3761,27 +2827,19 @@ export class RedisInstance {
         this.aofBytes = Math.round(this.aofBytes * 0.25)
         this.aofFull = false
         this.layoutAof()
-        this.trace(`rewrite swap · head ${oldHead} → ${this.aofHead}, ${staged} blocks became the file`)
+        this.trace(
+            `rewrite swap · head ${oldHead} → ${this.aofHead}, ${staged} blocks became the file`,
+        )
         this.pulseDiskBlock(this.aofOrder[this.aofHead], PALETTE.amber)
         this.pulseAgent(this.rewriteDrone)
         this.rewriting = false
         this.assertInvariants('bgrewriteaof')
     }
 
-    /**
-     * Where a rewrite builds its new file: the row in front of the log, directly
-     * opposite the blocks those writes will become.
-     *
-     * It is a *different* file, so it does not go on top of the one it replaces —
-     * the child needs somewhere to write that the parent is not appending to, and
-     * only the rename makes the two the same file. One row of separation keeps the
-     * swap a short move you can follow instead of a jump across the floor.
-     */
     private stagingSlot(k: number): THREE.Vector3 {
         return new THREE.Vector3(xAt(AOF_C0 + k), PAGE_Y, zAt(STAGING_ROW))
     }
 
-    /** Draw or erase one block of the file being staged. */
     private setStaged(k: number, on: boolean) {
         this.placeDiskBlock(this.stagingId(k), this.stagingSlot(k), on)
     }
@@ -3790,7 +2848,6 @@ export class RedisInstance {
         return STAGING_ROW * COLS + AOF_C0 + k
     }
 
-    /** Draw or erase one instance of the block field at an explicit position. */
     private placeDiskBlock(id: number, pos: THREE.Vector3, on: boolean) {
         this.tmpObj.position.copy(pos)
         const s = on ? 1 : 0.001
@@ -3805,27 +2862,14 @@ export class RedisInstance {
         if (this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
     }
 
-    /* ------------------------------- invariants ------------------------------ */
-
-    /**
-     * Check the picture against the numbers.
-     *
-     * The floor is one instanced mesh with no idea what is in it, and the files
-     * are a handful of indices. If the two ever disagree, the scene draws a file
-     * that does not exist — and by eye that looks like "blocks appeared and then
-     * vanished" rather than like a bug. Each check below is a statement that has
-     * to hold; the returned strings name the ones that do not.
-     */
     verify(): string[] {
         const bad: string[] = []
         const s = this.disk.instanceMatrix.array
-        /** instance scale (the matrices here are uniform scale + translation) */
         const scale = (id: number) => s[id * 16 + 5]
         const pos = (id: number) =>
             new THREE.Vector3(s[id * 16 + 12], s[id * 16 + 13], s[id * 16 + 14])
 
         const aofDrawn = new Set<number>()
-        // 1. the log is exactly the blocks the file has reached
         for (let k = 0; k <= this.aofHead; k++) {
             const id = this.aofOrder[k]
             if (id === undefined) {
@@ -3833,36 +2877,44 @@ export class RedisInstance {
                 continue
             }
             if (Math.abs(scale(id) - 1) > 2e-3) {
-                bad.push(`log block ${k} (id ${id}) should be drawn, scale is ${scale(id).toFixed(3)}`)
+                bad.push(
+                    `log block ${k} (id ${id}) should be drawn, scale is ${scale(id).toFixed(3)}`,
+                )
             }
             const want = this.aofBlockPos(k)
             if (pos(id).distanceTo(want) > 1e-3) {
-                bad.push(`log block ${k} sits at ${pos(id).toArray().map((n) => n.toFixed(2))}, expected ${want.toArray().map((n) => n.toFixed(2))}`)
+                bad.push(
+                    `log block ${k} sits at ${pos(id)
+                        .toArray()
+                        .map((n) =>
+                            n.toFixed(2),
+                        )}, expected ${want.toArray().map((n) => n.toFixed(2))}`,
+                )
             }
             aofDrawn.add(id)
         }
-        // 2. the floor just past the end of the file is empty
-        for (let k = this.aofHead + 1; k <= Math.min(this.aofHead + 4, this.aofOrder.length - 1); k++) {
+        for (
+            let k = this.aofHead + 1;
+            k <= Math.min(this.aofHead + 4, this.aofOrder.length - 1);
+            k++
+        ) {
             const id = this.aofOrder[k]
-            if (scale(id) > 1e-2) bad.push(`log block ${k} is drawn, but the file ends at ${this.aofHead}`)
+            if (scale(id) > 1e-2)
+                bad.push(`log block ${k} is drawn, but the file ends at ${this.aofHead}`)
         }
-        // 3. the base file is exactly its blocks, the last one partial
         for (let k = 0; k < this.rdbLen; k++) {
             const id = this.rdbOrder[k]
             if (scale(id) < 0.1) bad.push(`base block ${k} (id ${id}) is missing`)
         }
         for (let k = this.rdbLen; k < Math.min(this.rdbLen + 3, this.rdbOrder.length); k++) {
             const id = this.rdbOrder[k]
-            if (scale(id) > 1e-2) bad.push(`base block ${k} is drawn, but the file ends at ${this.rdbLen - 1}`)
+            if (scale(id) > 1e-2)
+                bad.push(`base block ${k} is drawn, but the file ends at ${this.rdbLen - 1}`)
         }
-        // 4. the two files never share a block
         for (let k = 0; k < this.rdbLen; k++) {
-            if (aofDrawn.has(this.rdbOrder[k])) bad.push(`block ${k} of the base file is also in the log`)
+            if (aofDrawn.has(this.rdbOrder[k]))
+                bad.push(`block ${k} of the base file is also in the log`)
         }
-        // 5. a drawn block is never black. Black is "no file here", so a block that
-        //    is in a file and painted black is a block the scene says exists and
-        //    shows as absent — which is what a pulse decaying toward a stale colour
-        //    did to the whole base file.
         const col = this.disk.instanceColor?.array
         if (col) {
             const lit = (id: number) => col[id * 3] + col[id * 3 + 1] + col[id * 3 + 2]
@@ -3879,7 +2931,6 @@ export class RedisInstance {
             if (blackAof > 0) bad.push(`${blackAof} block(s) of the log are drawn but black`)
             if (blackRdb > 0) bad.push(`${blackRdb} block(s) of the base file are drawn but black`)
         }
-        // 5. the log's cage is the log's footprint
         if (this.aofHead >= 0 && this.aofOrder.length > 0) {
             let minC = COLS
             let maxC = -1
@@ -3898,15 +2949,16 @@ export class RedisInstance {
             const wantW = (maxC - minC + 1) * CELL
             const wantD = (maxR - minR + 1) * CELL
             if (Math.abs(this.aofEdge.w - wantW) > 1e-3) {
-                bad.push(`log cage width ${this.aofEdge.w.toFixed(2)} ≠ the file's ${wantW.toFixed(2)}`)
+                bad.push(
+                    `log cage width ${this.aofEdge.w.toFixed(2)} ≠ the file's ${wantW.toFixed(2)}`,
+                )
             }
             if (Math.abs(this.aofEdge.d - wantD) > 1e-3) {
-                bad.push(`log cage depth ${this.aofEdge.d.toFixed(2)} ≠ the file's ${wantD.toFixed(2)}`)
+                bad.push(
+                    `log cage depth ${this.aofEdge.d.toFixed(2)} ≠ the file's ${wantD.toFixed(2)}`,
+                )
             }
         }
-        // 6. nothing is left staged. During a rewrite the staged blocks are the
-        //    point; after one, any of them still drawn belong to no file, and that
-        //    is exactly what reads as "blocks appeared and then vanished".
         if (!this.rewriting) {
             for (let k = 0; k < 16; k++) {
                 if (scale(this.stagingId(k)) > 1e-2) {
@@ -3917,7 +2969,6 @@ export class RedisInstance {
         return bad
     }
 
-    /** Throw loudly in development, print in production — never silently. */
     private assertInvariants(where: string) {
         if (!checkInvariants) return
         const bad = this.verify()
@@ -3927,12 +2978,9 @@ export class RedisInstance {
         throw new Error(msg)
     }
 
-    /** A trace line for the rewrite, only when invariants are being checked. */
     private trace(msg: string) {
         if (checkInvariants) console.log(`[redis] ${msg}`)
     }
-
-    /* --------------------------------- agents -------------------------------- */
 
     pulseAgent(g: THREE.Group) {
         const s = g.scale.x
@@ -3942,13 +2990,11 @@ export class RedisInstance {
         })
     }
 
-    /* --------------------------------- update -------------------------------- */
-
     update(dt: number, time: number) {
-        // ports breathe while idle and burn while serving
         for (const pod of this.ports) {
             const target = pod.active ? (pod.busy ? 2.6 : 0.9) : 0
-            pod.ring.emissiveIntensity += (target - pod.ring.emissiveIntensity) * Math.min(1, dt * 8)
+            pod.ring.emissiveIntensity +=
+                (target - pod.ring.emissiveIntensity) * Math.min(1, dt * 8)
             pod.glow.opacity = 0.16 + 0.34 * (pod.ring.emissiveIntensity / 2.6)
             if (pod.pulse > 0) {
                 pod.pulse = Math.max(0, pod.pulse - dt * 1.6)
@@ -3956,10 +3002,6 @@ export class RedisInstance {
             }
         }
 
-        // the readiness set: a tile is lit while its connection is registered,
-        // and flashes on the frame the loop actually read from that socket. An
-        // unlit tile is not a closed connection in general — it is a slot this
-        // floor has, which is where the analogy is ours and not the kernel's.
         this.fdMats.forEach((mat, i) => {
             this.fdPulse[i] = Math.max(0, this.fdPulse[i] - dt * 2.2)
             const pod = this.ports[i]
@@ -3967,27 +3009,20 @@ export class RedisInstance {
             mat.emissiveIntensity = base + this.fdPulse[i] * 2.4
         })
 
-        // the loop is the one thing that is always visibly working
         this.loopCore.emissiveIntensity +=
-            (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) * Math.min(1, dt * 6)
+            (1.35 + 0.35 * breathe(time, 2.2) - this.loopCore.emissiveIntensity) *
+            Math.min(1, dt * 6)
         this.loopRing.rotation.z += dt * 0.5
 
-        // the channel breathes like everything else in the thread's air, and
-        // answers a publish with one ring of light
         this.channelPulse = Math.max(0, this.channelPulse - dt * 1.5)
         const ringMat = this.channelRing.material as THREE.MeshBasicMaterial
         ringMat.opacity = 0.3 + 0.12 * breathe(time, 1.1) + this.channelPulse * 0.5
         this.channelRing.scale.setScalar(1 + this.channelPulse * 0.16)
 
-        // and the air moves, exactly as it does in the other cage
         driftDust(this.motes, dt, time)
 
-        // the structures a read can hold: their breathing, the cursor inside one of
-        // them, and the halos that mark the hot keys
         this.values.update(dt, time, this.hotKeys)
 
-        // the dict's cron: while a rehash is running it migrates a burst of
-        // buckets on a timer, and once the load factor passes 1 it starts one
         this.rehashTimer -= dt
         if (this.rehashTimer <= 0) {
             this.rehashTimer = 0.25
@@ -3995,8 +3030,6 @@ export class RedisInstance {
             this.maybeGrow()
         }
 
-        // A conversion lands: the new structure grows in over a few frames rather
-        // than appearing whole, so the eye catches which key just paid for it.
         if (this.auxAnim.size > 0) {
             for (const [i, v] of this.auxAnim) {
                 const next = Math.min(1, v + dt * 3.4)
@@ -4006,7 +3039,6 @@ export class RedisInstance {
             }
         }
 
-        // keys cool down after being touched
         let dirtyKeys = false
         for (const key of this.keys) {
             if (key.heat <= 0) continue
@@ -4018,8 +3050,6 @@ export class RedisInstance {
         }
         if (dirtyKeys && this.keysMesh.instanceColor) this.keysMesh.instanceColor.needsUpdate = true
 
-        // A block that was just touched settles back over PULSE_TIME. One marker
-        // for every block in the scene: lit once, then ordinary again.
         if (this.diskBoost.size > 0) {
             let dirty = false
             for (const [i, pulse] of this.diskBoost) {
@@ -4034,9 +3064,6 @@ export class RedisInstance {
                         this.tmpColor
                             .setHex(this.restingHex(i))
                             .lerp(this.pulseColor.setHex(pulse.hex), next)
-                            // and past white: the bloom pass only picks up what is
-                            // over 1.0, which is what makes a pulse look like
-                            // light rather than like lighter paint
                             .multiplyScalar(1 + (PULSE_GAIN - 1) * next),
                     )
                 }
@@ -4045,17 +3072,8 @@ export class RedisInstance {
             if (dirty && this.disk.instanceColor) this.disk.instanceColor.needsUpdate = true
         }
 
-        // the write head shimmers so the append point is findable at a glance
-        // (removed: the append point is only ever visible as a pulse on the block
-        // that changed, never as a standing marker)
-
-        // aof_buf floats above the end of the file, bobbing and swaying like it is
-        // only half in this world — because it is not on disk yet. Same treatment
-        // as wal_buffers, and it drifts along as the file grows.
         if (this.aofBufGroup) {
             const g = this.aofBufGroup
-            // the append point moves along the row and then wraps into the next
-            // one, so the strip follows the head on both axes, not just x
             const head = this.aofBlockPos(this.aofHead)
             g.position.x += (head.x - g.position.x) * Math.min(1, dt * 2.4)
             g.position.y = AOF_BUF_Y + Math.sin(time * 1.3) * 0.08
@@ -4067,31 +3085,25 @@ export class RedisInstance {
                 m.rotation.y = Math.sin(time * 0.75 + ph * 0.7) * 0.4
                 m.scale.setScalar(1 + Math.sin(time * 2.4 + ph) * 0.035)
             })
-            // The strip cycles: it fills with writes and empties on the next
-            // flush (see flushAofBuffer). Nothing is dropped here — what drains
-            // it is write() + fsync, once a second by default.
             this.aofBufMats.forEach((mat, i) => {
                 const live = i <= this.bufferCubeIndex() ? this.aofBuffered : 0
                 mat.emissiveIntensity +=
                     (0.5 + live * 0.6 - mat.emissiveIntensity) * Math.min(1, dt * 5)
             })
-            // keep the world anchor on the strip: views and the camera aim at it
             REDIS_ANCHOR.aofBuf.copy(g.position).add(REDIS_ORIGIN)
         }
 
-        // bgsave orbits the base file it is responsible for when it has nothing
-        // to do; while it is working it flies to the keyspace and then along the
-        // file it is writing, at a bounded speed so the walk stays followable
         if (this.savingRdb) {
             this.rewriteStep.copy(this.rdbAim).sub(this.bgsaveDrone.position)
             const dist = this.rewriteStep.length()
             if (dist > 1e-4) {
                 const step = Math.min(dist, AGENT_SPEED * dt)
-                this.bgsaveDrone.position.addScaledVector(this.rewriteStep.multiplyScalar(1 / dist), step)
+                this.bgsaveDrone.position.addScaledVector(
+                    this.rewriteStep.multiplyScalar(1 / dist),
+                    step,
+                )
             }
         } else {
-            // same slow ellipse as the rewrite agent, and the same lerp, so the
-            // hand-off between patrolling and working is one continuous flight
             const a = time * 0.34
             this.rdbIdle.set(
                 this.rdbHome.x + Math.cos(a) * 3.2,
@@ -4102,20 +3114,15 @@ export class RedisInstance {
             this.bgsaveDrone.rotation.y += dt * 0.6
         }
 
-        // the agent patrols the log when it has nothing to do, exactly the way the
-        // autovacuum drone patrols the disk: a slow ellipse, fed through a lerp so
-        // it can never jump. While it works, its position is instead pulled toward
-        // whatever runRewrite is aiming at — same lerp, same smoothness, so the
-        // hand-off between phases is one continuous flight.
         if (this.rewriting) {
-            // Fly toward the aim at a bounded speed rather than lerping at a fixed
-            // rate: a fixed rate moves fastest when the gap is widest, which reads
-            // as a cut exactly when the flight should be most legible.
             this.rewriteStep.copy(this.rewriteAim).sub(this.rewriteDrone.position)
             const dist = this.rewriteStep.length()
             if (dist > 1e-4) {
                 const step = Math.min(dist, AGENT_SPEED * dt)
-                this.rewriteDrone.position.addScaledVector(this.rewriteStep.multiplyScalar(1 / dist), step)
+                this.rewriteDrone.position.addScaledVector(
+                    this.rewriteStep.multiplyScalar(1 / dist),
+                    step,
+                )
             }
             this.rewriteDrone.rotation.y += dt * 2.2
         } else {
@@ -4130,17 +3137,11 @@ export class RedisInstance {
         }
     }
 
-    /** Tight bounds for the camera: the cage plus everything floating in it. */
     bounds(): THREE.Box3 {
         this.tmpBox.setFromObject(this.group)
         return this.tmpBox.clone()
     }
 
-    /**
-     * Slide the cage across the floor. Everything outside the group that aims
-     * at it — the command paths, the camera views — reads REDIS_ANCHOR, so the
-     * anchors are rewritten in place rather than left behind.
-     */
     setOrigin(pos: THREE.Vector3) {
         REDIS_ORIGIN.copy(pos)
         this.group.position.copy(pos)

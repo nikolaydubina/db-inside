@@ -1,31 +1,11 @@
 import type { StoryStep } from './types'
 
-/**
- * Pub/sub: the life of one message.
- *
- * A published message exists for the length of one walk down a list of sockets, so
- * this story is about a route rather than a structure — it starts at a socket like
- * every other command, reaches the channel (a name, not a key), is copied once per
- * listener, and leaves. The list has to be built by somebody, which is why the
- * second step is the SUBSCRIBE that puts a socket on it.
- *
- * Steps 3 to 5 are one message, not three. Each resumes the clock, waits for the
- * packet to reach the leg its caption names, and freezes again — so the drawing
- * is showing the exact instant being described instead of racing past it. That is
- * what `freezeAt` is for, and it is why only the first of them publishes.
- *
- * Captions are about the server, not about the drawing: what a command does, what
- * it costs, what it leaves behind. Nobody needs telling that the clock is slow or
- * which way the camera is pointed — they can see both.
- */
 export const REDIS_PUBSUB_STORY: StoryStep[] = [
     {
         title: 'a channel with nobody on it',
         body: 'PUBLISH is addressed to a channel, not to a key. A channel is a name in its own dictionary — pubsub_channels — and the only thing hanging off that name is a list of connected sockets. Here the list is empty, and publishing to an empty list is not an error in Redis: the command succeeds and reaches nobody. That is the difference between this and a write: nothing is created to hold the message.',
         view: 'redis-pubsub',
-        // The card is about publishing to an empty list, so it publishes — on the
-        // frame the story opens. It had no cue at all, which made the first thing a
-        // reader saw an empty channel and no message anywhere.
+
         publish: true,
         expect: (c) => c.rdSubs === 0,
         waitFor: 'an empty channel',

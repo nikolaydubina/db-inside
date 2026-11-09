@@ -8,11 +8,6 @@ import { REDIS_HASH_STORY } from './redis-hash'
 import { REDIS_INLINE_STORY } from './redis-inline'
 import { REDIS_RAW_STORY } from './redis-raw'
 
-/**
- * The stories, in the order the panel lists them. One file per story beside this
- * one: a story is a piece of writing about one part of the server, and it should
- * be possible to read it without scrolling past three other subjects.
- */
 export const STORIES: StoryDef[] = [
     {
         id: 'queue',

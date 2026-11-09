@@ -2,19 +2,6 @@ import type * as THREE from 'three'
 import type { Page8K, PostgresInstance } from './postgresql/instance'
 import type { EngineSim } from './postgresql/sim'
 
-/**
- * Console telemetry for the simulation. Reading the scene off a screenshot is
- * guesswork; this dumps the actual state on a virtual-time tick instead.
- *
- *   __psqlDebug.on()            start logging one line per tick
- *   __psqlDebug.off()
- *   __psqlDebug.snapshot()      current state as a plain object
- *   __psqlDebug.history(40)     the last N ticks as a table
- *   __psqlDebug.every(1)        log every N virtual seconds
- *
- * Open the page with ?debug in the URL to have it on from boot.
- */
-
 export interface TableStat {
     pages: number
     allocated: number
@@ -83,7 +70,10 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
             empty: blocks.length - allocated.length,
             dead: blocks.filter((b) => b.dead).length,
             avgFill: allocated.length
-                ? round(allocated.reduce((a: number, b: Page8K) => a + b.fill, 0) / allocated.length, 2)
+                ? round(
+                      allocated.reduce((a: number, b: Page8K) => a + b.fill, 0) / allocated.length,
+                      2,
+                  )
                 : 0,
         }
     }
@@ -140,12 +130,12 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
         const tag = `[psql ${s.t}s ${s.speed}x]`
         console.log(
             `${tag} ${s.note}\n` +
-            `  q=${s.queries} hit=${s.hitRate}% lat=${s.latency}ms dead=${s.deadRows} ` +
-            `conn=${s.connections}(${s.busyBackends} busy) wal=${s.walBytes}B fill=${s.walFill} ` +
-            `chains=${s.chains} disk=${s.disk.occupied}/${s.disk.blocks} free=${s.disk.free} ` +
-            `deadPages=${s.disk.deadPages} avgFill=${s.disk.avgFill} op=${s.lastOp} ` +
-            `buf=${s.buffers.dirty}d/${s.buffers.pages} draw=${s.draws} fps=${s.fps}` +
-            (s.maintenance.length ? ` [${s.maintenance.join(',')}]` : ''),
+                `  q=${s.queries} hit=${s.hitRate}% lat=${s.latency}ms dead=${s.deadRows} ` +
+                `conn=${s.connections}(${s.busyBackends} busy) wal=${s.walBytes}B fill=${s.walFill} ` +
+                `chains=${s.chains} disk=${s.disk.occupied}/${s.disk.blocks} free=${s.disk.free} ` +
+                `deadPages=${s.disk.deadPages} avgFill=${s.disk.avgFill} op=${s.lastOp} ` +
+                `buf=${s.buffers.dirty}d/${s.buffers.pages} draw=${s.draws} fps=${s.fps}` +
+                (s.maintenance.length ? ` [${s.maintenance.join(',')}]` : ''),
         )
     }
 
@@ -185,7 +175,6 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
         history(n = 20) {
             return history.slice(-n)
         },
-        /** quick look at one table's page distribution */
         table(label = 'users') {
             const blocks = inst.tableBlocks.filter((b) => b.table === label)
             const buckets = new Array(10).fill(0)
@@ -193,7 +182,10 @@ export function installTelemetry({ sim, inst, renderer, speed }: Deps) {
             return {
                 label,
                 blocks: blocks.length,
-                fillHistogram: buckets.map((count, i) => ({ fill: `${i * 10}-${i * 10 + 10}%`, count })),
+                fillHistogram: buckets.map((count, i) => ({
+                    fill: `${i * 10}-${i * 10 + 10}%`,
+                    count,
+                })),
             }
         },
     }

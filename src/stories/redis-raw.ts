@@ -1,20 +1,6 @@
 import type { StoryStep } from './types'
 import { frozeAt } from './stop'
 
-/**
- * The sister of the inline story: the same GET, one page further.
- *
- * A string over 44 bytes is not stored in its object's allocation. The header is
- * still 16 bytes — type, encoding, lru, refcount — but instead of holding the bytes
- * it holds an ADDRESS, and the bytes are a second malloc on a second page. So the
- * read that an inline value finishes on its first page goes on: header, pointer,
- * another page. One more hop than an embstr, one fewer than a collection, and the
- * only read of a value that is not "big" that costs a second access.
- *
- * Same three beats as the inline story — in through the socket, the object, back
- * out — with the hop inserted in the middle, which is the entire difference between
- * the two stories and the reason they are two.
- */
 export const REDIS_RAW_STORY: StoryStep[] = [
     {
         title: 'socket → queue → loop',

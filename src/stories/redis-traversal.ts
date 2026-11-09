@@ -1,15 +1,6 @@
 import type { StoryStep } from './types'
 import { frozeAt, frozeAtCell } from './stop'
 
-/**
- * One deep read of a long list, followed end to end.
- *
- * The camera rides the packet: socket → queue → loop → bucket → page → the
- * quicklist → node ↔ page, and back out through the socket. The point of the
- * story is the count of stops: a list never converts, so a read of a deep
- * element is a walk of a chain of allocations, one hop per node, and every one
- * of those nodes is somewhere else in the heap.
- */
 export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
     {
         title: 'a request arrives on a socket',
@@ -85,8 +76,7 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the chain being walked, a node at a time',
         freezeAt: 'node',
-        // card 2 already froze on the head node: this one waits until the read has
-        // actually stepped on, or it would show the same drawing twice
+
         freezeAtStep: 2,
         assert: frozeAtCell('node', 'a node further along the chain', 2),
     },

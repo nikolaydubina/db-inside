@@ -11,7 +11,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "playwright test",
-    "deploy": "wrangler deploy"
+    "deploy": "wrangler deploy",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "dependencies": {
     "three": "^0.187.0"
@@ -19,6 +21,7 @@
   "devDependencies": {
     "@playwright/test": "^1.65.0",
     "@types/three": "^0.187.0",
+    "prettier": "^3.9.10",
     "typescript": "^7.0.2",
     "vite": "^8.3.6",
     "wrangler": "^4.158.0"

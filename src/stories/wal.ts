@@ -1,10 +1,5 @@
 import type { StoryStep } from './types'
 
-/**
- * The write-ahead log. The interesting claim is not "there is a log" but the
- * ordering rule: the record describing a change reaches durable storage before
- * the page it changes ever could, and a commit is exactly the wait for that.
- */
 export const WAL_STORY: StoryStep[] = [
     {
         title: 'a log beside the data',
@@ -13,9 +8,7 @@ export const WAL_STORY: StoryStep[] = [
         dir: [0.15, 0.6, 1],
         fov: 30,
         padding: 1.25,
-        // A packet on the opening frame: the card describes what a write does, so
-        // there is a write to watch. It used to open on an empty frame and wait for
-        // ambient traffic that the story itself had already switched off.
+
         send: 1,
         sustain: 1,
         expect: (c) => c.walSegments >= 1,

@@ -1,16 +1,6 @@
 import type { StoryStep } from './types'
 import { frozeAt, frozeAtCell } from './stop'
 
-/**
- * A big hash, followed: one field versus every field.
- *
- * A `hashtable`-encoded hash IS a dict, with its own bucket array and its own
- * entries — a second hash table nested inside the value. HGET uses it the way a
- * hash table is meant to be used: one field, one bucket, one chain, one page.
- * HGETALL cannot: there is no order and no index over fields, so the only way to
- * answer it is to walk every bucket and every chain, and that means touching
- * every entry the value has.
- */
 export const REDIS_HASH_STORY: StoryStep[] = [
     {
         title: 'the value is its own bucket array',

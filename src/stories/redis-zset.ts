@@ -1,16 +1,6 @@
 import type { StoryStep } from './types'
 import { frozeAt, frozeAtCell } from './stop'
 
-/**
- * A sorted set, followed: the point lookup and the range scan.
- *
- * A converted zset is two structures — a dict for "what score does this member
- * have" and a skiplist for the ordering — and the two reads that matter take a
- * different one. ZSCORE is a hash lookup inside the value (not inside the
- * keyspace), so it ends after one bucket and one page. ZRANGEBYSCORE starts at a
- * level and then walks the bottom list, and every node it lands on is a separate
- * allocation. Neither read touches the whole value.
- */
 export const REDIS_ZSET_STORY: StoryStep[] = [
     {
         title: 'two structures, one value',

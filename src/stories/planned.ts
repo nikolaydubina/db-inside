@@ -1,8 +1,3 @@
-/**
- * What a cluster accumulates when it runs for a long time without anybody
- * looking. Not playable yet — listed so the gaps are visible instead of
- * implicit, and each one names the state it would have to show.
- */
 export const PLANNED_STORIES: { label: string; hint: string; db?: 'postgres' | 'redis' }[] = [
     {
         label: 'a slot that pins the WAL',

@@ -1,26 +1,13 @@
 import * as THREE from 'three'
 import { label } from './core/util'
 
-/**
- * A hidden measuring aid, not part of the scene's art. It answers the one
- * question the picture cannot: "where is that, in world units?" — because
- * "left of the orange cage" is not a coordinate.
- *
- *   __axes.on()        show axes, ticks, coordinate labels and origin marks
- *   __axes.off()
- *   __axes.toggle()
- *   ?axes              same as calling __axes.on() at boot
- *
- * Axes are drawn with depthTest off on purpose: a debug ruler you cannot see
- * through geometry is a ruler you cannot use.
- */
 export interface Axes {
     readonly group: THREE.Group
     on(): void
     off(): void
     toggle(): boolean
     isOn(): boolean
-    /** Moves a mark — return value of mark(), call it when the thing it labels moves. */
+
     mark(name: string, pos: THREE.Vector3): (next: THREE.Vector3) => void
 }
 
@@ -48,7 +35,7 @@ export function createAxes(
             color,
             transparent: true,
             opacity,
-            // always visible: the point of a ruler is to be readable through the model
+
             depthTest: false,
             depthWrite: false,
             linewidth: width,
@@ -60,14 +47,10 @@ export function createAxes(
         return line
     }
 
-    /* ---------------------------------- axes --------------------------------- */
-
     segments([-extentX, 0, 0, extentX, 0, 0], AXIS_X, 0.65)
     segments([0, 0, -extentZ, 0, 0, extentZ], AXIS_Z, 0.65)
     segments([0, 0.001, 0, 0, 14, 0], AXIS_Y, 0.65)
 
-    // ticks: one per grid square (the floor grid is 2 units), so counting cells
-    // between two labelled points is exact
     const xTicks: number[] = []
     for (let x = -extentX; x <= extentX; x += tick) xTicks.push(x, 0, -0.45, x, 0, 0.45)
     segments(xTicks, AXIS_X, 0.28)
@@ -77,8 +60,6 @@ export function createAxes(
     const yTicks: number[] = []
     for (let y = 0; y <= 14; y += 2) yTicks.push(-0.3, y, 0, 0.3, y, 0)
     segments(yTicks, AXIS_Y, 0.28)
-
-    /* -------------------------------- labels --------------------------------- */
 
     const signed = (n: number) => (n > 0 ? `+${n}` : `${n}`)
 
@@ -117,18 +98,12 @@ export function createAxes(
     cells.position.set(0.5, 0.35, 2.2)
     group.add(cells)
 
-    /* --------------------------------- marks --------------------------------- */
-
-    // built at the origin and then placed, so moving a mark is a position write
     const markCross = (color: number) => {
         const g = new THREE.BufferGeometry()
         const s = 1.6
         g.setAttribute(
             'position',
-            new THREE.Float32BufferAttribute(
-                [-s, 0.02, 0, s, 0.02, 0, 0, 0.02, -s, 0, 0.02, s],
-                3,
-            ),
+            new THREE.Float32BufferAttribute([-s, 0.02, 0, s, 0.02, 0, 0, 0.02, -s, 0, 0.02, s], 3),
         )
         const line = new THREE.LineSegments(
             g,

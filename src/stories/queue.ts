@@ -1,21 +1,11 @@
 import type { StoryStep } from './types'
 
-/**
- * Too many requests: what one connection is, and why six of them do not get
- * faster when more work arrives.
- *
- * The whole story is about backpressure, so every step is measured against the
- * pool: connections, busy backends, bytes buffered in a backend, bytes stuck in
- * a socket. Nothing here is a tour of the drawing.
- */
 export const QUEUE_STORY: StoryStep[] = [
     {
         title: 'the setup',
         body: 'One PostgreSQL instance, one client pressing run, and six connection slots — max_connections = 6. Everything from here happens inside this one server.',
         view: 'overview',
-        // The opening card issues its own packet. Without one this card was the
-        // story starting on a still frame: ambient traffic is switched off while a
-        // story runs, so nothing was ever going to arrive.
+
         send: 1,
         sustain: 1,
         expect: (c) => c.connections <= 1,
@@ -66,7 +56,7 @@ export const QUEUE_STORY: StoryStep[] = [
     {
         title: 'waiting in the input buffer',
         body: 'Each backend reads ahead into a buffer in its own process memory — the violet cells. Those requests have already arrived and are queued there. That is private heap, not shared_buffers, and no other backend can see it.',
-        // the busiest connection: the one with the most cells actually lit
+
         subject: (s) => s.executing(),
         dir: [0, 0.25, 1],
         fov: 22,
@@ -89,8 +79,7 @@ export const QUEUE_STORY: StoryStep[] = [
         lookShift: [0, -0.8, 0],
         expect: (c) => c.queued >= 1,
         waitFor: 'bytes blocked in a socket',
-        // capacity across the pool is 6 connections × 2 buffered cells, so this
-        // has to overshoot it for bytes to actually spill into the sockets
+
         send: 16,
         delay: 800,
         sustain: 5,
