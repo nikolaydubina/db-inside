@@ -12,7 +12,8 @@ import { verifyDisk } from './verify'
 import { DictTable } from './dict'
 import { auxBlocks, encodingOf, mixHex, rebaseAnchors } from './types'
 import { BIG_REAL, REDIS_ANCHOR } from './types'
-import type { KeyKind, RedisKey, RedisPort } from './types'
+import { KeyKind, KIND_NAME } from './kind'
+import type { RedisKey, RedisPort } from './types'
 export { BIG_SPOT }
 export type { BigKind }
 import {
@@ -718,20 +719,20 @@ export class RedisInstance {
                 )
                 const live = Math.random() < 0.74
                 const kinds: KeyKind[] = [
-                    'string',
-                    'string',
-                    'string',
-                    'hash',
-                    'list',
-                    'set',
-                    'zset',
+                    KeyKind.String,
+                    KeyKind.String,
+                    KeyKind.String,
+                    KeyKind.Hash,
+                    KeyKind.List,
+                    KeyKind.Set,
+                    KeyKind.ZSet,
                 ]
                 const kind = kinds[randInt(0, kinds.length - 1)]
                 const size = VALUE_BYTES[kind]
                 const limit = encodingLimit(kind)
                 const near = Math.random() < 0.18
                 const entries =
-                    kind === 'string'
+                    kind === KeyKind.String
                         ? 0
                         : near
                           ? Math.max(1, limit - randInt(1, 4))
@@ -764,8 +765,13 @@ export class RedisInstance {
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
         this.paintAux()
 
+        const BIG_KEY_KIND: Record<BigKind, KeyKind> = {
+            hash: KeyKind.Hash,
+            zset: KeyKind.ZSet,
+            list: KeyKind.List,
+        }
         for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
-            const key = this.keys.find((k) => k.live && !k.big && k.kind === kind)
+            const key = this.keys.find((k) => k.live && !k.big && k.kind === BIG_KEY_KIND[kind])
             if (!key) continue
             const real = BIG_REAL[kind]
             key.big = kind
@@ -780,7 +786,7 @@ export class RedisInstance {
         keys.instanceMatrix.needsUpdate = true
 
         this.hotKeys = this.keys
-            .filter((k) => k.live && !k.big && k.kind === 'string')
+            .filter((k) => k.live && !k.big && k.kind === KeyKind.String)
             .filter((_, n) => n % 7 === 0)
             .slice(0, 4)
         for (const key of this.hotKeys) {
@@ -790,7 +796,9 @@ export class RedisInstance {
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
 
-        const strings = this.keys.filter((k) => k.live && !k.big && !k.hot && k.kind === 'string')
+        const strings = this.keys.filter(
+            (k) => k.live && !k.big && !k.hot && k.kind === KeyKind.String,
+        )
         this.inlineKey = strings[0] ?? null
         this.rawKey = strings.find((k) => k !== this.inlineKey) ?? null
         if (this.inlineKey) {
@@ -1470,26 +1478,27 @@ export class RedisInstance {
         )
         const enc = encodingOf(key)
         const limit = encodingLimit(key.kind)
-        const what = key.kind === 'hash' ? 'fields' : key.kind === 'set' ? 'members' : 'elements'
+        const what =
+            key.kind === KeyKind.Hash ? 'fields' : key.kind === KeyKind.Set ? 'members' : 'elements'
         const ttl = key.ttl > 0 ? ` · ttl ≈ ${key.ttl.toFixed(0)} s` : ''
-        const isString = key.kind === 'string'
+        const isString = key.kind === KeyKind.String
         return {
             key: `redis-key-${i}`,
             info: {
-                title: `key #${i} — ${key.kind} · ${enc}`,
+                title: `key #${i} — ${KIND_NAME[key.kind]} · ${enc}`,
                 body:
                     'One key and its value, living in the process heap. Reads are a hash plus a pointer chase: no buffer pool, no page read, no disk. This is also why a key that is bigger than memory cannot exist here at all, and why one slow O(N) command on a big value blocks every other client. ' +
                     (isString
                         ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
                         : key.aux
                           ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
-                            (key.kind === 'zset'
+                            (key.kind === KeyKind.ZSet
                                 ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
-                                : key.kind === 'list'
+                                : key.kind === KeyKind.List
                                   ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
                                   : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
                             ' It never converts back: the bigger encoding is kept until the key is deleted.'
-                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${KIND_NAME[key.kind]} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
                 meta: isString
                     ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
@@ -1802,7 +1811,7 @@ export class RedisInstance {
     compactKeyLeft(): RedisKey | null {
         if (this.inlineKey?.live) return this.inlineKey
         const live = this.keys.filter(
-            (k) => k.live && !k.aux && !k.big && !k.raw && k.kind === 'string',
+            (k) => k.live && !k.aux && !k.big && !k.raw && k.kind === KeyKind.String,
         )
         if (live.length === 0) return null
         const host = live.find((k) => k.page === this.showcasePage)
@@ -1833,7 +1842,7 @@ export class RedisInstance {
     }
 
     innerDictPoint(key: RedisKey): THREE.Vector3 | null {
-        if (key.kind !== 'hash' && key.kind !== 'zset') return null
+        if (key.kind !== KeyKind.Hash && key.kind !== KeyKind.ZSet) return null
         if (!key.aux && !key.big) return null
         if (!key.big) return this.valuePoint(key)
         return this.keyPageTop(key).add(new THREE.Vector3(0.1, 0.24, 0.06))
@@ -1905,7 +1914,7 @@ export class RedisInstance {
     setKeyKind(key: RedisKey, kind: KeyKind) {
         const range = VALUE_BYTES[kind]
         key.kind = kind
-        key.entries = kind === 'string' ? 0 : 1
+        key.entries = kind === KeyKind.String ? 0 : 1
         key.aux = false
         key.bytes = randInt(range[0], range[1])
         this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
@@ -1915,12 +1924,12 @@ export class RedisInstance {
     }
 
     growKey(key: RedisKey): boolean {
-        if (key.kind === 'string' || !key.live) return false
+        if (key.kind === KeyKind.String || !key.live) return false
         key.entries++
         if (key.aux) return false
         if (key.entries <= encodingLimit(key.kind)) return false
         key.aux = true
-        key.bytes += 400 + key.entries * (key.kind === 'zset' ? 48 : 24)
+        key.bytes += 400 + key.entries * (key.kind === KeyKind.ZSet ? 48 : 24)
         this.auxAnim.set(key.i, 0)
         this.flashKey(key, KIND_COLOR[key.kind], 0.9)
         this.paintAuxKey(key)

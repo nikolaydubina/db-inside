@@ -3,6 +3,9 @@ import * as THREE from 'three'
 import { BLOCK_LIFT, FLOOR_Y } from '../core/util'
 import { CELL_PITCH, PAGE_4K, PAGE_PITCH } from '../disk/page'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
+import { KeyKind } from './kind'
+
+export { KeyKind } from './kind'
 
 export const REDIS_ORIGIN = new THREE.Vector3(-13, 0, -34)
 
@@ -152,24 +155,22 @@ export const RDB_FILL_DARK = 0x06222c
 export const RDB_FILL_BRIGHT = 0x23c9a6
 
 export const KIND_COLOR: Record<KeyKind, number> = {
-    string: PALETTE.cyan,
-    list: PALETTE.teal,
-    hash: PALETTE.violet,
-    set: PALETTE.magenta,
-    zset: PALETTE.ice,
+    [KeyKind.String]: PALETTE.cyan,
+    [KeyKind.List]: PALETTE.teal,
+    [KeyKind.Hash]: PALETTE.violet,
+    [KeyKind.Set]: PALETTE.magenta,
+    [KeyKind.ZSet]: PALETTE.ice,
 }
 
 export const LISTPACK_MAX_ENTRIES = 128
 export const INTSET_MAX_ENTRIES = 512
 export const encodingLimit = (kind: KeyKind) =>
-    kind === 'set' ? INTSET_MAX_ENTRIES : LISTPACK_MAX_ENTRIES
+    kind === KeyKind.Set ? INTSET_MAX_ENTRIES : LISTPACK_MAX_ENTRIES
 
 export const VALUE_BYTES: Record<KeyKind, [number, number]> = {
-    string: [48, 700],
-    list: [200, 2600],
-    hash: [180, 3200],
-    set: [140, 2000],
-    zset: [220, 2800],
+    [KeyKind.String]: [48, 700],
+    [KeyKind.List]: [200, 2600],
+    [KeyKind.Hash]: [180, 3200],
+    [KeyKind.Set]: [140, 2000],
+    [KeyKind.ZSet]: [220, 2800],
 }
-
-export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'

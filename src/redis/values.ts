@@ -4,9 +4,15 @@ import type { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { PALETTE } from '../postgresql/instance'
 import type { Info } from '../postgresql/instance'
 import { OutlineBox, breathe, label, radialTexture, setLabelEnabled } from '../core/util'
-import { KEY, KIND_COLOR, HEAP_PAGE } from './layout'
+import { KEY, HEAP_PAGE } from './layout'
 
 export type BigKind = 'hash' | 'zset' | 'list'
+
+export const BIG_COLOR: Record<BigKind, number> = {
+    hash: PALETTE.violet,
+    zset: PALETTE.ice,
+    list: PALETTE.teal,
+}
 
 export const BIG_SPOT: Record<BigKind, THREE.Vector3> = {
     hash: new THREE.Vector3(-8.6, 3.4, -6.2),
@@ -152,7 +158,7 @@ export class BigValues {
     private material(kind: BigKind): THREE.MeshStandardMaterial {
         const mat = new THREE.MeshStandardMaterial({
             color: 0x0d0a16,
-            emissive: KIND_COLOR[kind],
+            emissive: BIG_COLOR[kind],
             emissiveIntensity: 0.42,
             roughness: 0.4,
             metalness: 0.35,
@@ -228,7 +234,7 @@ export class BigValues {
         const at = BIG_SPOT[kind]
         const centre = new THREE.Vector3(at.x, at.y + cy, at.z)
         const size = new THREE.Vector3(w, h, d)
-        const { pick, box } = this.host.frame(centre, size, KIND_COLOR[kind], {
+        const { pick, box } = this.host.frame(centre, size, BIG_COLOR[kind], {
             dashed: true,
             opacity: 0.2,
         })

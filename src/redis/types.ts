@@ -16,7 +16,9 @@ import {
     zAt,
 } from './layout'
 
-export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
+import { KeyKind, KIND_NAME } from './kind'
+
+export { KeyKind, KIND_NAME }
 
 export const BIG_REAL: Record<BigKind, { entries: number; mib: number; unit: string }> = {
     hash: { entries: 5_300_000, mib: 393, unit: 'fields' },
@@ -53,15 +55,15 @@ export interface RedisKey {
 
 export function encodingOf(key: RedisKey): string {
     switch (key.kind) {
-        case 'string':
+        case KeyKind.String:
             return key.bytes <= 44 ? 'embstr' : 'raw'
-        case 'hash':
+        case KeyKind.Hash:
             return key.aux ? 'hashtable' : 'listpack'
-        case 'set':
+        case KeyKind.Set:
             return key.aux ? 'hashtable' : 'intset'
-        case 'zset':
+        case KeyKind.ZSet:
             return key.aux ? 'skiplist + dict' : 'listpack'
-        case 'list':
+        case KeyKind.List:
             return key.big
                 ? 'quicklist · listpacks'
                 : key.aux
@@ -71,8 +73,8 @@ export function encodingOf(key: RedisKey): string {
 }
 
 export function auxBlocks(key: RedisKey): number {
-    if (!key.aux || key.kind === 'string') return 0
-    return key.kind === 'zset' ? 2 : 1
+    if (!key.aux || key.kind === KeyKind.String) return 0
+    return key.kind === KeyKind.ZSet ? 2 : 1
 }
 
 export interface RedisPort {

@@ -1,6 +1,7 @@
 import * as THREE from 'three'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
-import type { BigKind, KeyKind, RedisInstance, RedisKey, RedisPort } from './redis'
+import { KeyKind } from './kind'
+import type { BigKind, RedisInstance, RedisKey, RedisPort } from './redis'
 import { BIG_REAL } from './redis'
 import { HEAP_PAGE } from './layout'
 import { QueryChain, pathCurve } from '../core/flow'
@@ -77,12 +78,12 @@ const PUBLISH: Command = { name: 'PUBLISH', write: false, weight: 7, fanout: tru
 const COMMANDS: Command[] = [
     { name: 'GET', write: false, weight: 34 },
     { name: 'MGET', write: false, weight: 7 },
-    { name: 'SET', write: true, weight: 20, kind: 'string' },
-    { name: 'INCR', write: true, weight: 7, kind: 'string' },
-    { name: 'HSET', write: true, weight: 8, kind: 'hash' },
-    { name: 'SADD', write: true, weight: 6, kind: 'set' },
-    { name: 'LPUSH', write: true, weight: 5, kind: 'list' },
-    { name: 'ZADD', write: true, weight: 5, kind: 'zset' },
+    { name: 'SET', write: true, weight: 20, kind: KeyKind.String },
+    { name: 'INCR', write: true, weight: 7, kind: KeyKind.String },
+    { name: 'HSET', write: true, weight: 8, kind: KeyKind.Hash },
+    { name: 'SADD', write: true, weight: 6, kind: KeyKind.Set },
+    { name: 'LPUSH', write: true, weight: 5, kind: KeyKind.List },
+    { name: 'ZADD', write: true, weight: 5, kind: KeyKind.ZSet },
     { name: 'EXPIRE', write: true, weight: 4 },
     { name: 'DEL', write: true, weight: 5 },
     PUBLISH,
@@ -284,7 +285,7 @@ export class RedisSim {
                 walk.push({ p: r.nodePoint(key, 1), stop: 'field', lit: true })
                 walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
             } else {
-                const hops = key.kind === 'string' ? 1 : key.kind === 'hash' ? 2 : 3
+                const hops = key.kind === KeyKind.String ? 1 : key.kind === KeyKind.Hash ? 2 : 3
 
                 for (let n = 0; n <= hops; n++) {
                     walk.push({ p: r.hopPoint(key, n), stop: 'node', lit: { n, of: hops } })
@@ -301,7 +302,7 @@ export class RedisSim {
 
             walk.push({ p: r.valuePoint(key), stop: 'value' })
             walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
-            if (key.kind === 'zset' || key.kind === 'hash')
+            if (key.kind === KeyKind.ZSet || key.kind === KeyKind.Hash)
                 walk.push({ p: r.hopPoint(key, 1), stop: 'hop' })
         } else {
             walk.push({ p: r.keyPageTop(key), stop: 'page' })
