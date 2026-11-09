@@ -115,8 +115,9 @@
         <h2>Redis</h2>
         <ul>
           <li>one command thread, a command queue, and the epoll fd set under it</li>
-          <li>the keyspace over the bucket array, including the rehash</li>
-          <li>one very large hash, sorted set and list, and the few keys taking the traffic</li>
+          <li>the keyspace dict over its bucket array, including the rehash</li>
+          <li>a very large hash, sorted set and list — carried by the read that walks them</li>
+          <li>the few keys taking most of the traffic</li>
           <li>the AOF being appended and the RDB base file, with the BGSAVE and AOF-rewrite children</li>
         </ul>
         <h2>Links</h2>
@@ -125,7 +126,8 @@
           each cage; every subject has its own address — for example
           <a href="/postgresql/wal">/postgresql/wal</a>,
           <a href="/postgresql/buffers">/postgresql/buffers</a>,
-          <a href="/redis/keys">/redis/keys</a>, <a href="/redis/zset">/redis/zset</a>.
+          <a href="/redis/dict">/redis/dict</a>, <a href="/redis/loop">/redis/loop</a>,
+          <a href="/redis/channel">/redis/channel</a>.
         </p>
         <p>
           Source and notes:

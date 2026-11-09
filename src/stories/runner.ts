@@ -38,6 +38,8 @@ export interface StoryOptions {
         readBig(kind: BigKind, op?: 'point' | 'walk'): boolean
         /** a read of a compact value, drawn through the object section */
         readInline(): boolean
+        /** a read of the large string, whose bytes are on another page */
+        readRaw?(): boolean
         /** the next ordinary socket sends SUBSCRIBE */
         subscribeNext(): boolean
         /** nobody is listening, and no episode will interrupt */
@@ -161,8 +163,13 @@ export function createStory({
     /** One tap, aimed at the cage this step is about. */
     const tap = (step: StoryStep) => {
         if ((step.tap ?? 'postgres') === 'redis') {
-            // a step about a traversal names the value; everything else is ambient
-            if (step.op === 'object') redis?.readInline()
+            // `raw` FIRST, and on its own. It names the value, which is the thing the
+            // reader is being shown — a step that says `raw` and forgets `op: 'object'`
+            // used to fall through to `runCommand` and cue an ordinary GET against
+            // whatever key it picked, so the camera followed a packet that had nothing
+            // to do with the caption and nothing appeared to happen.
+            if (step.raw) redis?.readRaw?.()
+            else if (step.op === 'object') redis?.readInline()
             else if (step.big) redis?.readBig(step.big, step.op ?? 'walk')
             else redis?.runCommand()
         } else void sim.runQuery()

@@ -134,32 +134,34 @@ export const VIEWS: ViewDef[] = [
         pose: () => houseShot(REDIS_ORIGIN.clone()),
     },
     {
-        id: 'redis-keys',
-        label: 'redis keys',
+        id: 'redis-dict',
+        label: 'dict',
         db: 'redis',
-        entity: 'keyspace',
-        hint: 'the keyspace: bucket array below, entries floating above it',
-        pose: () => shot(REDIS_ANCHOR.keys, [-3.4, 5.4, 8.6], 34, [0, -0.5, 0]),
+        entity: 'the keyspace dict',
+        hint: 'the bucket array: a key hashes into one slot, and a slot is a pointer to a page',
+        // Measured, not guessed: the array is 15.5 units wide and 3.5 deep, flat as a
+        // table (0.07 tall), and its centre sits at (0, 5.85, −2.2). At 19.75 units the
+        // frame covered 7.67 units either side of the aim and the table was clipped by
+        // 1%; 22.7 leaves a margin, and the aim is dropped 0.6 so the rows sit above
+        // the middle of the frame.
+        pose: () => shot(REDIS_ANCHOR.dict, [-2.8, 6.4, 21.4], 34, [0, -0.6, 0]),
     },
-    {
-        id: 'redis-skew',
-        label: 'redis skew',
-        db: 'redis',
-        entity: 'the distribution',
-        hint: 'many small keys, a few very large values, and the handful of keys taking the traffic',
-        pose: () =>
-            shot(REDIS_ORIGIN.clone().add(V(0, 3.4, -2.6)), [-7.5, 6.5, 15.5], 40, [0, 0.8, 0]),
-    },
-    // The three `big-*` views are gone with the cages they framed.
+    // `redis keys` used to frame the same volume, and framed nothing.
     //
-    // A big value used to stand at the back of the cage as an exhibit you could ask
-    // the camera to show you. It does not stand anywhere now: the structure is what a
-    // read carries while it walks, so it exists only while a story is following that
-    // read. A view is a promise that pointing the camera somewhere shows something,
-    // and there is nothing at those coordinates any more.
+    // The entry cubes are not drawn any more: a 0.16 cube on a 0.23 page pokes out
+    // of every face of the block, so "the keyspace" is the dict array and the pages
+    // its buckets point at, and that is a shot of the DICT (above) rather than a
+    // shot of a plane that no longer has anything on it.
+    //
+    // Nor is there a shot of `hot keys` or of `pointer chases` any more. Both were
+    // shots of the HEAP — one of them lit, one of them being walked — and the heap is
+    // not a structure you go and stand in front of: it is the floor everything above
+    // it is doing its work on. A hot key is a story beat (the read lands, the block
+    // flashes, the read leaves), and so is a big value (the read takes it, walks it,
+    // puts it back). A view cannot show an event; a story can.
     {
         id: 'redis-disk',
-        label: 'redis disk',
+        label: 'disk',
         db: 'redis',
         entity: 'persistence',
         hint: 'only two files are here: the incremental AOF and the base RDB',
@@ -167,7 +169,7 @@ export const VIEWS: ViewDef[] = [
     },
     {
         id: 'redis-aof',
-        label: 'redis aof',
+        label: 'aof',
         db: 'redis',
         entity: 'aof tail',
         hint: 'the end of the log: the block being appended, and the bytes still in aof_buf above it',
@@ -195,70 +197,21 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(REDIS_ANCHOR.loop, [-4.93, 5.96, 5.11], 34),
     },
     {
-        id: 'redis-paths',
-        label: 'pointer chases',
-        slug: 'paths',
-        db: 'redis',
-        entity: 'the address chain',
-        hint: 'bucket → entry → value → the heap pages a walk lands on, all in one frame',
-        // Wide on purpose: a traversal is a route BETWEEN three layers — the dict
-        // at 5.85, the value structures at ~3.4, the heap at 1.95 — and a shot of
-        // any one of them shows a structure, not the movement between them. Stood
-        // to the left of the cage, so the loop (which is near and bright) does not
-        // sit on top of the sorted set at the centre of the frame.
-        pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 3.2, -3.0)), [-9, 4.5, 16], 42),
-    },
-    {
-        id: 'redis-hash-walk',
-        label: 'hash lookups',
-        slug: 'hash-paths',
-        db: 'redis',
-        entity: 'the big hash and its pages',
-        hint: 'HGET is one bucket; HGETALL walks every bucket and every chain into the heap',
-        // Aimed between the big hash (which sits on the left) and the arena under
-        // it, because the difference between the two reads is a route, not a shape:
-        // one hop for a field, a sweep of the whole bucket array for HGETALL.
-        pose: () => shot(REDIS_ORIGIN.clone().add(V(-4.3, 3.0, -3.5)), [-4.5, 4.2, 15.5], 44),
-    },
-    {
-        id: 'redis-journey',
-        label: 'one lookup',
-        slug: 'journey',
-        db: 'redis',
-        entity: 'one request, end to end',
-        hint: 'socket → queue → loop → bucket → page → object → back out',
-        // The whole path, so the shot has to hold the port strip, the queue, the
-        // loop, the dict, the heap and the object section at once — the only way
-        // to follow a request is to see where it starts and where it goes.
-        pose: () =>
-            shot(REDIS_ORIGIN.clone().add(V(-4, 6.2, 1.2)), [5, 4.5, 18], 44),
-    },
-    {
-        id: 'redis-inline',
-        label: 'inline value',
-        slug: 'inline',
-        db: 'redis',
-        entity: 'one value object',
-        hint: 'sixteen bytes: a header, and a payload that is sometimes inside it',
-        // Aimed at the PAGE, not at a place beside the bucket array. The value
-        // object is an allocation inside one 4 kB block, so this shot is a zoom:
-        // 0.9 units from a 0.23-unit page is where the block, the header and the
-        // payload inside it all read. It used to be a 10-unit shot of a section
-        // that no longer exists — a view is only worth keeping if its anchor is a
-        // thing in the scene.
-        pose: () => shot(REDIS_ANCHOR.inline, [0.34, 0.6, 0.56], 34),
-    },
-    {
         id: 'redis-pubsub',
-        label: 'redis pub/sub',
+        label: 'channel',
+        slug: 'channel',
         db: 'redis',
-        entity: 'the fan-out',
+        entity: 'the channel',
         hint: 'the command loop and the sockets listening to it: a publish touches no key and no file',
-        // Framed from the loop UPWARDS, because that is where this route goes: the
-        // thread sits a little below the rim, and the sockets it writes to are at
-        // the top. Aiming at the loop alone would cut the listeners out of the
-        // frame, which is the entire point of the shot.
-        pose: () => shot(REDIS_ANCHOR.loop.clone().add(V(0.6, 1.35, 2.4)), [1.2, 2.6, 12.4], 37),
+        // The angle is the one picked by hand in the browser, copied straight out of
+        // the `?cam=` readout: `11.78,12.22,-1.32~0.6,8.95,3.8~37`, in cage space.
+        // Written against the loop anchor, so it is pos − loop = (11.78, 4.62, −2.72)
+        // and target − loop = (0.6, 1.35, 2.4) — the point above the orb where the
+        // publish paths leave it. From the +x side and above, the queue into the loop,
+        // the epoll plate under it and the sockets it fans out to are all in frame at
+        // 12.9 units; the earlier shot stood in front of the loop, which put the
+        // listeners behind it instead of above it.
+        pose: () => shot(REDIS_ANCHOR.loop, [11.78, 4.62, -2.72], 37, [0.6, 1.35, 2.4]),
     },
     {
         id: 'disk',
@@ -415,11 +368,11 @@ export const viewsFor = (db: 'postgres' | 'redis') =>
     ALL_VIEWS.filter((v) => !v.unlisted && (v.db === 'both' || (v.db ?? 'postgres') === db))
 
 /**
- * The path segment of a shot — `/postgresql/wal`, `/redis/keys`.
+ * The path segment of a shot — `/postgresql/wal`, `/redis/dict`.
  *
  * Two shots ARE their cage, so they are the path with nothing after it. The rest
  * is the id, minus a `redis-` prefix that would only repeat what the path already
- * says: `/redis/keys`, not `/redis/redis-keys`.
+ * says: `/redis/dict`, not `/redis/redis-dict`.
  */
 export function slugOf(v: ViewDef): string {
     if (v.slug !== undefined) return v.slug

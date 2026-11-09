@@ -6,7 +6,7 @@ import * as THREE from 'three'
  *
  *   /postgresql         the postgres cage, from the shot that cage keeps for itself
  *   /postgresql/wal     the same cage, framed on the WAL run
- *   /redis/keys         redis, framed on the keyspace
+ *   /redis/dict         redis, framed on the keyspace dict
  *
  * Every target that has a named shot has a path (see views.ts), and a shot is a
  * function of the scene — anchored to the structures themselves — so the same

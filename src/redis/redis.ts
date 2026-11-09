@@ -85,6 +85,15 @@ export interface RedisKey {
     aux: boolean
     /** set when this key is drawn as its own area instead of a block in the plane */
     big?: BigKind
+    /**
+     * The payload is NOT in the object's own allocation.
+     *
+     * A string over 44 bytes is `raw`: the header holds a pointer and the bytes are
+     * a second allocation on another page, which is one more hop than an `int` or an
+     * `embstr` ever takes. Conversions are the same story for collections, and they
+     * are marked by `aux`.
+     */
+    raw?: boolean
     /** one of the few keys that take most of the traffic */
     hot?: boolean
 }
@@ -158,16 +167,6 @@ export const REDIS_ANCHOR = {
     /** the floating aof_buf strip — it drifts, so update() rewrites this live */
     aofBuf: new THREE.Vector3(),
     rdb: new THREE.Vector3(),
-    /**
-     * The one heap page drawn open, with the value-object cage inside it.
-     *
-     * The cage used to stand in a section of its own beside the bucket array, and
-     * the `inline value` view aimed at those coordinates. The section is gone — the
-     * object is an allocation on a page — so the view has to aim at the page the
-     * cage was built in, and only the instance knows which page that is: hence an
-     * anchor it writes in place, like `keys` and `aofBuf` above.
-     */
-    inline: new THREE.Vector3(),
     /** the three large values, drawn as their own areas at the back */
     bigHash: new THREE.Vector3(),
     bigZset: new THREE.Vector3(),
@@ -176,21 +175,12 @@ export const REDIS_ANCHOR = {
 
 /**
  * The page drawn open, in cage-local space.
- *
- * Module level because it is decided by the instance (which page is open) but
- * needed by `rebaseAnchors()`, which runs on load and again whenever the cage is
- * dragged across the floor — a value only the instance knows, read by a function
- * that has no instance. Written once, in buildInlineObject. Defaults to the middle
- * of the arena so an early view call aims somewhere sane.
  */
-const inlineLocal = new THREE.Vector3(0, HEAP.y, HEAP.cz)
-
 /** local geometry + wherever the cage currently stands = world position */
 function rebaseAnchors() {
     const o = REDIS_ORIGIN
     REDIS_ANCHOR.sky.set(6, 26, 2).add(o)
     REDIS_ANCHOR.keys.set(0, HEAP.y + 0.5, HEAP.cz + 0.4).add(o)
-    REDIS_ANCHOR.inline.copy(inlineLocal).add(o)
     REDIS_ANCHOR.dict.set(0, DICT.y, DICT.cz).add(o)
     REDIS_ANCHOR.loop.copy(LOOP).add(o)
     REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
@@ -243,8 +233,17 @@ export class RedisInstance {
     private ghostPage: number | null = null
     /** the page the value-object cage lives inside, and the cage itself */
     private showcasePage: number = 0
-    /** the top face of the value-object cage: where a read of it stands */
-    private inlineCageTop = new THREE.Vector3()
+    /** the small string the inline story reads: bytes in the header's allocation */
+    private inlineKey: RedisKey | null = null
+    /** the large string the raw story reads: bytes behind a pointer */
+    private rawKey: RedisKey | null = null
+    /** the value-object diagram, drawn only while a read holds it */
+    private objectCage: THREE.Group | null = null
+    /** the extent of the dashed cage it is carried in */
+    private objectArea: THREE.Box3 | null = null
+    /** where it is built from, and the stop a read picks it up at */
+    private objectHome = new THREE.Vector3()
+    private objectStop = new THREE.Vector3()
     /** the second (and for a zset, third) allocation of a converted value */
     private auxMesh!: THREE.InstancedMesh
     /** per-key deploy of a conversion, 0 → 1; the map holds only keys mid-flight */
@@ -1068,6 +1067,33 @@ export class RedisInstance {
         }
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
 
+        // The two places a string's payload can be, made findable.
+        //
+        // A string is not "16 bytes plus bytes": up to 44 bytes the bytes live in the
+        // header's own allocation (embstr) or the number lives in its pointer field
+        // (int), and the read is over. Past 44 it is `raw`, the header holds an
+        // address, and the bytes are a second allocation on a second page — one more
+        // hop than a small value ever takes. The two stories are about those two
+        // shapes, so the drawing needs one honest key of each rather than whichever
+        // string happens to be nearest, and neither may be a hot key: those are
+        // already carrying a different point.
+        const strings = this.keys.filter((k) => k.live && !k.big && !k.hot && k.kind === 'string')
+        this.inlineKey = strings[0] ?? null
+        this.rawKey = strings.find((k) => k !== this.inlineKey) ?? null
+        if (this.inlineKey) {
+            // 24 bytes: fits in the header's allocation, so nothing is fetched twice
+            this.inlineKey.live = true
+            this.inlineKey.bytes = 24
+            this.inlineKey.raw = false
+        }
+        if (this.rawKey) {
+            // a block's worth at the real encoding, so the second allocation is a
+            // page and not a fraction of one
+            this.rawKey.live = true
+            this.rawKey.bytes = 2048
+            this.rawKey.raw = true
+        }
+
         /* --------------------------- heap volume -------------------------- */
         // The pages are lit from the dataset's bytes; nothing is placed on them —
         // the keyspace above stays a dashed representation, this is the memory.
@@ -1502,14 +1528,10 @@ export class RedisInstance {
      * where the header holds an address and the bytes are on another page.
      */
     private buildInlineObject() {
-        // The whole cage, one page big.
-        //
-        // This diagram is about 1.5 units across and a heap page is 0.23, so it is
-        // built inside a group at 1/12 scale and dropped into one page: at the
-        // scene's normal zoom it is a speck you can just make out, and when a story
-        // zooms into that block — which opens into a glass shell while a read is
-        // standing on it — it is what you find inside. Nothing is left floating in
-        // the cage, and nothing is drawn across a block's faces.
+        // The page it was allocated on: heap page 0. Nothing here is a place in the
+        // cage — a value object is one allocation inside one 4 kB block — so it is
+        // built in diagram units and drawn only while a read is holding it (see
+        // rideObject). The page itself is a page like any other.
         const page = this.heapPages[0] ?? 0
         this.showcasePage = page
         const at = new THREE.Vector3(
@@ -1517,32 +1539,34 @@ export class RedisInstance {
             HEAP.y,
             heapZ(Math.floor(page / HEAP.cols)),
         )
-        // the `inline value` view aims here, so it is a real page and not a pose
-        // with coordinates that used to mean something
-        inlineLocal.copy(at)
-        REDIS_ANCHOR.inline.copy(at).add(REDIS_ORIGIN)
-        // ABOVE the page, not inside it.
-        //
-        // It was built at 1/12 scale inside the block, which only worked while the
-        // block turned to glass on demand. With no glass, a cage inside an opaque cube
-        // is invisible: the object can be seen, or it can be inside the box, not both.
-        // It now stands on the page with a gap the size of the block itself, at a
-        // scale that reads from the `inline value` view's 0.9-unit standoff.
-        const cage = new THREE.Group()
-        cage.position.copy(at).add(new THREE.Vector3(0, HEAP_PAGE * 1.35, 0))
-        cage.scale.setScalar(0.33)
-        this.group.add(cage)
+        this.objectHome.copy(at).add(new THREE.Vector3(0, HEAP_PAGE * 1.35, 0))
+        // The stop where a read picks it up: just above the page it lives in. Nothing
+        // is drawn there — the object is in the read's hands — but the leg from the
+        // page to the object needs a length, or "the read has the object now" would be
+        // a caption about not moving.
+        this.objectStop.copy(this.objectHome)
 
-        const { pick } = this.frame(
-            at,
-            new THREE.Vector3(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
-            PALETTE.ice,
-            { dashed: true, opacity: 0.18 },
+        const cage = new THREE.Group()
+        cage.position.copy(this.objectHome)
+        cage.visible = false
+        this.group.add(cage)
+        this.objectCage = cage
+
+        // The block it came out of. Pickable, with the card that explains what a
+        // value object is — but NOT outlined: a dashed box exactly the size of the
+        // page would lie on the block's own edges and shimmer against them, and the
+        // point of this diagram is that there is nothing special about this block.
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
+            new THREE.MeshBasicMaterial({ visible: false }),
         )
+        pick.position.copy(at)
+        pick.userData.noOutline = true
+        this.group.add(pick)
         this.register(pick, {
             title: 'Value object — 16 bytes, and sometimes the payload is inside',
             body: 'Every value in this cage is one of these: a fixed header holding the type, the encoding, an lru clock and a refcount — 16 bytes on a 64-bit build — plus a payload. What the encoding decides is where the payload lives. Integer and short-string values keep it in the same allocation: an `int`-encoded value stores the number itself in the header’s pointer field, an `embstr` (up to 44 bytes) is header and bytes in one malloc, and the shared integers 0–9999 are a single global object that every such key points at. Those reads stop here — the entry’s page is the whole story, which is why an ordinary GET of a small value touches no second allocation at all. The lower row is the other case: `raw` strings and converted collections hold an address, and the bytes are a separate allocation on another page. That is the hop the big-value stories draw.',
-            meta: 'robj · type + encoding + lru + refcount · int/embstr inline · raw/converted pointer · drawn 1/12 inside one 4 kB page',
+            meta: 'robj · type + encoding + lru + refcount · int/embstr inline · raw/converted pointer · drawn in the read’s hands, like the big structures',
         })
 
         const headerMat = new THREE.MeshStandardMaterial({
@@ -1562,19 +1586,30 @@ export class RedisInstance {
         const headerGeo = new THREE.BoxGeometry(0.36, 0.24, 0.32)
         const payloadGeo = new THREE.BoxGeometry(0.3, 0.2, 0.26)
 
-        // Two rows, stacked in HEIGHT rather than depth: seen from the front they
-        // are two lines of a diagram, and a header in one row cannot hide a header
-        // in the other. The top row is one allocation (header and payload touching),
-        // the bottom row is two, and the gap between its blocks is the hop.
-        for (const [dy, inline] of [[0.24, true], [-0.26, false]] as const) {
-            const y = dy
+        // Two rows — and they are ALTERNATIVES, not two halves of a diagram: a
+        // value's payload is either in the header's own allocation or behind a
+        // pointer, never both at once. So each row is a group of its own, and a read
+        // brings up the one it actually found: the inline row for an int or an embstr,
+        // the pointer row for a raw sds. Drawing both at once was a diagram of a
+        // possibility, and it made every value look like it was both things.
+        const rows: Record<'inline' | 'pointer', THREE.Group> = {
+            inline: new THREE.Group(),
+            pointer: new THREE.Group(),
+        }
+        for (const [name, dy, inline] of [
+            ['inline', 0.24, true],
+            ['pointer', -0.26, false],
+        ] as const) {
+            const row = rows[name]
+            row.position.set(0, dy, 0)
+            cage.add(row)
             const header = new THREE.Mesh(headerGeo, headerMat)
-            header.position.set(-0.66, y, 0)
-            cage.add(header)
+            header.position.set(-0.66, 0, 0)
+            row.add(header)
             const px = inline ? -0.33 : 0.42
             const payload = new THREE.Mesh(payloadGeo, payloadMat)
-            payload.position.set(px, y, 0)
-            cage.add(payload)
+            payload.position.set(px, 0, 0)
+            row.add(payload)
             if (!inline) {
                 // the gap is the second hop: the header holds an address, not bytes
                 const from = -0.66 + headerGeo.parameters.width / 2
@@ -1587,23 +1622,45 @@ export class RedisInstance {
                         opacity: 0.45,
                     }),
                 )
-                link.position.set((from + to) / 2, y, 0)
-                cage.add(link)
+                link.position.set((from + to) / 2, 0, 0)
+                row.add(link)
             }
         }
-        // One label, outside the block and in world units, so it stays readable at
-        // any zoom: the two row tags that used to sit beside the blocks would have
-        // been 12× too small and 12× too close to the page they now live in.
-        const title = label('VALUE · 16 B')
-        title.position.set(at.x, at.y + HEAP_PAGE / 2 + 0.24, at.z)
-        this.group.add(title)
+        // Two rows, stacked in HEIGHT rather than depth: seen from the front they are
+        // two lines of one diagram, and a header in one row cannot hide a header in the
+        // other. The top row is one allocation (header and payload touching), the bottom
+        // row is two, and the gap between its blocks is the hop. This is the whole shape
+        // of a value object — both cases at once, which is what makes it a concept
+        // rather than an anecdote — and it travels as one thing.
+        this.objectCage = cage
+        // The companion CAGE — the same dashed box the big structures are carried in.
+        //
+        // One box for the whole diagram, wide enough for the pointer layout, because
+        // the two layouts are the same object: the dashed outline a reader sees is the
+        // same volume in both stories, and it is the thing that gets scaled and placed
+        // by the same numbers rideBig uses.
+        const area = new THREE.Box3().union(this.rowArea(rows.inline)).union(this.rowArea(rows.pointer))
+        const size = area.getSize(new THREE.Vector3())
+        const centre = area.getCenter(new THREE.Vector3())
+        const outline = new OutlineBox(size.x, size.y, size.z, PALETTE.ice, 0.26, { dashed: true })
+        outline.centre(centre.x, centre.y, centre.z)
+        cage.add(outline)
+        this.objectArea = area
+    }
 
-        // Where a read of this object lands: the top of the cage, in cage-local
-        // units. Measured off the built geometry rather than guessed, so a change to
-        // the blocks cannot leave the route standing inside them.
-        cage.updateWorldMatrix(true, true)
-        const span = new THREE.Box3().setFromObject(cage)
-        this.inlineCageTop.copy(this.group.worldToLocal(span.max.clone()))
+    /** The box one row of the value-object diagram occupies, in cage units. */
+    private rowArea(row: THREE.Group): THREE.Box3 {
+        const area = new THREE.Box3()
+        row.traverse((o) => {
+            const m = o as THREE.Mesh
+            if (!m.isMesh) return
+            m.geometry.computeBoundingBox()
+            const b = m.geometry.boundingBox?.clone()
+            // the row's own offset is not part of the box: carry() centres the row
+            // over the marker, so only the blocks' spread matters
+            if (b) area.union(b.translate(m.position))
+        })
+        return area
     }
 
     /* ------------------------------ big values ------------------------------- */
@@ -1689,8 +1746,6 @@ export class RedisInstance {
             return
         }
         g.visible = true
-        const host = (packet.userData.marker as THREE.Object3D | undefined) ?? packet
-        host.add(g)
         // Through the LABEL system, not `visible`: updateLabelLOD recomputes every
         // tag's visibility each frame from `labelEnabled` and its distance, so a
         // plain `.visible = false` here is undone by the next frame and the label
@@ -1698,26 +1753,52 @@ export class RedisInstance {
         const lab = this.bigLabels[kind]
         if (lab) setLabelEnabled(lab as CSS2DObject, false)
         const area = this.bigAreas[kind]
-        const size = area?.getSize(new THREE.Vector3())
+        const size = area?.getSize(new THREE.Vector3()) ?? null
+        // the box is in cage coordinates; the group stands at BIG_SPOT, so what
+        // matters for placement is the box centre relative to that
+        const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
+        centre.sub(BIG_SPOT[kind])
         const longest = size ? Math.max(size.x, size.y, size.z) : 2
-        const s = 2 / (longest || 1)
-        g.scale.setScalar(s)
+        this.carry(g, size, centre, packet, 2 / (longest || 1))
+    }
+
+    /**
+     * Put a structure in the read's hands: sized, and lifted clear of the packet.
+     *
+     * Shared by every structure a read can pick up — a hash's bucket array, a
+     * skiplist, a quicklist, and the value object itself — because "the read is
+     * holding something" has to look the same in all of them. Parenting to the
+     * MARKER is the whole mechanism: the packet is the object the camera rides and
+     * the scene moves, so a child follows through every leg and hand-off with no
+     * per-frame work, and because the marker is where the size lives, the structure
+     * shrinks exactly as the marker does as the camera goes in.
+     *
+     * Two units across at full size — about five marker-widths — so the read visibly
+     * holds a structure and the page it lands in still fits inside the frame. All of
+     * these numbers are in the marker's space, which is then scaled by the marker.
+     */
+    private carry(
+        g: THREE.Object3D,
+        size: THREE.Vector3 | null,
+        centre: THREE.Vector3,
+        packet: THREE.Object3D,
+        scale: number,
+    ) {
+        const host = (packet.userData.marker as THREE.Object3D | undefined) ?? packet
+        host.add(g)
+        g.scale.setScalar(scale)
         // Padded clear of the marker, not centred on it.
         //
-        // At the packet's own centre the cage's meshes and the marker occupy the same
-        // space, and the read looks like it is reading through its cargo. The cage is
-        // lifted so its bottom face sits a small gap above the marker, and shifted so
-        // its own centre is over the marker horizontally: the packet reads as being
-        // carried ON the structure rather than inside it.
-        //
-        // All of these numbers are in the marker's space, which is then scaled by the
-        // marker — so the gap and the cage shrink together as the camera goes in.
-        const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
-        const local = centre.sub(BIG_SPOT[kind])
+        // At the packet's own centre the structure's meshes and the marker occupy the
+        // same space, and the read looks like it is reading through its cargo. The
+        // structure is lifted so its bottom face sits a small gap above the marker,
+        // and shifted so its own centre is over the marker horizontally: the packet
+        // reads as being carried ON the structure rather than inside it.
+        const local = centre
         const MARKER_HALF = HEAP_PAGE / 2
         const GAP = 0.1
-        const lift = MARKER_HALF + GAP + (size ? (size.y / 2) * s : 0)
-        g.position.set(-local.x * s, lift - local.y * s, -local.z * s)
+        const lift = MARKER_HALF + GAP + (size ? (size.y / 2) * scale : 0)
+        g.position.set(-local.x * scale, lift - local.y * scale, -local.z * scale)
     }
 
     private bigMaterial(kind: BigKind): THREE.MeshStandardMaterial {
@@ -2688,24 +2769,57 @@ export class RedisInstance {
     }
 
     /**
-     * The object the read lands on — the top of the value-object cage.
+     * The object the read lands on.
      *
-     * Not the page CENTRE, which is what this stop used to be. The cage is drawn
-     * above the page, because there is no glass shell to look through any more, so
-     * "the object header" is up there. A route sent to the centre of the block put
-     * the read inside a solid cube, with its own faces coplanar with the block's.
+     * A point just above the page it was allocated in, and nothing else: the object
+     * itself is drawn in the read's hands, like every other structure a read finds
+     * in the heap. The stop still needs a place of its own, or the leg from the page
+     * to the object would have no length.
      */
     objectPoint(): THREE.Vector3 {
-        return this.inlineCageTop.clone()
+        return this.objectStop.clone()
+    }
+
+    /**
+     * Carry the value object with the read that found it, or put it away.
+     *
+     * The same mechanism as rideBig, and for the same reason. Sixteen bytes inside a
+     * 4 kB block are not an exhibit on that block: they are what the read finds when
+     * it gets there, so the diagram comes up in its hands at the size the big
+     * structures are drawn at, and goes when the read goes. Standing over the heap for
+     * good, it was a floating cube and a tag over a page nobody was reading, and it
+     * made one block in the arena look like the special one.
+     *
+     * The drawing is the diagram as it always stood: both rows, inline above and
+     * pointer below, because that pair IS what a value object is — sixteen bytes of
+     * header and one of two places for the payload. Only the cage and the placing
+     * changed: it is carried like a hash's bucket array instead of standing on a page.
+     */
+    rideObject(packet: THREE.Object3D | null) {
+        const g = this.objectCage
+        if (!g) return
+        if (!packet) {
+            this.group.add(g)
+            g.position.copy(this.objectHome)
+            g.scale.setScalar(1)
+            g.visible = false
+            return
+        }
+        g.visible = true
+        // EXACTLY what rideBig does with a hash, a zset or a list: the dashed cage's
+        // own box decides the scale, and the lift clears the marker by the same gap.
+        const area = this.objectArea
+        const size = area?.getSize(new THREE.Vector3()) ?? null
+        const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
+        const longest = size ? Math.max(size.x, size.y, size.z) : 2
+        this.carry(g, size, centre, packet, 2 / (longest || 1))
     }
 
     /**
      * The page that is drawn open, as a cage-local point.
      *
-     * One page is always open so the object inside it can be seen without a story:
-     * the `inline value` view stands 0.9 units from this point, and a solid block
-     * there would be a shot of a cube. While a read is riding, the page under the
-     * packet takes over (see the sim's focusPageAt call).
+     * While a read is riding, the page under the packet takes over (see the sim's
+     * focusPageAt call).
      */
     showcasePoint(): THREE.Vector3 {
         return this.inlinePoint()
@@ -2720,11 +2834,24 @@ export class RedisInstance {
      * used is our choice, not redis's: every compact key reads the same way.
      */
     compactKeyLeft(): RedisKey | null {
-        const live = this.keys.filter((k) => k.live && !k.aux && !k.big && k.kind === 'string')
+        if (this.inlineKey?.live) return this.inlineKey
+        const live = this.keys.filter((k) => k.live && !k.aux && !k.big && !k.raw && k.kind === 'string')
         if (live.length === 0) return null
         const host = live.find((k) => k.page === this.showcasePage)
         if (host) return host
         return live.reduce((a, b) => ((b.page % HEAP.cols) > (a.page % HEAP.cols) ? a : b))
+    }
+
+    /**
+     * The large string: same header, but its bytes are on another page.
+     *
+     * A `raw` sds is one more hop than an embstr and one fewer than a collection,
+     * and it is the only read where a value that is not "big" still costs a second
+     * access — which is exactly what makes `raw` worth a story of its own.
+     */
+    rawKeyLeft(): RedisKey | null {
+        if (this.rawKey?.live) return this.rawKey
+        return this.keys.find((k) => k.live && k.raw && !k.big) ?? null
     }
 
     /**

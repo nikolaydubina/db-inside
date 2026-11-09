@@ -351,6 +351,8 @@ export class RedisSim {
      */
     /** the big value currently riding along with a read, if any */
     private carried: BigKind | null = null
+    /** is the value object itself in the read's hands right now */
+    private objectRead = false
 
     private ridePhase: RidePhase = null
     /**
@@ -488,6 +490,11 @@ export class RedisSim {
             // section comes after the page, not before it.
             walk.push({ p: r.keyPageTop(key), stop: 'page' })
             walk.push({ p: r.objectPoint(), stop: 'value' })
+            // A raw value is not finished at the header: what the header holds is an
+            // ADDRESS, so there is one more page to visit — the allocation the bytes
+            // are in. This is the only read of a value that is not a big collection
+            // that costs a second page, and the sister story is about that hop.
+            if (key.raw) walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
         } else if (key.aux) {
             // page first: the entry is an allocation, so the bucket points AT the
             // page, and only from there do the entry and its value pointer read
@@ -719,6 +726,13 @@ export class RedisSim {
                     if (key?.big && !this.carried && legStop.stop === 'value' && this.ownsRide(ride)) {
                         this.carried = key.big
                         this.redis.rideBig(key.big, packet)
+                    }
+                    // A compact value has nothing to carry a structure for: what the
+                    // read finds is the object itself, so THAT is what it picks up,
+                    // at the stop that reads the header — and it goes with the ride.
+                    if (cmd.probe === 'object' && key && !key.big && !key.aux && legStop.stop === 'value') {
+                        this.objectRead = true
+                        this.redis.rideObject(packet)
                     }
                     // and the cursor moves inside it, one step per hop
                     if (key?.big && legStop.lit !== undefined) {
@@ -981,6 +995,12 @@ export class RedisSim {
      * end of the loop in the walk branch.
      */
     private dropCarried() {
+        // whatever the read was holding goes with it: a structure, or the value
+        // object it found on a page
+        if (this.objectRead) {
+            this.redis.rideObject(null)
+            this.objectRead = false
+        }
         if (!this.carried) return
         this.redis.rideBig(this.carried, null)
         this.carried = null
@@ -1554,6 +1574,22 @@ export class RedisSim {
         if (this.loading || this.inFlight >= 6 || this.walking || this.focusRide !== 0)
             return false
         const key = this.redis.compactKeyLeft()
+        if (!key) return false
+        void this.runOp({ name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true }, key)
+        return true
+    }
+
+    /**
+     * The same read against the large string — the sister story's cue.
+     *
+     * Identical path, identical stops, one more of them: the header on the first
+     * page says `raw`, and the bytes are in a second allocation, so the read goes on
+     * to a page an inline value never touches.
+     */
+    readRaw(): boolean {
+        if (this.loading || this.inFlight >= 6 || this.walking || this.focusRide !== 0)
+            return false
+        const key = this.redis.rawKeyLeft()
         if (!key) return false
         void this.runOp({ name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true }, key)
         return true

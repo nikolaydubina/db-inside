@@ -6,6 +6,7 @@ import { REDIS_TRAVERSAL_STORY } from './redis-traversal'
 import { REDIS_ZSET_STORY } from './redis-zset'
 import { REDIS_HASH_STORY } from './redis-hash'
 import { REDIS_INLINE_STORY } from './redis-inline'
+import { REDIS_RAW_STORY } from './redis-raw'
 
 /**
  * The stories, in the order the panel lists them. One file per story beside this
@@ -60,6 +61,13 @@ export const STORIES: StoryDef[] = [
         hint: 'the values that end inside their own 16-byte object: int, embstr, shared ints',
         steps: REDIS_INLINE_STORY,
     },
+    {
+        id: 'raw',
+        label: 'large values',
+        db: 'redis',
+        hint: 'the same GET one page further: the header holds an address, and the bytes are elsewhere',
+        steps: REDIS_RAW_STORY,
+    },
 ]
 
 export * from './types'
@@ -73,3 +81,4 @@ export { REDIS_TRAVERSAL_STORY } from './redis-traversal'
 export { REDIS_ZSET_STORY } from './redis-zset'
 export { REDIS_HASH_STORY } from './redis-hash'
 export { REDIS_INLINE_STORY } from './redis-inline'
+export { REDIS_RAW_STORY } from './redis-raw'

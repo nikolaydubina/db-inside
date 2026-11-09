@@ -199,6 +199,14 @@ export interface StoryStep {
      */
     op?: 'point' | 'walk' | 'object'
     /**
+     * Read the LARGE string instead of a compact one.
+     *
+     * Same command, same route, one more stop: a `raw` sds keeps its bytes behind a
+     * pointer, so the read goes on to a second page. The two stories about values
+     * are about that difference, so the step says which value it means.
+     */
+    raw?: true
+    /**
      * Keep tapping for as long as the step is open, instead of stopping once the
      * claim has been seen true.
      *

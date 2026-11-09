@@ -646,7 +646,7 @@ function cageOrigin(db: ShareDb): THREE.Vector3 {
  *
  * Two independent things, so two independent places in the URL:
  *
- *   the PATH names the cage and the shot — `/postgresql/wal`, `/redis/keys`
+ *   the PATH names the cage and the shot — `/postgresql/wal`, `/redis/dict`
  *   `?db-panel=` says which database card is expanded
  *
  * They are deliberately not the same statement. Looking at the WAL run is not a
@@ -1152,7 +1152,7 @@ function setFly(on: boolean) {
 // Double-click frames whatever is under the cursor and hands the orbit to it.
 //
 // If what was tapped has a NAMED shot, that is where the camera goes, and the
-// path becomes its address (/postgresql/wal, /redis/keys). Predefined, because a
+// path becomes its address (/postgresql/wal, /redis/dict). Predefined, because a
 // path has to be reproducible: an arbitrary box framed from wherever you happened
 // to be standing is not something a URL can honestly name. A tap on something
 // with no named shot is still framed, and the address then says only which cage

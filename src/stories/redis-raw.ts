@@ -1,0 +1,95 @@
+import type { StoryStep } from './types'
+import { frozeAt } from './stop'
+
+/**
+ * The sister of the inline story: the same GET, one page further.
+ *
+ * A string over 44 bytes is not stored in its object's allocation. The header is
+ * still 16 bytes — type, encoding, lru, refcount — but instead of holding the bytes
+ * it holds an ADDRESS, and the bytes are a second malloc on a second page. So the
+ * read that an inline value finishes on its first page goes on: header, pointer,
+ * another page. One more hop than an embstr, one fewer than a collection, and the
+ * only read of a value that is not "big" that costs a second access.
+ *
+ * Same three beats as the inline story — in through the socket, the object, back
+ * out — with the hop inserted in the middle, which is the entire difference between
+ * the two stories and the reason they are two.
+ */
+export const REDIS_RAW_STORY: StoryStep[] = [
+    {
+        title: 'socket → queue → loop',
+        body: 'The same beginning as every command: bytes into a connection’s input buffer, the one thread reads them on its next pass over epoll, the parsed command joins the queue. Nothing is known yet — not the type, not the size, and not whether the payload is in the object or at the end of a pointer. That is all decided later, by reading the header on the page the key lands on.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 11,
+        fov: 42,
+        tap: 'redis',
+        raw: true,
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdPhase !== null,
+        waitFor: 'a read sitting in a socket',
+        freezeAt: 'socket',
+        assert: frozeAt('socket', 'the socket the request came in on'),
+    },
+    {
+        title: 'the header says raw, not embstr',
+        body: 'Bucket, page, and on that page the dictEntry: the key string it can compare, and a pointer to the value object. Sixteen bytes of header, and this is where the two stories part. An int or an embstr keeps the payload in this same allocation — its read is over. A `raw` string does not: the header holds an address, and the bytes are somewhere else entirely. The companion cage in the read’s hands is showing exactly that — a header, a pointer, and a payload with a gap between them.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.5, 0.92, 0.86],
+        dist: 11,
+        fov: 34,
+        tap: 'redis',
+        raw: true,
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdPhase !== null,
+        waitFor: 'the object header that carries an address',
+        freezeAt: 'value',
+        assert: frozeAt('value', 'the object header that carries an address'),
+    },
+    {
+        title: 'and the bytes are on another page',
+        body: 'The address in the header is a real address, so the read follows it: a second allocation, on a page that has nothing to do with the one the key lives on. Nothing about the two is adjacent — the first page holds an entry and a 16-byte header, the second holds the string itself, and the distance between them is a page fault’s worth of nothing in particular. This is the hop that a small value never takes and every large one does, and it is why "redis keeps everything in memory" is only half of the sentence: it keeps it in memory, and then it goes looking for it.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.5, 0.92, 0.86],
+        dist: 11,
+        fov: 34,
+        tap: 'redis',
+        raw: true,
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdPhase !== null,
+        waitFor: 'the read at the payload’s own page',
+        freezeAt: 'hop',
+        assert: frozeAt('hop', 'the page the bytes were allocated on'),
+    },
+    {
+        title: 'and back out through the socket',
+        body: 'The bytes are copied into the reply, the thread is done with the value, and the reply climbs back to the loop and leaves the way the request came in. Two pages instead of one — and that is the whole difference between the two stories: not the size of the value on screen, but whether the read had to make a second trip. A hash of five million fields and a 2 kB string have the same thing in common, and it is not their size: their payload is not where their header is.',
+        subject: (s) => s.redisRide?.() ?? null,
+        dir: [0.55, 0.5, 1],
+        dist: 11,
+        fov: 42,
+        tap: 'redis',
+        raw: true,
+        send: 1,
+        sustain: 1,
+        sustainWhileOpen: true,
+        delay: 600,
+        speed: 0.4,
+        expect: (c) => c.rdPhase !== null,
+        waitFor: 'the reply back at the socket',
+        freezeAt: 'reply',
+        assert: frozeAt('reply', 'the answer, back at the socket it came in on'),
+    },
+]
