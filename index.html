@@ -1,45 +1,34 @@
 <!doctype html>
 <html lang="en">
-    <head>
-        <meta charset="utf-8" />
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-        <script>
-            document.documentElement.classList.add('js')
-        </script>
-        <title>Databases — inside the engine</title>
-        <meta
-            name="description"
-            content="An interactive 3D visualization of how a database works inside: PostgreSQL's parser, planner, executor, shared buffers and WAL, and Redis's single thread, keyspace and AOF."
-        />
-        <link rel="canonical" href="https://db-inside.fyi/" />
-        <meta name="robots" content="index, follow, max-image-preview:large" />
-        <meta name="theme-color" content="#05080d" />
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
 
-        <meta property="og:type" content="website" />
-        <meta property="og:site_name" content="db-inside" />
-        <meta property="og:title" content="Databases — inside the engine" />
-        <meta
-            property="og:description"
-            content="Two databases you can walk around: PostgreSQL's parser, planner, executor, shared buffers, WAL and indexes; Redis's one command thread, keyspace, big values, AOF and RDB. Every subject has its own link."
-        />
-        <meta property="og:url" content="https://db-inside.fyi/" />
-        <meta property="og:image" content="https://db-inside.fyi/og.png" />
-        <meta property="og:image:width" content="1200" />
-        <meta property="og:image:height" content="630" />
-        <meta
-            property="og:image:alt"
-            content="The postgres cage, seen from outside: disk plate, RAM deck and pipeline"
-        />
-        <meta name="twitter:card" content="summary_large_image" />
-        <meta name="twitter:title" content="Databases — inside the engine" />
-        <meta
-            name="twitter:description"
-            content="An interactive 3D visualization of how PostgreSQL and Redis work inside."
-        />
-        <meta name="twitter:image" content="https://db-inside.fyi/og.png" />
+  <script>
+    document.documentElement.classList.add('js')
+  </script>
+  <title>Databases — inside the engine</title>
+  <meta name="description" content="An interactive 3D visualization of how a database works inside: PostgreSQL's parser, planner, executor, shared buffers and WAL, and Redis's single thread, keyspace and AOF." />
+  <link rel="canonical" href="https://db-inside.fyi/" />
+  <meta name="robots" content="index, follow, max-image-preview:large" />
+  <meta name="theme-color" content="#05080d" />
 
-        <script type="application/ld+json">
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="db-inside" />
+  <meta property="og:title" content="Databases — inside the engine" />
+  <meta property="og:description" content="Two databases you can walk around: PostgreSQL's parser, planner, executor, shared buffers, WAL and indexes; Redis's one command thread, keyspace, big values, AOF and RDB. Every subject has its own link." />
+  <meta property="og:url" content="https://db-inside.fyi/" />
+  <meta property="og:image" content="https://db-inside.fyi/og.png" />
+  <meta property="og:image:width" content="1200" />
+  <meta property="og:image:height" content="630" />
+  <meta property="og:image:alt" content="The postgres cage, seen from outside: disk plate, RAM deck and pipeline" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Databases — inside the engine" />
+  <meta name="twitter:description" content="An interactive 3D visualization of how PostgreSQL and Redis work inside." />
+  <meta name="twitter:image" content="https://db-inside.fyi/og.png" />
+
+  <script type="application/ld+json">
             {
                 "@context": "https://schema.org",
                 "@type": "WebApplication",
@@ -67,394 +56,332 @@
             }
         </script>
 
-        <script>
-            ;(function (w, d, s, l, i) {
-                w[l] = w[l] || []
-                w[l].push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' })
-                var f = d.getElementsByTagName(s)[0],
-                    j = d.createElement(s),
-                    dl = l != 'dataLayer' ? '&l=' + l : ''
-                j.async = true
-                j.src = 'https://www.googletagmanager.com/gtm.js?id=' + i + dl
-                f.parentNode.insertBefore(j, f)
-            })(window, document, 'script', 'dataLayer', 'GTM-PXB7RNDD')
+  <script>
+      ; (function (w, d, s, l, i) {
+        w[l] = w[l] || []
+        w[l].push({ 'gtm.start': new Date().getTime(), event: 'gtm.js' })
+        var f = d.getElementsByTagName(s)[0],
+          j = d.createElement(s),
+          dl = l != 'dataLayer' ? '&l=' + l : ''
+        j.async = true
+        j.src = 'https://www.googletagmanager.com/gtm.js?id=' + i + dl
+        f.parentNode.insertBefore(j, f)
+      })(window, document, 'script', 'dataLayer', 'GTM-PXB7RNDD')
 
-            // gtag-style helper so events can be pushed from the app
-            window.dataLayer = window.dataLayer || []
-            function gtag() {
-                dataLayer.push(arguments)
-            }
-            gtag('js', new Date())
-        </script>
-    </head>
+    // gtag-style helper so events can be pushed from the app
+    window.dataLayer = window.dataLayer || []
+    function gtag() {
+      dataLayer.push(arguments)
+    }
+    gtag('js', new Date())
+  </script>
+</head>
 
-    <body>
-        <noscript
-            ><iframe
-                src="https://www.googletagmanager.com/ns.html?id=GTM-PXB7RNDD"
-                height="0"
-                width="0"
-                style="display: none; visibility: hidden"
-            ></iframe
-        ></noscript>
+<body>
+  <noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-PXB7RNDD" height="0" width="0" style="display: none; visibility: hidden"></iframe></noscript>
 
-        <div id="app">
-            <noscript>
-                <div class="noscript">
-                    <h1>Databases — inside the engine</h1>
-                    <p>
-                        An interactive 3D cross-section of two database servers, on one floor, each
-                        in its own cage: you can orbit them, double-tap any part to fly to it, and
-                        open its card to read what that part actually does.
-                    </p>
-                    <h2>PostgreSQL</h2>
-                    <ul>
-                        <li>the pipeline: parser and rewriter → planner → executor</li>
-                        <li>shared buffers: 8 KiB pages in RAM, clock sweep, dirty pages</li>
-                        <li>the WAL run on disk, and wal_buffers above it waiting for fsync</li>
-                        <li>
-                            a B-tree, a BRIN, a GIN and a hash index, drawn where they sit in RAM
-                        </li>
-                        <li>table runs and their pages, free space, and the autovacuum drone</li>
-                        <li>
-                            backend ports: one process per connection, each with its input buffer
-                        </li>
-                    </ul>
-                    <h2>Redis</h2>
-                    <ul>
-                        <li>one command thread, a command queue, and the epoll fd set under it</li>
-                        <li>the keyspace dict over its bucket array, including the rehash</li>
-                        <li>
-                            a very large hash, sorted set and list — carried by the read that walks
-                            them
-                        </li>
-                        <li>the few keys taking most of the traffic</li>
-                        <li>
-                            the AOF being appended and the RDB base file, with the BGSAVE and
-                            AOF-rewrite children
-                        </li>
-                    </ul>
-                    <h2>Links</h2>
-                    <p>
-                        <a href="/postgresql">/postgresql</a> and <a href="/redis">/redis</a> open
-                        each cage; every subject has its own address — for example
-                        <a href="/postgresql/wal">/postgresql/wal</a>,
-                        <a href="/postgresql/buffers">/postgresql/buffers</a>,
-                        <a href="/redis/dict">/redis/dict</a>,
-                        <a href="/redis/loop">/redis/loop</a>,
-                        <a href="/redis/channel">/redis/channel</a>.
-                    </p>
-                    <p>
-                        Source and notes:
-                        <a href="https://github.com/nikolaydubina/postgresql-inside"
-                            >github.com/nikolaydubina/postgresql-inside</a
-                        >.
-                    </p>
-                </div>
-            </noscript>
+  <div id="app">
+    <noscript>
+      <div class="noscript">
+        <h1>Databases — inside the engine</h1>
+        <p>
+          An interactive 3D cross-section of two database servers, on one floor, each
+          in its own cage: you can orbit them, double-tap any part to fly to it, and
+          open its card to read what that part actually does.
+        </p>
+        <h2>PostgreSQL</h2>
+        <ul>
+          <li>the pipeline: parser and rewriter → planner → executor</li>
+          <li>shared buffers: 8 KiB pages in RAM, clock sweep, dirty pages</li>
+          <li>the WAL run on disk, and wal_buffers above it waiting for fsync</li>
+          <li>
+            a B-tree, a BRIN, a GIN and a hash index, drawn where they sit in RAM
+          </li>
+          <li>table runs and their pages, free space, and the autovacuum drone</li>
+          <li>
+            backend ports: one process per connection, each with its input buffer
+          </li>
+        </ul>
+        <h2>Redis</h2>
+        <ul>
+          <li>one command thread, a command queue, and the epoll fd set under it</li>
+          <li>the keyspace dict over its bucket array, including the rehash</li>
+          <li>
+            a very large hash, sorted set and list — carried by the read that walks
+            them
+          </li>
+          <li>the few keys taking most of the traffic</li>
+          <li>
+            the AOF being appended and the RDB base file, with the BGSAVE and
+            AOF-rewrite children
+          </li>
+        </ul>
+        <h2>Links</h2>
+        <p>
+          <a href="/postgresql">/postgresql</a> and <a href="/redis">/redis</a> open
+          each cage; every subject has its own address — for example
+          <a href="/postgresql/wal">/postgresql/wal</a>,
+          <a href="/postgresql/buffers">/postgresql/buffers</a>,
+          <a href="/redis/dict">/redis/dict</a>,
+          <a href="/redis/loop">/redis/loop</a>,
+          <a href="/redis/channel">/redis/channel</a>.
+        </p>
+        <p>
+          Source and notes:
+          <a href="https://github.com/nikolaydubina/postgresql-inside">github.com/nikolaydubina/postgresql-inside</a>.
+        </p>
+      </div>
+    </noscript>
 
-            <canvas id="c"></canvas>
-            <div id="labels" class="layer"></div>
-            <div class="layer vignette"></div>
-            <div class="layer grain"></div>
+    <canvas id="c"></canvas>
+    <div id="labels" class="layer"></div>
+    <div class="layer vignette"></div>
+    <div class="layer grain"></div>
 
-            <header class="hud top-left">
-                <div class="brand">
-                    <div>
-                        <h1>Database</h1>
-                        <p class="sub">inside the engine</p>
-                    </div>
-                </div>
-            </header>
-
-            <div class="hud top-right dbswitch" id="db-switch">
-                <button class="dbtn on" data-db="redis" title="redis · one thread, dataset in RAM">
-                    <i></i>Redis
-                </button>
-                <button class="dbtn on" data-db="postgres" title="postgres · processes, pages, WAL">
-                    <i></i>PostgreSQL
-                </button>
-            </div>
-
-            <aside class="hud panel right">
-                <section class="card" id="db-postgres" hidden>
-                    <div class="buttons">
-                        <button id="btn-query" class="btn primary">
-                            <span class="glyph">↵</span> run query
-                            <kbd>space</kbd>
-                        </button>
-                        <button id="btn-checkpoint" class="btn">
-                            <span class="glyph">⇩</span> checkpoint
-                        </button>
-                        <button id="btn-vacuum" class="btn">
-                            <span class="glyph">✳</span> vacuum
-                        </button>
-                        <button id="btn-compact" class="btn">
-                            <span class="glyph">⇄</span> vacuum full
-                        </button>
-                    </div>
-                    <div class="regimes">
-                        <span class="regime-label">workload</span>
-                        <div class="regime-opts" id="regime-opts"></div>
-                    </div>
-                    <dl class="stats">
-                        <div>
-                            <dt>queries</dt>
-                            <dd id="st-queries">0</dd>
-                        </div>
-                        <div>
-                            <dt>throughput</dt>
-                            <dd id="st-rps" class="c-cyan">—</dd>
-                        </div>
-                        <div>
-                            <dt>connections</dt>
-                            <dd id="st-conn">—</dd>
-                        </div>
-                        <div>
-                            <dt>buffer hit</dt>
-                            <dd id="st-hit" class="c-cyan">—</dd>
-                        </div>
-                        <div>
-                            <dt>latency</dt>
-                            <dd id="st-lat">—</dd>
-                        </div>
-                        <div>
-                            <dt>wal bytes</dt>
-                            <dd id="st-wal">0</dd>
-                        </div>
-                        <div>
-                            <dt>dead tuples</dt>
-                            <dd id="st-dead">0</dd>
-                        </div>
-                    </dl>
-                    <div class="bar"><i id="st-bar"></i></div>
-                    <p class="hint" id="st-note">shared_buffers · 8 KiB pages</p>
-                    <h3 class="sub-head">Processes</h3>
-                    <ul class="procs" id="procs"></ul>
-
-                    <h3 class="sub-head">Views</h3>
-                    <div class="views" id="views"></div>
-                </section>
-
-                <section class="card" id="db-redis" hidden>
-                    <div class="buttons">
-                        <button id="btn-command" class="btn primary">
-                            <span class="glyph">↵</span> send command
-                            <kbd>space</kbd>
-                        </button>
-                        <button id="btn-rewrite" class="btn">
-                            <span class="glyph">✳</span> aof rewrite
-                        </button>
-                    </div>
-
-                    <div class="regimes">
-                        <span class="regime-label">dump · base file</span>
-                        <div class="regime-opts" id="rdb-ops">
-                            <button class="regime" data-rdb="save">save</button>
-                            <button class="regime" data-rdb="bgsave">bgsave</button>
-                            <button class="regime" data-rdb="load">load</button>
-                        </div>
-                    </div>
-                    <dl class="stats">
-                        <div>
-                            <dt>keys</dt>
-                            <dd id="rd-keys">0</dd>
-                        </div>
-                        <div>
-                            <dt>skew</dt>
-                            <dd id="rd-skew">—</dd>
-                        </div>
-                        <div>
-                            <dt>throughput</dt>
-                            <dd id="rd-ops" class="c-cyan">—</dd>
-                        </div>
-                        <div>
-                            <dt>hash hit</dt>
-                            <dd id="rd-hit" class="c-cyan">—</dd>
-                        </div>
-                        <div>
-                            <dt>latency</dt>
-                            <dd id="rd-lat">—</dd>
-                        </div>
-                        <div>
-                            <dt>memory</dt>
-                            <dd id="rd-mem">0%</dd>
-                        </div>
-                        <div>
-                            <dt>evictions</dt>
-                            <dd id="rd-evict">0</dd>
-                        </div>
-                        <div>
-                            <dt>aof bytes</dt>
-                            <dd id="rd-aof">0</dd>
-                        </div>
-                        <div>
-                            <dt>rdb bytes</dt>
-                            <dd id="rd-rdb">0</dd>
-                        </div>
-                    </dl>
-                    <div class="bar"><i id="rd-bar"></i></div>
-                    <p class="hint" id="rd-note">one thread · dataset in RAM</p>
-                    <h3 class="sub-head">Threads</h3>
-                    <ul class="procs" id="rd-procs"></ul>
-                    <h3 class="sub-head">Views</h3>
-                    <div class="views" id="views-redis"></div>
-                </section>
-            </aside>
-
-            <div class="hud bottom" id="shelf">
-                <section class="card panel legend" id="legend-card" hidden>
-                    <table class="gloss">
-                        <tbody>
-                            <tr>
-                                <th><span class="sw" style="--c: #35e0ff"></span>in memory</th>
-                                <td>cache, buffer, dataset</td>
-                            </tr>
-                            <tr>
-                                <th><span class="sw" style="--c: #ffb03a"></span>to a file</th>
-                                <td>pages and log records</td>
-                            </tr>
-                            <tr>
-                                <th><span class="sw" style="--c: #8a7bff"></span>structures</th>
-                                <td>in-memory index or dict</td>
-                            </tr>
-                            <tr>
-                                <th><span class="sw" style="--c: #ff3ea5"></span>traffic</th>
-                                <td>client ↔ server bytes</td>
-                            </tr>
-                            <tr>
-                                <th><span class="sw" style="--c: #93a1ae"></span>system</th>
-                                <td>other files, unlabelled</td>
-                            </tr>
-                            <tr>
-                                <th>floating</th>
-                                <td>not on disk yet</td>
-                            </tr>
-                            <tr>
-                                <th>on the grid</th>
-                                <td>a file, or bytes in one</td>
-                            </tr>
-                            <tr>
-                                <th>height</th>
-                                <td>how full it is</td>
-                            </tr>
-                            <tr>
-                                <th>stacked</th>
-                                <td>
-                                    one value, more than one allocation — a key whose entry now
-                                    carries a hashtable, or a sorted set carrying both a skiplist
-                                    and a dict
-                                </td>
-                            </tr>
-                            <tr>
-                                <th>outline</th>
-                                <td>a run, not a selection</td>
-                            </tr>
-                            <tr>
-                                <th><span class="sw dashed"></span>dashed outline</th>
-                                <td>
-                                    a diagram of a structure, not memory — an index tree, a plane of
-                                    key entries. The blocks inside it are real; the volume is ours
-                                </td>
-                            </tr>
-                            <tr>
-                                <th>grid</th>
-                                <td>2 units, one floor</td>
-                            </tr>
-                        </tbody>
-                    </table>
-                </section>
-
-                <section class="card" id="stories-card" hidden>
-                    <div class="stories" id="stories"></div>
-                </section>
-
-                <div class="shelfbar" id="shelf-bar">
-                    <button class="tbtn" id="btn-legend" aria-pressed="false">legend</button>
-                    <button class="tbtn" id="btn-stories" aria-pressed="false">stories</button>
-                    <button
-                        class="tbtn"
-                        id="btn-move"
-                        aria-pressed="false"
-                        title="drag a cage to move it on the floor"
-                    >
-                        move
-                    </button>
-                    <button
-                        class="tbtn"
-                        id="btn-zen"
-                        aria-pressed="false"
-                        title="zen — hide everything and just look; any tap or key brings it back"
-                    >
-                        zen
-                    </button>
-                    <label
-                        class="clock"
-                        title="clock speed — 1x is the scene's own pace, 0x stops it"
-                    >
-                        <span class="clock-glyph" aria-hidden="true">⏱</span>
-                        <input type="range" id="speed" min="0" max="4" step="0.25" value="1" />
-                        <b id="speed-val" hidden>1x</b>
-                    </label>
-                    <span class="flyhint" id="fly-hint" hidden>press esc to stop flying</span>
-                </div>
-            </div>
-
-            <div id="crosshair" class="crosshair" hidden></div>
-            <div id="tooltip" class="tooltip"></div>
-
-            <section class="hud card inspector" id="inspector" hidden>
-                <h2 id="ins-title">
-                    <span id="ins-title-text">Inspector</span>
-                    <span class="xmark" id="ins-close" title="close"></span>
-                </h2>
-                <p id="ins-body"></p>
-                <dl class="ins-stats" id="ins-stats" hidden></dl>
-                <p class="ins-meta" id="ins-meta"></p>
-            </section>
-
-            <div class="hud credits">
-                <p class="fine">
-                    built by <b>DeepSeek V4.1</b> in the VS Code harness
-                    <br />
-                    technical review &amp; design direction by
-                    <a href="https://github.com/nikolaydubina" target="_blank" rel="noopener"
-                        >@nikolaydubina</a
-                    >
-                    2026
-                    <a
-                        class="repo"
-                        href="https://github.com/nikolaydubina/postgresql-inside"
-                        target="_blank"
-                        rel="noopener"
-                        title="source on GitHub — nikolaydubina/postgresql-inside"
-                        aria-label="source on GitHub"
-                        ><svg class="repo-icon" viewBox="0 0 16 16" aria-hidden="true">
-                            <path
-                                d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"
-                            /></svg
-                    ></a>
-                </p>
-            </div>
-
-            <div class="hud story" id="story" hidden>
-                <div class="story-head">
-                    <span class="story-step" id="story-step">1 / 8</span>
-                    <h3 id="story-title">…</h3>
-                    <span class="story-state" id="story-state">as described</span>
-                    <button class="story-x" id="story-exit" title="exit story (esc)">✕</button>
-                </div>
-                <p id="story-body"></p>
-                <div class="story-nav">
-                    <button class="btn story-btn" id="story-prev">← back</button>
-                    <button class="btn primary story-btn" id="story-next">next →</button>
-                </div>
-            </div>
-            <div id="boot" class="boot">
-                <div class="boot-ring"></div>
-                <p>warming shared buffers…</p>
-            </div>
+    <header class="hud top-left">
+      <div class="brand">
+        <div>
+          <h1>Database</h1>
+          <p class="sub">inside the engine</p>
         </div>
-        <script type="module" src="/src/main.ts"></script>
-    </body>
+      </div>
+    </header>
+
+    <div class="hud top-right dbswitch" id="db-switch">
+      <button class="dbtn on" data-db="redis" title="redis · one thread, dataset in RAM">
+        <i></i>Redis
+      </button>
+      <button class="dbtn on" data-db="postgres" title="postgres · processes, pages, WAL">
+        <i></i>PostgreSQL
+      </button>
+    </div>
+
+    <aside class="hud panel right">
+      <section class="card" id="db-postgres" hidden>
+        <div class="buttons">
+          <button id="btn-query" class="btn primary">
+            <span class="glyph">↵</span> run query
+            <kbd>space</kbd>
+          </button>
+          <button id="btn-checkpoint" class="btn">
+            <span class="glyph">⇩</span> checkpoint
+          </button>
+          <button id="btn-vacuum" class="btn">
+            <span class="glyph">✳</span> vacuum
+          </button>
+          <button id="btn-compact" class="btn">
+            <span class="glyph">⇄</span> vacuum full
+          </button>
+        </div>
+        <div class="regimes">
+          <span class="regime-label">workload</span>
+          <div class="regime-opts" id="regime-opts"></div>
+        </div>
+        <dl class="stats">
+          <div>
+            <dt>queries</dt>
+            <dd id="st-queries">0</dd>
+          </div>
+          <div>
+            <dt>throughput</dt>
+            <dd id="st-rps" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>connections</dt>
+            <dd id="st-conn">—</dd>
+          </div>
+          <div>
+            <dt>buffer hit</dt>
+            <dd id="st-hit" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>latency</dt>
+            <dd id="st-lat">—</dd>
+          </div>
+          <div>
+            <dt>wal bytes</dt>
+            <dd id="st-wal">0</dd>
+          </div>
+          <div>
+            <dt>dead tuples</dt>
+            <dd id="st-dead">0</dd>
+          </div>
+        </dl>
+        <div class="bar"><i id="st-bar"></i></div>
+        <p class="hint" id="st-note">shared_buffers · 8 KiB pages</p>
+        <h3 class="sub-head">Processes</h3>
+        <ul class="procs" id="procs"></ul>
+
+        <h3 class="sub-head">Views</h3>
+        <div class="views" id="views"></div>
+      </section>
+
+      <section class="card" id="db-redis" hidden>
+        <div class="buttons">
+          <button id="btn-command" class="btn primary">
+            <span class="glyph">↵</span> send command
+            <kbd>space</kbd>
+          </button>
+          <button id="btn-rewrite" class="btn">
+            <span class="glyph">✳</span> aof rewrite
+          </button>
+        </div>
+
+        <div class="regimes">
+          <span class="regime-label">dump · base file</span>
+          <div class="regime-opts" id="rdb-ops">
+            <button class="regime" data-rdb="save">save</button>
+            <button class="regime" data-rdb="bgsave">bgsave</button>
+            <button class="regime" data-rdb="load">load</button>
+          </div>
+        </div>
+        <dl class="stats">
+          <div>
+            <dt>keys</dt>
+            <dd id="rd-keys">0</dd>
+          </div>
+          <div>
+            <dt>skew</dt>
+            <dd id="rd-skew">—</dd>
+          </div>
+          <div>
+            <dt>throughput</dt>
+            <dd id="rd-ops" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>hash hit</dt>
+            <dd id="rd-hit" class="c-cyan">—</dd>
+          </div>
+          <div>
+            <dt>latency</dt>
+            <dd id="rd-lat">—</dd>
+          </div>
+          <div>
+            <dt>memory</dt>
+            <dd id="rd-mem">0%</dd>
+          </div>
+          <div>
+            <dt>evictions</dt>
+            <dd id="rd-evict">0</dd>
+          </div>
+          <div>
+            <dt>aof bytes</dt>
+            <dd id="rd-aof">0</dd>
+          </div>
+          <div>
+            <dt>rdb bytes</dt>
+            <dd id="rd-rdb">0</dd>
+          </div>
+        </dl>
+        <div class="bar"><i id="rd-bar"></i></div>
+        <p class="hint" id="rd-note">one thread · dataset in RAM</p>
+        <h3 class="sub-head">Threads</h3>
+        <ul class="procs" id="rd-procs"></ul>
+        <h3 class="sub-head">Views</h3>
+        <div class="views" id="views-redis"></div>
+      </section>
+    </aside>
+
+    <div class="hud bottom" id="shelf">
+      <section class="card panel legend" id="legend-card" hidden>
+        <table class="gloss">
+          <tbody>
+            <tr>
+              <th><span class="sw" style="--c: #35e0ff"></span>in memory</th>
+              <td>cache, buffer, dataset (floating)</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #ffb03a"></span>disk</th>
+              <td>pages and log records (on floor)</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #8a7bff"></span>structures</th>
+              <td>in-memory index or dict</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #ff3ea5"></span>request</th>
+              <td>the command on its way in</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #2bffc3"></span>response</th>
+              <td>the reply on its way back</td>
+            </tr>
+            <tr>
+              <th><span class="sw" style="--c: #93a1ae"></span>system</th>
+              <td>other files, unlabelled</td>
+            </tr>
+          </tbody>
+        </table>
+      </section>
+
+      <section class="card" id="stories-card" hidden>
+        <div class="stories" id="stories"></div>
+      </section>
+
+      <div class="shelfbar" id="shelf-bar">
+        <button class="tbtn" id="btn-legend" aria-pressed="false">legend</button>
+        <button class="tbtn" id="btn-stories" aria-pressed="false">stories</button>
+        <button class="tbtn" id="btn-move" aria-pressed="false" title="drag a cage to move it on the floor">
+          move
+        </button>
+        <button class="tbtn" id="btn-zen" aria-pressed="false" title="zen — hide everything and just look; any tap or key brings it back">
+          zen
+        </button>
+        <label class="clock" title="clock speed — 1x is the scene's own pace, 0x stops it">
+          <span class="clock-glyph" aria-hidden="true">⏱</span>
+          <input type="range" id="speed" min="0" max="4" step="0.25" value="1" />
+          <b id="speed-val" hidden>1x</b>
+        </label>
+        <span class="flyhint" id="fly-hint" hidden>press esc to stop flying</span>
+      </div>
+    </div>
+
+    <div id="crosshair" class="crosshair" hidden></div>
+    <div id="tooltip" class="tooltip"></div>
+
+    <section class="hud card inspector" id="inspector" hidden>
+      <h2 id="ins-title">
+        <span id="ins-title-text">Inspector</span>
+        <span class="xmark" id="ins-close" title="close"></span>
+      </h2>
+      <p id="ins-body"></p>
+      <dl class="ins-stats" id="ins-stats" hidden></dl>
+      <p class="ins-meta" id="ins-meta"></p>
+    </section>
+
+    <div class="hud credits">
+      <p class="fine">
+        built by <b>DeepSeek V4.1</b> in the VS Code harness
+        <br />
+        technical review &amp; design direction by
+        <a href="https://github.com/nikolaydubina" target="_blank" rel="noopener">@nikolaydubina</a>
+        2026
+        <a class="repo" href="https://github.com/nikolaydubina/postgresql-inside" target="_blank" rel="noopener" title="source on GitHub — nikolaydubina/postgresql-inside" aria-label="source on GitHub"><svg class="repo-icon" viewBox="0 0 16 16" aria-hidden="true">
+            <path
+              d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
+          </svg></a>
+      </p>
+    </div>
+
+    <div class="hud story" id="story" hidden>
+      <div class="story-head">
+        <span class="story-step" id="story-step">1 / 8</span>
+        <h3 id="story-title">…</h3>
+        <span class="story-state" id="story-state">as described</span>
+        <button class="story-x" id="story-exit" title="exit story (esc)">✕</button>
+      </div>
+      <p id="story-body"></p>
+      <div class="story-nav">
+        <button class="btn story-btn" id="story-prev">← back</button>
+        <button class="btn primary story-btn" id="story-next">next →</button>
+      </div>
+    </div>
+    <div id="boot" class="boot">
+      <div class="boot-ring"></div>
+      <p>warming shared buffers…</p>
+    </div>
+  </div>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+
 </html>
