@@ -1688,6 +1688,22 @@ export class RedisInstance {
             cage.add(outline)
             this.objectOutline[name] = outline
         }
+        // The blocks are drawn at a quarter size inside a cage that does NOT shrink with
+        // them.
+        //
+        // The cage above is measured from the LAYOUT — the block positions — not from
+        // the scaled meshes, so it keeps its size and all of the difference becomes air.
+        // Sixteen bytes and one pointer are a detail of the object, not the object: at
+        // full size the two blocks filled their own outline and the read looked like it
+        // was carrying a crate. Each row is scaled about its own centre, so it stays in
+        // the middle of the cage instead of clinging to one edge.
+        const BLOCK_SCALE = 0.25
+        for (const name of ['inline', 'pointer'] as const) {
+            const row = rows[name]
+            const centre = this.objectArea[name].getCenter(new THREE.Vector3())
+            row.scale.setScalar(BLOCK_SCALE)
+            row.position.copy(centre).multiplyScalar(1 - BLOCK_SCALE)
+        }
     }
 
     /** The box one row of the value-object diagram occupies, in cage units. */

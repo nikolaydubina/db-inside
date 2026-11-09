@@ -4,7 +4,7 @@ import type { BigKind, KeyKind, RedisInstance, RedisKey, RedisPort } from './red
 import { BIG_REAL } from './redis'
 import { HEAP_PAGE } from './layout'
 import { QueryChain, pathCurve } from '../core/flow'
-import { Ticker, easeInQuad, easeOutCubic, halo, rand, randInt, travel } from '../core/util'
+import { Ticker, halo, rand, randInt, speedTime as legTime, travel } from '../core/util'
 
 /**
  * The legs a ridden packet can be on.
@@ -339,6 +339,10 @@ export class RedisSim {
     private focusPacket: THREE.Object3D | null = null
     private focusRide = 0
     private rideToken = 0
+    /** was the focused ride ASKED FOR (a cue), or is it ambient traffic */
+    private focusCue = false
+    /** the command the focused ride is running, for its identity */
+    private focusName = ''
     /**
      * Which leg of the route the ridden message is on: 'socket' once it has landed,
      * 'channel' when the thread is about to copy it, 'delivered' when the first copy
@@ -606,7 +610,7 @@ export class RedisSim {
         // at the fan, which is where a published message is already half-way
         // through. A cued command rides the same mechanism: one live packet, one
         // identity, and the camera holds on to whichever leg it is on.
-        const ride = cmd.fanout || cmd.cue ? this.beginRide(packet, !!cmd.cue) : 0
+        const ride = cmd.fanout || cmd.cue ? this.beginRide(packet, !!cmd.cue, cmd.name) : 0
         const inbound = pathCurve([
             sky.clone(),
             sky.clone().setY(portTop.y + SKY_ABOVE_PORT * 0.5).add(new THREE.Vector3(0, 0, 0.8)),
@@ -615,7 +619,7 @@ export class RedisSim {
         ])
         const wire = new QueryChain(cage)
         const fIn = wire.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
-        await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
+        await travel(this.ticker, packet, inbound, legTime(inbound))
         fIn.flash(0.9)
         // the bytes are in that socket's input buffer now, and stay there until the
         // one thread comes round to them — the first leg a ride can be ridden on.
@@ -683,7 +687,7 @@ export class RedisSim {
                 this.redis.channelPoint(),
             ])
             chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.45 })
-            await travel(this.ticker, packet, route, 0.85)
+            await travel(this.ticker, packet, route, legTime(route))
             // SAVE writes the dump on this very thread, so a command that arrives
             // meanwhile is parsed, queued — and then waits. It is not a lock: the
             // queue is simply not being drained by anyone.
@@ -704,7 +708,7 @@ export class RedisSim {
                 for (const legStop of route) {
                     const leg = pathCurve([from.clone(), legStop.p.clone()])
                     chain.addCurve(leg, PALETTE.violet, { speed: 0.9, opacity: 0.55 })
-                    await travel(this.ticker, packet, leg, 0.4)
+                    await travel(this.ticker, packet, leg, legTime(leg))
                     // Announced on ARRIVAL, not on departure. The phase is the leg
                     // the packet is STANDING on, so a story that freezes a leg
                     // freezes with the packet at that stop — set at the start of
@@ -907,7 +911,7 @@ export class RedisSim {
         // Ownership has to be captured BEFORE the leg: endRide clears the focus, and
         // asking afterwards always answers "no".
         const owned = this.ownsRide(ride)
-        await travel(this.ticker, out, replyIn, 0.55, easeOutCubic)
+        await travel(this.ticker, out, replyIn, legTime(replyIn))
         this.endRide(ride)
         // Announced on ARRIVAL, like every other leg. 'reply' means the answer has
         // reached the socket — that is the instant a card about the return is about.
@@ -916,7 +920,7 @@ export class RedisSim {
         // described never happened. It is set after endRide on purpose, so the phase
         // survives the ride ending and the freeze can still see it.
         if (owned) this.setPhase('reply', portTop.clone())
-        await travel(this.ticker, out, replyOut, 0.45, easeOutCubic)
+        await travel(this.ticker, out, replyOut, legTime(replyOut))
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)
         chain.fadeOut(this.ticker, 0.7)
@@ -945,13 +949,15 @@ export class RedisSim {
      * hand-off from the incoming message to the outgoing copies has to be one
      * continuous subject.
      */
-    private beginRide(packet: THREE.Object3D, takeover = false): number {
+    private beginRide(packet: THREE.Object3D, takeover = false, name = ''): number {
         // A cue may TAKE the camera from a ride that is still finishing: the
         // previous reply is on its way out while the next request is already
         // falling in, and waiting for it would leave the camera on nothing.
         if (this.focusRide !== 0 && !takeover) return 0
         this.focusRide = ++this.rideToken
         this.focusPacket = packet
+        this.focusCue = takeover
+        this.focusName = name
         this.focusLostAt = 0
         this.focusNear = false
         // A new ride begins in the SKY, on no leg at all. Leaving the previous
@@ -977,6 +983,8 @@ export class RedisSim {
         if (ride === 0 || ride !== this.focusRide) return
         this.focusRide = 0
         this.focusPacket = null
+        this.focusCue = false
+        this.focusName = ''
         this.focusLostAt = 0
         this.focusNear = false
         this.ridePhase = null
@@ -1148,6 +1156,19 @@ export class RedisSim {
      * seconds watching an empty sky with a dot in it.
      */
     packetSubject(): { id: string; object: THREE.Object3D } | null {
+        // An OUTBOUND packet is not a subject. Once the answer has reached the socket
+        // it belongs to the client, and a camera that keeps riding it follows the bytes
+        // out of the cage — which is exactly what "the camera stops at the socket" is
+        // supposed to mean. The gate is the PHASE, not a height: the reply is still a
+        // live object while it leaves, and every re-acquire after the ride ends (a card
+        // that keeps tapping) used to pick it straight back up.
+        if (this.ridePhase === 'reply') return null
+        // Nor is an AMBIENT packet. The subject is the ride a step ASKED for, not
+        // whichever packet happened to hold the camera: background traffic starts rides
+        // of its own, and a card about a key read would follow a PUBLISH that touched no
+        // key at all. Selection is by cue, and the identity names the command, so a
+        // story can never be handed a packet it did not ask for.
+        if (!this.focusCue) return null
         const p = this.focusPacket
         if (!p || !p.parent) return null
         // The reply used to be hidden from the camera above this height, back when
@@ -1164,7 +1185,7 @@ export class RedisSim {
             if (p.position.y > BACKEND_ORIGIN.y + 2) return null
             this.focusNear = true
         }
-        return { id: `ride ${this.focusRide}`, object: p }
+        return { id: `ride ${this.focusRide} · ${this.focusName}`, object: p }
     }
 
     private evict(key: RedisKey) {
@@ -1256,7 +1277,7 @@ export class RedisSim {
             // the same moment repeated, and watching all of them at once is what
             // the wide shot is for
             if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = packet
-            void travel(this.ticker, packet, arc.toSocket, 0.42).then(() => {
+            void travel(this.ticker, packet, arc.toSocket, legTime(arc.toSocket)).then(() => {
                 // the first copy has reached a listener's output buffer
                 if (i === 0 && this.ownsRide(ride)) this.setPhase('delivered', null)
                 // its ring answers. The connection is not a key-space client and
@@ -1266,7 +1287,7 @@ export class RedisSim {
                 const away = this.packet(PALETTE.violet, PACKET * 0.8)
                 away.position.copy(arc.top)
                 if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = away
-                void travel(this.ticker, away, arc.out, 0.6).then(() =>
+                void travel(this.ticker, away, arc.out, legTime(arc.out)).then(() =>
                     despawn(this.ticker, away, 0.2),
                 )
             })
@@ -1309,7 +1330,7 @@ export class RedisSim {
         chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.4 })
         const packet = this.packet(PALETTE.violet, PACKET)
         packet.position.copy(portTop)
-        void travel(this.ticker, packet, route, 0.55)
+        void travel(this.ticker, packet, route, legTime(route))
 
         await this.ticker.wait(0.4)
         this.redis.pulseLoop()
@@ -1335,7 +1356,7 @@ export class RedisSim {
         ])
         const back = this.packet(PALETTE.teal, PACKET * 0.8)
         back.position.copy(channel)
-        void travel(this.ticker, back, reply, 0.7).then(() => despawn(this.ticker, back, 0.2))
+        void travel(this.ticker, back, reply, legTime(reply)).then(() => despawn(this.ticker, back, 0.2))
         await this.ticker.wait(0.5)
         this.redis.pulseSend(pod)
         chain.fadeOut(this.ticker, 0.9)
@@ -1362,7 +1383,7 @@ export class RedisSim {
         chain.addCurve(route, PALETTE.violet, { speed: 0.9, opacity: 0.32 })
         const packet = this.packet(PALETTE.violet, PACKET)
         packet.position.copy(portTop)
-        void travel(this.ticker, packet, route, 0.5)
+        void travel(this.ticker, packet, route, legTime(route))
         await this.ticker.wait(0.45)
         this.redis.pulseLoop()
         this.redis.queuePop()
@@ -1544,7 +1565,10 @@ export class RedisSim {
      */
     publish() {
         if (this.loading || this.inFlight >= 6) return
-        void this.runOp(PUBLISH)
+        // CUE: this is a story asking for a publish, not the ambient mix asking for
+        // one. Without the flag it was indistinguishable from background traffic, and
+        // a card about a key could end up following a message that touched no key.
+        void this.runOp({ ...PUBLISH, cue: true })
     }
 
     /**

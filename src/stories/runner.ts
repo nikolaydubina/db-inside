@@ -131,6 +131,35 @@ export function createStory({
      * that moves on each hop, so it is the thing a step watches.
      */
     let openedAt = -1
+    /**
+     * When the story was started, and the first packet it asked the server for.
+     *
+     * Recorded because "the story starts" has to mean "something happens": three
+     * stories opened on a card with no cue, the ambient traffic was switched off by
+     * `onEnter`, and the result was a paused-looking scene where nothing ever
+     * arrived — or one stray packet left over from before the story, of the wrong
+     * kind. The kind is compared against what the card declares, so a card about a
+     * hash read cannot be satisfied by an ordinary GET.
+     */
+    let startAt = 0
+    let firstCue: { kind: string; expected: string; ms: number } | null = null
+
+    /** What a step asks the server for, as a name a test can compare. */
+    const cueKind = (step: StoryStep): string => {
+        if (step.publish) return 'publish'
+        if (step.subscribe) return 'subscribe'
+        if ((step.tap ?? 'postgres') !== 'redis') return 'query'
+        if (step.raw) return 'raw'
+        if (step.op === 'object') return 'inline'
+        if (step.big) return `big:${step.big}`
+        return 'command'
+    }
+
+    /** The first packet of a story is the one that has to be the right one. */
+    const noteCue = (kind: string) => {
+        if (firstCue) return
+        firstCue = { kind, expected: cueKind(steps[index]), ms: Math.round(performance.now() - startAt) }
+    }
 
     /** The one place step predicates read the world from. */
     const facts = (): StoryFacts => {
@@ -162,6 +191,7 @@ export function createStory({
 
     /** One tap, aimed at the cage this step is about. */
     const tap = (step: StoryStep) => {
+        noteCue(cueKind(step))
         if ((step.tap ?? 'postgres') === 'redis') {
             // `raw` FIRST, and on its own. It names the value, which is the thing the
             // reader is being shown — a step that says `raw` and forgets `op: 'object'`
@@ -287,6 +317,10 @@ export function createStory({
         if (prevBtn) {
             prevBtn.textContent = last ? 'restart ↺' : '← back'
             prevBtn.disabled = false
+            // The first card is where the journey begins, so there is nothing behind
+            // it. A `← back` that does nothing is a button pointing at nowhere; it is
+            // removed rather than disabled, so the panel says what it can actually do.
+            prevBtn.style.display = index === 0 ? 'none' : ''
         }
         if (nextBtn) {
             nextBtn.textContent = last ? 'done' : 'next →'
@@ -322,8 +356,14 @@ export function createStory({
         // packet has a subject and no view, and its publish is exactly what makes
         // that subject exist. Hanging the cue off the fixed-view branch meant the
         // camera waited for a message nobody had asked the server to send.
-        if (step.publish) window.setTimeout(() => keepPublishing(mine), step.delay ?? 600)
-        if (step.subscribe) window.setTimeout(() => keepSubscribing(step, mine), step.delay ?? 600)
+        //
+        // The FIRST card fires on this frame, at delay 0. A story that opened with
+        // its cue 600–800 ms away showed an empty scene for that long — and with
+        // ambient traffic already switched off, nothing was going to arrive in the
+        // meantime, so a tap on "stories" looked like a scene that had stopped.
+        const delay = index === 0 ? 0 : (step.delay ?? 600)
+        if (step.publish) window.setTimeout(() => keepPublishing(mine), delay)
+        if (step.subscribe) window.setTimeout(() => keepSubscribing(step, mine), delay)
         // The LAST card of a journey runs live.
         //
         // Every other card stops the clock on the instant it talks about, which is
@@ -352,7 +392,7 @@ export function createStory({
                 for (let i = 0; i < n; i++) tap(step)
                 step.act?.(sim)
                 hold(mine, step)
-            }, step.delay ?? 800)
+            }, delay)
         }
     }
 
@@ -408,6 +448,7 @@ export function createStory({
     const keepSubscribing = (step: StoryStep, mine: number) => {
         if (mine !== token || !running) return
         if (step.expect(facts())) return
+        noteCue('subscribe')
         redis?.subscribeNext()
         window.setTimeout(() => keepSubscribing(step, mine), 900)
     }
@@ -419,6 +460,7 @@ export function createStory({
      */
     const keepPublishing = (mine: number) => {
         if (mine !== token || !running) return
+        noteCue('publish')
         redis?.publish()
         // A step that RIDES the packet gets exactly one. The camera has to settle
         // on it and stay with it to the end of the route, and a new message every
@@ -529,6 +571,8 @@ export function createStory({
         steps = def.steps
         running = true
         index = 0
+        startAt = performance.now()
+        firstCue = null
         if (el) el.hidden = false
         onEnter?.(def)
         play()
@@ -567,7 +611,6 @@ export function createStory({
         index--
         play()
     }
-
     nextBtn?.addEventListener('click', next)
     prevBtn?.addEventListener('click', prev)
     exitBtn?.addEventListener('click', stop)
@@ -598,6 +641,8 @@ export function createStory({
         active: () => running,
         index: () => (running ? index : -1),
         storyId: () => (running ? storyId : null),
+        /** the first packet this story asked for, and whether it was the right kind */
+        firstCue: () => firstCue,
         /** camera + claim verification for the current step */
         audit,
         /** audit every step of a story without playing it, for tests */

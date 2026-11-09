@@ -13,6 +13,11 @@ export const QUEUE_STORY: StoryStep[] = [
         title: 'the setup',
         body: 'One PostgreSQL instance, one client pressing run, and six connection slots — max_connections = 6. Everything from here happens inside this one server.',
         view: 'overview',
+        // The opening card issues its own packet. Without one this card was the
+        // story starting on a still frame: ambient traffic is switched off while a
+        // story runs, so nothing was ever going to arrive.
+        send: 1,
+        sustain: 1,
         expect: (c) => c.connections <= 1,
         waitFor: 'pool back down to one connection',
     },

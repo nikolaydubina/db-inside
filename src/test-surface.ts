@@ -143,6 +143,15 @@ export function installTestSurface(opts: { story: Story; redisSim: RideSim }): v
             title: document.getElementById('story-title')?.textContent?.trim() ?? '',
             /** the panel's own words: 'as described' only when its claim holds */
             verdict: document.getElementById('story-state')?.textContent?.trim() ?? '',
+            /**
+             * The first packet this story asked for, and whether it was the kind its
+             * opening card declares.
+             *
+             * `ms` is measured from the start of the story, so "the story starts"
+             * has a number attached: anything above a frame or two means the card was
+             * showing nothing while the panel said it was playing.
+             */
+            firstCue: story.firstCue(),
             ride: {
                 phase: ride.phase,
                 /** where the ridden object is, in the space the route is drawn in */

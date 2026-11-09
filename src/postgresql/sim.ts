@@ -11,6 +11,7 @@ import {
   halo,
   rand,
   randInt,
+  speedTime,
   travel,
 } from '../core/util'
 
@@ -337,7 +338,7 @@ export class EngineSim {
     // in the same magenta the packets use — green is the answer coming back
     const wire = new QueryChain(this.scene)
     const fIn = wire.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
-    await travel(this.ticker, packet, inbound, 0.8, easeInQuad)
+    await travel(this.ticker, packet, inbound, speedTime(inbound), easeInQuad)
     fIn.flash(0.9)
     // keep the wire up for a beat after it lands, then release it so a hammered
     // button does not silt the scene up with permanent lines
@@ -371,7 +372,8 @@ export class EngineSim {
     // behind its head — this is the only place that counts those
     const queued = this.running.has(pod.id) ? pod.inbuf + 1 : 0
     const entry = this.inst.backendBufferEntry(pod, queued)
-    void travel(this.ticker, packet, pathCurve([packet.position.clone(), entry]), 0.2).then(
+    const drop = pathCurve([packet.position.clone(), entry])
+    void travel(this.ticker, packet, drop, speedTime(drop)).then(
       () => despawn(this.ticker, this.scene, packet, 0.15),
     )
     this.inst.pulseBackend(pod)
@@ -427,7 +429,7 @@ export class EngineSim {
         speed: 0.55,
         opacity: 0.36,
       })
-      await travel(this.ticker, packet, toParse, 0.5)
+      await travel(this.ticker, packet, toParse, speedTime(toParse))
       this.inst.pulseNode(pod, 'parse', 0.8)
       fToParse.flash(0.8)
 
@@ -441,7 +443,7 @@ export class EngineSim {
         speed: 0.55,
         opacity: 0.4,
       })
-      await travel(this.ticker, packet, parseCurve, 0.4)
+      await travel(this.ticker, packet, parseCurve, speedTime(parseCurve))
       this.inst.pulseNode(pod, 'plan', 0.9)
       fParse.flash(0.8)
       await this.ticker.wait(0.08)
@@ -456,7 +458,7 @@ export class EngineSim {
         speed: 0.55,
         opacity: 0.4,
       })
-      await travel(this.ticker, packet, planCurve, 0.4)
+      await travel(this.ticker, packet, planCurve, speedTime(planCurve))
       this.inst.pulseNode(pod, 'exec', 1)
       fPlan.flash(0.8)
 
@@ -477,7 +479,7 @@ export class EngineSim {
         ])
         const walPack = makePacket(PALETTE.amber, 0.2, this.scene)
         walPack.position.copy(walFrom)
-        void travel(this.ticker, walPack, walCurve, 0.4).then(() => {
+        void travel(this.ticker, walPack, walCurve, speedTime(walCurve)).then(() => {
           this.inst.appendWal(0.3)
           this.walBytes += walBytesFor
           this.bufferedBytes += walBytesFor
@@ -496,7 +498,7 @@ export class EngineSim {
           speed: 0.5,
           opacity: 0.4,
         })
-        await travel(this.ticker, packet, execCurve, 0.4)
+        await travel(this.ticker, packet, execCurve, speedTime(execCurve))
         fExec.flash(0.75)
 
         const slot = this.inst.writeIntoBuffer(kind)
@@ -509,7 +511,7 @@ export class EngineSim {
             kind === 'insert' ? 0xc7ff5a : PALETTE.magenta,
             { speed: 0.5, opacity: 0.45 },
           )
-          await travel(this.ticker, packet, down, 0.55)
+          await travel(this.ticker, packet, down, speedTime(down))
           fDown.flash(0.85)
           this.inst.setPageActive(slot.idx, kind === 'insert' ? 0xc7ff5a : PALETTE.magenta, 1.2)
           const owner = slot.page.block?.table
@@ -535,7 +537,7 @@ export class EngineSim {
           speed: 0.5,
           opacity: 0.44,
         })
-        await travel(this.ticker, packet, execCurve, 0.5)
+        await travel(this.ticker, packet, execCurve, speedTime(execCurve))
         fExec.flash(0.8)
         this.inst.setPageActive(pageIdx, PALETTE.teal, 1.3)
         this.lastArrowEnd = toPage.clone()
@@ -557,7 +559,7 @@ export class EngineSim {
           speed: 0.5,
           opacity: 0.4,
         })
-        await travel(this.ticker, packet, execCurve, 0.4)
+        await travel(this.ticker, packet, execCurve, speedTime(execCurve))
         fExec.flash(0.7)
 
         // the arrow goes to the exact block this read needs, not to "the disk"
@@ -575,7 +577,7 @@ export class EngineSim {
           speed: 0.5,
           opacity: 0.42,
         })
-        await travel(this.ticker, packet, down, 0.5, easeInOutCubic)
+        await travel(this.ticker, packet, down, speedTime(down), easeInOutCubic)
         fDown.flash(0.9)
         this.lastArrowEnd = toBlock.clone()
         if (target) {
@@ -597,7 +599,7 @@ export class EngineSim {
         const packetCore = packet.children[0] as THREE.Mesh
           ; (packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
         this.inst.liftFromDisk(pageIdx)
-        await travel(this.ticker, packet, up, 0.62)
+        await travel(this.ticker, packet, up, speedTime(up))
         fUp.flash(0.8)
         this.inst.setPageActive(pageIdx, PALETTE.amber, 1.2)
         // the copy that arrives carries the density of the page it came from,
@@ -634,7 +636,7 @@ export class EngineSim {
         speed: 0.55,
         opacity: 0.44,
       })
-      await travel(this.ticker, rows, toPort, 0.75)
+      await travel(this.ticker, rows, toPort, speedTime(toPort))
       this.inst.pulseBackend(pod)
       fRows.flash(0.85)
       despawn(this.ticker, this.scene, rows, 0.2)
@@ -649,7 +651,7 @@ export class EngineSim {
       ])
       chain.addCurve(outbound, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
       const out = makePacket(PALETTE.teal, 0.26, this.scene)
-      await travel(this.ticker, out, outbound, 0.8, easeOutCubic)
+      await travel(this.ticker, out, outbound, speedTime(outbound), easeOutCubic)
       despawn(this.ticker, this.scene, out, 0.3)
     } finally {
       // the connection's own lifecycle belongs to serve(), not to one query:
@@ -749,7 +751,7 @@ export class EngineSim {
           start.clone().lerp(dest, 0.45).add(new THREE.Vector3(0, 1.6, 0)),
           dest,
         ])
-        void travel(this.ticker, copy, curve, 0.75).then(() => {
+        void travel(this.ticker, copy, curve, speedTime(curve)).then(() => {
           if (target) {
             this.inst.touchBlocks([target], PALETTE.amber, 0.55, 1.15)
             this.lastOp = `checkpoint write ${target.table ?? 'free'}[${target.row},${target.col}]`
@@ -881,7 +883,8 @@ export class EngineSim {
         const flushingBytes = this.bufferedBytes
         const pack = makePacket(PALETTE.ice, 0.22, this.scene)
         pack.position.copy(from)
-        void travel(this.ticker, pack, this.walFlushArc(from, head), 0.42).then(() => {
+        const arc = this.walFlushArc(from, head)
+        void travel(this.ticker, pack, arc, speedTime(arc)).then(() => {
           if (this.inst.flushWalBuffers() > 0) {
             this.flushedBytes += flushingBytes
             this.bufferedBytes = Math.max(0, this.bufferedBytes - flushingBytes)

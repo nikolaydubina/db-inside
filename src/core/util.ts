@@ -367,6 +367,22 @@ export function travel(
   })
 }
 
+/**
+ * The speed of every packet in the project, in units per second.
+ *
+ * There is one constant and it belongs to all three scenes. A leg is timed as its
+ * own length divided by this — see `speedTime` — so a packet covers the same distance
+ * in the same time whether it is crossing redis or postgres. Timing legs individually
+ * instead makes speed depend on the coordinates: a 0.4 s leg across 2 units and a
+ * 0.55 s leg across 11 units are the same duration and 5x apart in speed, which reads
+ * as the same packet accelerating.
+ */
+export const PACKET_SPEED = 20
+
+/** How long a packet takes to cover `curve` at the project's one speed. */
+export const speedTime = (curve: THREE.Curve<THREE.Vector3>) =>
+  curve.getLength() / PACKET_SPEED
+
 /** Oscillating shimmer used for idle life. */
 export const breathe = (t: number, speed = 1, phase = 0) =>
   0.5 + 0.5 * Math.sin(t * speed + phase)

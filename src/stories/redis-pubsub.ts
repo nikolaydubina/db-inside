@@ -23,6 +23,10 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
         title: 'a channel with nobody on it',
         body: 'PUBLISH is addressed to a channel, not to a key. A channel is a name in its own dictionary — pubsub_channels — and the only thing hanging off that name is a list of connected sockets. Here the list is empty, and publishing to an empty list is not an error in Redis: the command succeeds and reaches nobody. That is the difference between this and a write: nothing is created to hold the message.',
         view: 'redis-pubsub',
+        // The card is about publishing to an empty list, so it publishes — on the
+        // frame the story opens. It had no cue at all, which made the first thing a
+        // reader saw an empty channel and no message anywhere.
+        publish: true,
         expect: (c) => c.rdSubs === 0,
         waitFor: 'an empty channel',
     },
