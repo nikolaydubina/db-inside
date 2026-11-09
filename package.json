@@ -10,12 +10,14 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
+    "test": "playwright test",
     "deploy": "wrangler deploy"
   },
   "dependencies": {
     "three": "^0.187.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.65.0",
     "@types/three": "^0.187.0",
     "typescript": "^7.0.2",
     "vite": "^8.3.6",

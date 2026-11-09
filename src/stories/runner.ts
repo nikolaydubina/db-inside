@@ -46,6 +46,15 @@ export interface StoryOptions {
         resumePubSub(): void
         /** which leg of its route the ridden message is on, for `freezeAt` */
         phase(): RidePhase
+        /**
+         * Where the ridden object actually is, for the step assertions.
+         *
+         * `phase` is a name and a name can be wrong; `gap` is a measurement — the
+         * distance from the packet to the point the leg it claims to be on ends
+         * at — so a step that froze on the wrong stop fails instead of looking
+         * plausible.
+         */
+        rideState(): { gap: number | null }
         stats: {
             keys: number
             ops: number
@@ -217,19 +226,19 @@ export function createStory({
         stateEl.classList.toggle('wrong', !!a.wrong)
         stateEl.textContent = a.wrong
             ? // the clock stopped, the camera arrived, the claim holds — and the
-              // picture is of a different instant than the words. Saying so is the
-              // whole point of asserting on a step.
-              `wrong instant · ${a.wrong}`
+            // picture is of a different instant than the words. Saying so is the
+            // whole point of asserting on a step.
+            `wrong instant · ${a.wrong}`
             : !a.camera.arrived
-              ? stepNow?.subject && !a.subject
-                  ? // a ride is between commands: the last one has left the socket and
+                ? stepNow?.subject && !a.subject
+                    ? // a ride is between commands: the last one has left the socket and
                     // the next has not been cued yet. That is the story working, not
                     // the camera failing, so it says so.
                     `waiting · ${stepNow.waitFor ?? 'the next command'}`
-                  : `camera → ${a.subject ?? a.view ?? '…'}`
-              : !demonstrated
-                ? `not yet · ${a.claim.expects}`
-                : 'as described'
+                    : `camera → ${a.subject ?? a.view ?? '…'}`
+                : !demonstrated
+                    ? `not yet · ${a.claim.expects}`
+                    : 'as described'
     }
     window.setInterval(() => {
         if (running) refreshState()

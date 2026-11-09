@@ -16,6 +16,7 @@ import { createCameraRig, defaultView, slugOf, viewBySlug, viewForBox, viewsFor 
 import type { ViewDef } from './views'
 import { createStory, PLANNED_STORIES, STORIES } from './stories'
 import type { StoryScene } from './stories'
+import { installTestSurface } from './test-surface'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
 import type { ShareDb } from './share'
 import { initHud } from './ui'
@@ -863,6 +864,9 @@ const story = createStory({
   },
 })
   ; (window as unknown as Record<string, unknown>).__psqlStory = story
+// the one surface an outside driver is meant to use — and it describes itself,
+// so a test never has to guess an id or the shape of rideState()
+installTestSurface({ story, redisSim })
 
 // build the story list from the same registry the stories themselves come from.
 // One list at root level — a story may later span both cages — but grouped by

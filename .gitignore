@@ -4,3 +4,7 @@ dist
 *.local
 .wrangler
 qa/
+test-results/
+
+# playwright
+playwright-report/
