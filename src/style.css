@@ -1486,20 +1486,32 @@ body.db-open #inspector {
   color: #4d6a7c;
 }
 
+/*
+ * One colour for the whole colophon. The build was in bright cyan and the name in
+ * a dimmer blue, which made `built by` the loudest thing on the page and asked the
+ * reader to rank two credits that are a partnership. Both are the same muted blue
+ * now, and the bold weight alone says which is which.
+ */
 .fine b {
   font-weight: 500;
-  color: #7fd7ee;
+  color: #7fa8c0;
 }
 
+/*
+ * No underline. The rule was a 1px `border-bottom`, not `text-decoration`, which is
+ * why the name read as a link in a block of fine print that is otherwise one even
+ * colour — the line under three words was the only thing drawing the eye to the
+ * bottom-right corner. It brightens on hover and that is the whole affordance.
+ */
 .fine a {
   color: #7fa8c0;
   text-decoration: none;
-  border-bottom: 1px solid rgba(120, 190, 230, 0.22);
+  border-bottom: 0;
 }
 
 .fine a:hover {
-  color: var(--cyan);
-  border-bottom-color: rgba(53, 224, 255, 0.5);
+  color: #dff3ff;
+  border-bottom: 0;
 }
 
 @media (max-width: 900px) {
