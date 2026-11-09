@@ -135,6 +135,35 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] **replication** — standbys, WAL senders and slots exist only as planned stories.
 - [ ] **planner statistics** — the planner node claims cost-based decisions but there is no
       `pg_statistic`/ANALYZE surface behind it.
+- [ ] **the seq-scan ring buffer** — a bulk read streams through a 256 KiB ring so a scan does not
+      evict the whole pool. The drawing walks every page of a scan with no such limit, so it implies a
+      scan is free to displace everything.
+- [ ] **the index cage is a shape, not memory** — the B-tree/GIN/BRIN/hash trees float permanently and
+      are dashed. What actually happens is 3 page reads into 3 buffer slots, and a miss is a disk
+      read first. Make the cages hold real pages, and light the slots the descent touches.
+- [ ] **partitioning** — declarative range/list/hash partitions and the planner's pruning. This is what
+      "shard" means inside one server; cross-server sharding is not in core and should say so rather
+      than be drawn as if it were.
+- [ ] **`pg_dump` / `pg_restore`** — a logical copy that becomes SQL and is replayed as individual
+      `INSERT`s, which is why restoring 100 GB is hours and the WAL never sees a bulk path.
+- [ ] **crash and recovery** — `kill -9` at an arbitrary instant, then start: the last checkpoint, then
+      replay of everything after it from `pg_wal`, then the database is back. The single most
+      convincing thing this scene could show, and it currently shows only the steady state.
+- [ ] **fsync and commit latency** — `COMMIT` waits for one fsync; `synchronous_commit=off` trades
+      durability for latency; a group commit amortises N commits into one flush.
+- [ ] **two copies of every page** — shared_buffers *and* the OS page cache. A buffer miss is often a
+      memory copy, not a disk read, and the drawing has no second level.
+- [ ] **checkpoint spikes** — `full_page_writes` writes whole pages to WAL right after a checkpoint, so
+      WAL volume and write latency jump for a few seconds. Nobody expects it until they see it.
+- [ ] **deadlock** — two transactions each holding what the other wants; the detector kills one. This
+      is the story the lock manager is needed for.
+
+**Stories that need no new geometry**
+- [ ] **a table insert, end to end** — parse → plan → exec → buffer slot → WAL record → flush. The
+      single clearest walk through everything already drawn.
+- [ ] **locks and transactions** — `BEGIN … UPDATE … COMMIT`, and the second session blocked on the
+      same row.
+- [ ] **a rollback** — the same write, then `ROLLBACK`: dead tuple, WAL record, nothing durable to keep.
 
 **Correctness / polish**
 - [ ] WAL story prose says "16 MiB segment blocks" while the run is drawn as 12 blocks; the inspector
@@ -170,6 +199,51 @@ it still cannot show.
       stays serial. Worth showing because "is it single-threaded?" is the question everyone asks.
 - [ ] **client buffers** — `output-buffer-limit`, `query-buffer-limit` and the `OOM command not
       allowed` reply are not drawn, so backpressure has no visual.
+
+**The command mix is too narrow**
+- [ ] **one real pattern per value type** — today every command is a single-key read or write. The
+      shapes that matter are the iterators and the multi-key calls: `LRANGE` over a long list,
+      `HGETALL` on a big hash, `ZRANGE` down a skiplist, `LPUSH`/`LPOP` from both ends, `INCR` on a
+      hot counter, `SCARD`, `SINTERSTORE` across two sets, `MSET`/`MGET` fanning one packet into N key
+      lookups, `SISMEMBER`/`SADD`/`SREM`.
+- [ ] **`vset`** — listed, but it is not a Redis command; it needs pinning down before it becomes a
+      story.
+- [ ] **`SCAN`** — a cursor, not a snapshot: one bucket range per call, no `O(N)` stall, and possible
+      repeats. The visual opposite of `KEYS *`.
+- [ ] **`WATCH` / `MULTI` abort** — optimistic locking: a watched key changes, and `EXEC` returns null
+      instead of running. The only place Redis refuses to do what a client asked.
+- [ ] **very large keys** — what the limit actually is (a string may be up to 512 MiB, a page is
+      4 KiB), and what happens on the way out: the reply is assembled in the client's output buffer,
+      so reading a 100 MiB value allocates 100 MiB in the server, page by page, not one hop.
+- [ ] **bitmaps and hyperloglog** — `SETBIT`/`BITCOUNT`/`BITFIELD` and `PFADD`/`PFCOUNT`, the two
+      encodings where a key's size is decoupled from its cardinality.
+- [ ] **RedisJSON and `FT.SEARCH`** — a module type whose value is a document tree, and a search index
+      that is a structure Redis core does not have at all. Both say "modules" better than prose.
+- [ ] **cluster redirection** — `MOVED`/`ASK`, hash tags and the 16,384 slots. A client that gets a
+      redirection has to hop to another node, which is a route the scene has never drawn.
+- [ ] **regimes: pub/sub only, and distributed locks only** — two production shapes with nothing else
+      in them: one where the keyspace is empty and every packet is a fan-out, one where the whole
+      workload is `SET NX PX` plus `DEL`.
+- [ ] **a regime blocked by bad performance** — the workload that makes the single thread the story:
+      one `KEYS *` or a big `HGETALL` in the mix, and every other client waiting behind it.
+- [ ] **TTL as a second dict** — expires is its own hash keyed by the same keys, sampled by the active
+      cycle 20 keys at a time; a key can be logically gone and still take memory. Only lazy expiry is
+      listed above; the dict itself is not drawn.
+- [ ] **`UNLINK` vs `DEL`** — deleting a 100 MiB value costs the thread the whole free; `UNLINK` hands
+      it to a background thread. Same command family, opposite latency.
+
+### Overall
+
+These are not features of a server, they are the yardsticks that make the rest readable.
+
+- [ ] **latency to scale** — one band with L1 (~0.5 ns), RAM (~100 ns), shared_buffers hit (~1 µs),
+      the loop's queue hop (~10 µs), SSD read (~100 µs), a network round trip (~500 µs), a spinning-disk
+      seek (~10 ms). Everything the scene animates should be checkable against it.
+- [ ] **memory to scale** — one band with a 4 KiB page, 8 KiB buffer slot, 16 MiB WAL segment, 512 MiB
+      max string, 1 GiB value, and the arena in the redis cage, so "big" and "small" stop being words.
+- [ ] **an accuracy ledger** — every number in an inspector card that is *not* measured from the scene
+      gets one line here: what it is derived from, and whether it is measured, estimated or illustrative.
+      The 80% heap occupancy and the 393 MiB big hash are estimates today and say so nowhere.
 
 ## Deploy 
 
