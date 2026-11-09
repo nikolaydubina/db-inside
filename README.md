@@ -115,6 +115,7 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] Hadoop
 - [ ] kdb+
 - [ ] TigerBee
+- [ ] DuckDB
 
 ### PostgreSQL
 
