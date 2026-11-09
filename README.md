@@ -112,6 +112,10 @@ CSS2D labels and a small promise-based tween engine driving the simulation.
 Things the scene does not show yet. The first block is already listed in the Stories card with a
 `soon` tag, so the gaps are visible in the app as well as here.
 
+- [ ] Hadoop
+- [ ] kdb+
+- [ ] TigerBee
+
 ### PostgreSQL
 
 **Long-running-instance failures**
