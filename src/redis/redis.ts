@@ -9,6 +9,9 @@ import type { Info } from '../postgresql/instance'
 import { BigValues, BIG_SPOT } from './values'
 import type { BigKind } from './values'
 import { verifyDisk } from './verify'
+import { auxBlocks, encodingOf, mixHex, rebaseAnchors } from './types'
+import { BIG_REAL, REDIS_ANCHOR } from './types'
+import type { KeyKind, RedisKey, RedisPort } from './types'
 export { BIG_SPOT }
 export type { BigKind }
 import {
@@ -90,114 +93,11 @@ import {
     zAt,
 } from './layout'
 export * from './layout'
-export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
+export type { KeyKind, RedisKey, RedisPort } from './types'
+export { BIG_REAL, REDIS_ANCHOR } from './types'
 
 const OBJECT_PAD = 0.06
 const OBJECT_ACROSS = 1.0
-
-export const BIG_REAL: Record<BigKind, { entries: number; mb: number; unit: string }> = {
-    hash: { entries: 5_300_000, mb: 412, unit: 'fields' },
-    zset: { entries: 1_400_000, mb: 168, unit: 'members' },
-    list: { entries: 2_100_000, mb: 96, unit: 'elements' },
-}
-
-export interface RedisKey {
-    i: number
-    row: number
-    col: number
-    home: THREE.Vector3
-
-    page: number
-    kind: KeyKind
-    live: boolean
-
-    ttl: number
-    heat: number
-    shade: number
-
-    bytes: number
-
-    entries: number
-
-    aux: boolean
-
-    big?: BigKind
-
-    raw?: boolean
-
-    hot?: boolean
-}
-
-function encodingOf(key: RedisKey): string {
-    switch (key.kind) {
-        case 'string':
-            return key.bytes <= 44 ? 'embstr' : 'raw'
-        case 'hash':
-            return key.aux ? 'hashtable' : 'listpack'
-        case 'set':
-            return key.aux ? 'hashtable' : 'intset'
-        case 'zset':
-            return key.aux ? 'skiplist + dict' : 'listpack'
-        case 'list':
-            return key.big
-                ? 'quicklist · listpacks'
-                : key.aux
-                  ? 'quicklist · 2 nodes'
-                  : 'quicklist · 1 node'
-    }
-}
-
-function auxBlocks(key: RedisKey): number {
-    if (!key.aux || key.kind === 'string') return 0
-    return key.kind === 'zset' ? 2 : 1
-}
-
-export interface RedisPort {
-    id: number
-    group: THREE.Group
-    ring: THREE.MeshStandardMaterial
-    glow: THREE.SpriteMaterial
-    busy: boolean
-    active: boolean
-    pulse: number
-
-    subs: boolean
-}
-
-export const REDIS_ANCHOR = {
-    sky: new THREE.Vector3(),
-    keys: new THREE.Vector3(),
-    dict: new THREE.Vector3(),
-    loop: new THREE.Vector3(),
-    ports: new THREE.Vector3(),
-    aof: new THREE.Vector3(),
-
-    aofBuf: new THREE.Vector3(),
-    rdb: new THREE.Vector3(),
-
-    bigHash: new THREE.Vector3(),
-    bigZset: new THREE.Vector3(),
-    bigList: new THREE.Vector3(),
-}
-
-function rebaseAnchors() {
-    const o = REDIS_ORIGIN
-    REDIS_ANCHOR.sky.set(6, 26, 2).add(o)
-    REDIS_ANCHOR.keys.set(0, HEAP.y + 0.5, HEAP.cz + 0.4).add(o)
-    REDIS_ANCHOR.dict.set(0, DICT.y, DICT.cz).add(o)
-    REDIS_ANCHOR.loop.copy(LOOP).add(o)
-    REDIS_ANCHOR.ports.set(0, BACKEND_ORIGIN.y, BACKEND_ORIGIN.z).add(o)
-    REDIS_ANCHOR.aof.set(xAt(AOF_C0), BLOCK_TOP, zAt(AOF_ROW)).add(o)
-    REDIS_ANCHOR.aofBuf.set(xAt(AOF_C0), AOF_BUF_Y, zAt(AOF_ROW)).add(o)
-    REDIS_ANCHOR.rdb.copy(RDB_CENTRE).add(o)
-    REDIS_ANCHOR.bigHash.copy(BIG_SPOT.hash).add(o)
-    REDIS_ANCHOR.bigZset.copy(BIG_SPOT.zset).add(o)
-    REDIS_ANCHOR.bigList.copy(BIG_SPOT.list).add(o)
-}
-rebaseAnchors()
-
-const mixHex = (a: number, b: number, t: number) =>
-    new THREE.Color(a).lerp(new THREE.Color(b), t).getHex()
 
 export class RedisInstance {
     readonly group = new THREE.Group()
@@ -437,7 +337,7 @@ export class RedisInstance {
                 const name = (obj.userData.info as Info | undefined)?.title ?? 'unnamed pick'
                 throw new Error(
                     `[redis] pick and its cage disagree by ${d.toFixed(3)} — ${name}. ` +
-                        'Build both with frame(): one centre, one size.',
+                    'Build both with frame(): one centre, one size.',
                 )
             }
         }
@@ -462,7 +362,7 @@ export class RedisInstance {
             SHELL.h - inset - ink.y1,
             SHELL.d / 2 - inset + ink.x0,
         )
-        ;(sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
+            ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
         this.group.add(sticker)
 
         this.motes = dustField(SHELL.w, SHELL.h, SHELL.d)
@@ -841,8 +741,8 @@ export class RedisInstance {
                     kind === 'string'
                         ? 0
                         : near
-                          ? Math.max(1, limit - randInt(1, 4))
-                          : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
+                            ? Math.max(1, limit - randInt(1, 4))
+                            : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
                     page,
@@ -1443,18 +1343,18 @@ export class RedisInstance {
         )
         const info: Info = onAof
             ? {
-                  title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
-                  body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
-                  meta: 'appendonly.aof · replayed in order on start',
-              }
+                title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
+                body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
+                meta: 'appendonly.aof · replayed in order on start',
+            }
             : {
-                  title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
-                  body:
-                      'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' +
-                      `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` +
-                      'The block size never varies, only how much of the file is used.',
-                  meta: 'dump.rdb · state, not history · loaded on start',
-              }
+                title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
+                body:
+                    'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' +
+                    `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` +
+                    'The block size never varies, only how much of the file is used.',
+                meta: 'dump.rdb · state, not history · loaded on start',
+            }
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
     }
 
@@ -1589,14 +1489,14 @@ export class RedisInstance {
                     (isString
                         ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
                         : key.aux
-                          ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
+                            ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
                             (key.kind === 'zset'
                                 ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
                                 : key.kind === 'list'
-                                  ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
-                                  : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
+                                    ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
+                                    : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
                             ' It never converts back: the bigger encoding is kept until the key is deleted.'
-                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                            : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
                 meta: isString
                     ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,

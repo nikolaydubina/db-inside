@@ -55,7 +55,8 @@ export function verifyDisk(s: DiskSnapshot): string[] {
 
     for (let k = s.rdbLen; k < Math.min(s.rdbLen + 3, s.rdbOrder.length); k++) {
         const id = s.rdbOrder[k]
-        if (scale(id) > 1e-2) bad.push(`base block ${k} is drawn, but the file ends at ${s.rdbLen - 1}`)
+        if (scale(id) > 1e-2)
+            bad.push(`base block ${k} is drawn, but the file ends at ${s.rdbLen - 1}`)
     }
 
     for (let k = 0; k < s.rdbLen; k++) {
