@@ -51,6 +51,15 @@ export type StoryFacts = Pick<
      * this is ~0, and the number is what makes that checkable.
      */
     rdStopGap: number | null
+    /**
+     * Which cell of the structure in the read's hands it is touching, if any.
+     *
+     * A walk stops at `node` once per node it reads, so a phase name alone cannot
+     * say how far into the value the read has got — and two cards that both freeze
+     * on `node` used to stop on the FIRST one and show the same picture twice. This
+     * is the counter that tells them apart.
+     */
+    rdCursor: { kind: string; step: number; steps: number } | null
 }
 
 /**
@@ -225,6 +234,15 @@ export interface StoryStep {
      * The next step starts with the same object still in the air.
      */
     freezeAt?: Exclude<RidePhase, null>
+    /**
+     * Stop on a LATER cell of the carried structure than the first one.
+     *
+     * `freezeAt: 'node'` names a phase a walk re-enters at every node, so a caption
+     * about "node after node" froze on the first node and showed the same drawing
+     * as the card before it. This is how far the read must have walked, in cells —
+     * see `rdCursor` and `frozeAtCell`.
+     */
+    freezeAtStep?: number
     /**
      * What the FROZEN instant must show, in words — or why it does not.
      *

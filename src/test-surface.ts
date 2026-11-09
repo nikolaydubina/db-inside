@@ -35,6 +35,8 @@ interface RideSim {
         gap: number | null
         hasPacket: boolean
     }
+    /** which cell of a carried structure the read is on, if any */
+    readCursor(): { kind: string; step: number; steps: number } | null
 }
 
 /** The DOM a driver clicks and reads. One list, so it cannot rot in one place. */
@@ -150,6 +152,13 @@ export function installTestSurface(opts: { story: Story; redisSim: RideSim }): v
                 /** the distance between them: ~0 means it really is on that stop */
                 gap: ride.gap,
                 hasPacket: ride.hasPacket,
+                /**
+                 * the cell inside the carried structure the read is touching, and
+                 * how many cells there are — the animation, as a number. `step`
+                 * rises as the walk progresses and returns to -1 when the structure
+                 * is put back, so a test can assert the walk actually happened.
+                 */
+                cursor: redisSim.readCursor(),
             },
         }
     }

@@ -56,7 +56,7 @@ export interface StoryOptions {
          * at — so a step that froze on the wrong stop fails instead of looking
          * plausible.
          */
-        rideState(): { gap: number | null }
+        rideState(): { gap: number | null; cursor?: { kind: string; step: number; steps: number } | null }
         stats: {
             keys: number
             ops: number
@@ -120,6 +120,15 @@ export function createStory({
     let token = 0
     /** the step has already stopped the clock on its own phase, once is enough */
     let frozen = false
+    /**
+     * Where the read's cursor was when this step opened.
+     *
+     * A walk is at `node` several times in a row, so the phase never changes
+     * between two of them and "has it left the phase yet" can never become true —
+     * a card that wanted a LATER node would wait forever. The cursor is the thing
+     * that moves on each hop, so it is the thing a step watches.
+     */
+    let openedAt = -1
 
     /** The one place step predicates read the world from. */
     const facts = (): StoryFacts => {
@@ -145,6 +154,7 @@ export function createStory({
             rdFanouts: r?.fanouts ?? 0,
             rdPhase: redis?.phase() ?? null,
             rdStopGap: redis?.rideState().gap ?? null,
+            rdCursor: redis?.rideState().cursor ?? null,
         }
     }
 
@@ -290,6 +300,7 @@ export function createStory({
         demonstrated = false
         frozen = false
         trackCentre = null
+        openedAt = redis?.rideState().cursor?.step ?? -1
         render()
         // a live subject wins over a fixed view: the step says what it is about
         // and the camera goes there — but the thing may not exist yet (nothing
@@ -351,13 +362,20 @@ export function createStory({
      */
     const watchPhase = (step: StoryStep, mine: number, left = false) => {
         if (mine !== token || !running || frozen) return
-        if (redis?.phase() === step.freezeAt) {
+        const cursor = redis?.rideState().cursor ?? null
+        const deepEnough = step.freezeAtStep === undefined || (cursor?.step ?? -1) >= step.freezeAtStep
+        if (redis?.phase() === step.freezeAt && deepEnough) {
             // A frozen ride SITS on the phase the last step stopped at, so a step
             // that opens there would freeze on its first poll and stay stopped for
             // good — the clock would never restart and `next` would do nothing
             // visible. The step has to watch the packet leave that phase before it
             // is allowed to stop on it again.
-            if (left) {
+            //
+            // Unless it asked for a DEPTH: then the cursor is the proof that this
+            // is a different instant from the one the last card froze, because a
+            // walk re-enters `node` without the name ever changing.
+            const deeper = cursor !== null && cursor.step > openedAt
+            if (left || deeper) {
                 frozen = true
                 setSpeed?.(0)
                 return

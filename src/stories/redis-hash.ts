@@ -1,5 +1,5 @@
 import type { StoryStep } from './types'
-import { frozeAt } from './stop'
+import { frozeAt, frozeAtCell } from './stop'
 
 /**
  * A big hash, followed: one field versus every field.
@@ -54,7 +54,7 @@ export const REDIS_HASH_STORY: StoryStep[] = [
     },
     {
         title: 'HGETALL: there is no order to jump through',
-        body: 'The skiplist is what lets a sorted set answer a range without reading everything; a hash has no equivalent, and that is the whole difference. To return every field, the thread walks all the buckets of that inner array, every chain hanging off them, and every entry in those chains is a separate allocation on its own page. Nothing can be skipped and nothing is sorted, so the route is as long as the value is big. Watch it move bucket to bucket and page to page instead of taking one hop.',
+        body: 'The skiplist is what lets a sorted set answer a range without reading everything; a hash has no equivalent, and that is the whole difference. To return every field, the thread walks all the buckets of that inner array, every chain hanging off them, and every entry in those chains is a separate allocation on its own page. The cursor inside the cage is doing exactly that: bucket by bucket, and the buckets behind it stay lit. Nothing can be skipped and nothing is sorted, so the route is as long as the value is big. Watch it move bucket to bucket and page to page instead of taking one hop.',
         subject: (s) => s.redisRide?.() ?? null,
         dir: [0.55, 0.5, 1],
         dist: 13,
@@ -70,7 +70,8 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a walk across every bucket',
         freezeAt: 'node',
-        assert: frozeAt('node', 'the page a field’s entry was allocated on'),
+        freezeAtStep: 3,
+        assert: frozeAtCell('node', 'a bucket partway through the scan', 3),
     },
     {
         title: 'why one command can stop the server',

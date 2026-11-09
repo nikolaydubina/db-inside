@@ -27,3 +27,24 @@ export const frozeAt =
                 return `${c.rdStopGap} units away from ${what}`
             return null
         }
+
+/**
+ * The same claim, plus how far into the carried structure the read must have got.
+ *
+ * Two cards can name the same stop and still be about different instants: a walk
+ * is at `node` once per node, so the card that says "node after node" has to be
+ * deeper into the structure than the one that says "the head node". Without the
+ * count both freeze on the first node and the second caption describes a picture
+ * that has not changed. The number comes from the drawing itself, so it is a
+ * measurement of the animation rather than a second opinion about it.
+ */
+export const frozeAtCell =
+    (stop: Exclude<RidePhase, null>, what: string, minStep: number, near = 0.3) =>
+        (c: StoryFacts): string | null => {
+            const why = frozeAt(stop, what, near)(c)
+            if (why) return why
+            if (!c.rdCursor) return `nothing carried, so ${what} has no cells`
+            if (c.rdCursor.step < minStep)
+                return `${c.rdCursor.kind} cursor on cell ${c.rdCursor.step}, not past ${minStep}`
+            return null
+        }

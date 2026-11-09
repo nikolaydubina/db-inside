@@ -1,5 +1,5 @@
 import type { StoryStep } from './types'
-import { frozeAt } from './stop'
+import { frozeAt, frozeAtCell } from './stop'
 
 /**
  * A sorted set, followed: the point lookup and the range scan.
@@ -54,7 +54,7 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
     },
     {
         title: 'ZRANGEBYSCORE: find a start, then walk',
-        body: 'A range cannot be answered by hashing, so it takes the tower. The read finds its starting node by following the top level down — a few hops that skip most of the set — and then walks the bottom level, one node at a time, until the score range ends. Every node it lands on was allocated on its own, so each step is a pointer to an unrelated page: the packet stopping at each node and each page IS the cost. It is proportional to what the range returns, not to the size of the set.',
+        body: 'A range cannot be answered by hashing, so it takes the tower. The read finds its starting node by following the top level down — a few hops that skip most of the set — and then walks the bottom level, one node at a time, until the score range ends. The tower of the node it is on lights up with it, and the links behind it stay lit: that trail is the part of the set the range has already read. Every node it lands on was allocated on its own, so each step is a pointer to an unrelated page: the packet stopping at each node and each page IS the cost. It is proportional to what the range returns, not to the size of the set.',
         subject: (s) => s.redisRide?.() ?? null,
         dir: [0.55, 0.5, 1],
         dist: 13,
@@ -70,7 +70,8 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a range walking the tower',
         freezeAt: 'node',
-        assert: frozeAt('node', 'a node of the skiplist'),
+        freezeAtStep: 2,
+        assert: frozeAtCell('node', 'a node partway along the bottom level', 2),
     },
     {
         title: 'and the one thread pays for it',

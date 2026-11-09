@@ -1,5 +1,5 @@
 import type { StoryStep } from './types'
-import { frozeAt } from './stop'
+import { frozeAt, frozeAtCell } from './stop'
 
 /**
  * One deep read of a long list, followed end to end.
@@ -51,7 +51,7 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
     },
     {
         title: 'a list is a chain, and the chain is on the heap',
-        body: 'A quicklist is not one buffer. It is a doubly linked chain of nodes, and each node holds one listpack — up to 128 elements in a single contiguous allocation. The dashed cage at the back is a projection of that chain so its shape can be read; it is not an address. The nodes themselves are ordinary heap allocations, one page each, so the first thing the read does is take the head node’s pointer and go there.',
+        body: 'A quicklist is not one buffer. It is a doubly linked chain of nodes, and each node holds one listpack — up to 128 elements in a single contiguous allocation. What the read is holding IS that chain: the shape is drawn as the pack of elements inside each node, and the node it has just stepped onto is the one burning. The nodes themselves are ordinary heap allocations, one page each, so the first thing the read does is take the head node’s pointer and go there.',
         subject: (s) => s.redisRide?.() ?? null,
         dir: [0.55, 0.5, 1],
         dist: 13,
@@ -70,7 +70,7 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
     },
     {
         title: 'node after node, page after page',
-        body: 'The index is in the middle, so the thread walks from whichever end is nearer — one node at a time. Each step is a pointer to the next node’s allocation, and that allocation is on an unrelated page: nothing about a quicklist keeps neighbours close, so the walk is a jump per node. The elements INSIDE a node are contiguous, which is why the number of hops is the number of nodes and not the number of elements: 2.1 million elements at 128 per node is about 16,000 nodes, so a middle read is thousands of hops, not two million.',
+        body: 'The index is in the middle, so the thread walks from whichever end is nearer — one node at a time. Each step is a pointer to the next node’s allocation, and that allocation is on an unrelated page: nothing about a quicklist keeps neighbours close, so the walk is a jump per node. The lit trail behind the read is the nodes it has already read, and the one at the head of it is the node under the packet right now. The elements INSIDE a node are contiguous, which is why the number of hops is the number of nodes and not the number of elements: 2.1 million elements at 128 per node is about 16,000 nodes, so a middle read is thousands of hops, not two million.',
         subject: (s) => s.redisRide?.() ?? null,
         dir: [0.55, 0.5, 1],
         dist: 13,
@@ -85,7 +85,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the chain being walked, a node at a time',
         freezeAt: 'node',
-        assert: frozeAt('node', 'the page the next node of the chain lives on'),
+        // card 2 already froze on the head node: this one waits until the read has
+        // actually stepped on, or it would show the same drawing twice
+        freezeAtStep: 2,
+        assert: frozeAtCell('node', 'a node further along the chain', 2),
     },
     {
         title: 'found, and back out through the socket',

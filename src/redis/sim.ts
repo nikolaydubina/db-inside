@@ -28,6 +28,21 @@ export type RidePhase =
     | 'reply'
     | null
 
+/**
+ * One stop on a read's route: where the packet stands, what that stop is called,
+ * and — for a carried structure — which of its cells the read is touching.
+ *
+ * `lit` is the walk's hop index and the last hop's index, so the cursor can be
+ * spread over the whole drawn structure instead of crawling through its first few
+ * cells; `true` means the read landed on ONE bucket, chosen by the structure
+ * itself, which is what a field or member lookup does.
+ */
+type RouteStop = {
+    p: THREE.Vector3
+    stop: RidePhase
+    lit?: { n: number; of: number } | true
+}
+
 export interface RedisStats {
     ops: number
     opsPerSec: number
@@ -425,22 +440,25 @@ export class RedisSim {
     private keyRoute(
         key: RedisKey,
         probe: 'point' | 'walk' | 'object' = 'walk'
-    ): Array<{ p: THREE.Vector3; stop: RidePhase }> {
+    ): RouteStop[] {
         const r = this.redis
-        const walk: Array<{ p: THREE.Vector3; stop: RidePhase }> = [
-            { p: r.bucketTop(key), stop: 'bucket' },
-        ]
+        const walk: RouteStop[] = [{ p: r.bucketTop(key), stop: 'bucket' }]
         if (key.big) {
             // the entry is a heap allocation like any other: the first hop lands
             // on its page, and only then does the value's structure come into it
             walk.push({ p: r.keyPageTop(key), stop: 'page' })
             walk.push({ p: r.valuePoint(key), stop: 'value' })
             const inner = r.innerDictPoint(key)
-            if (inner) walk.push({ p: inner, stop: 'inner' })
+            // A lookup hashes the field and lands on ONE bucket; a range scan walks
+            // the buckets in order. Same drawn structure, different path through it,
+            // and the cursor inside the cage is what tells them apart — which is why
+            // only the lookup lights a single bucket here. Lighting one for the scan
+            // too put the cursor on a bucket it then jumped back from.
+            if (inner) walk.push({ p: inner, stop: 'inner', lit: probe === 'point' ? true : undefined })
             if (probe === 'point') {
                 // one field or member: the value's OWN dict lands on a single
                 // bucket, and the entry behind that bucket is one allocation
-                walk.push({ p: r.nodePoint(key, 1), stop: 'field' })
+                walk.push({ p: r.nodePoint(key, 1), stop: 'field', lit: true })
                 walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
             } else {
                 const hops = key.kind === 'string' ? 1 : key.kind === 'hash' ? 2 : 3
@@ -454,8 +472,13 @@ export class RedisSim {
                 // access at all. Bouncing also double-counted: the cage was visited
                 // once per hop while the only new address per hop is the next page.
                 // So a walk is a run of pages, each one a node's allocation.
+                //
+                // And every hop moves the cursor ONE STEP inside the structure, so
+                // the walk is drawn where it happens: the cells behind stay lit and
+                // the one under the read pulses. `of` is the last hop's index, so the
+                // cursor reaches the far end of the drawn structure on the last one.
                 for (let n = 0; n <= hops; n++) {
-                    walk.push({ p: r.hopPoint(key, n), stop: 'node' })
+                    walk.push({ p: r.hopPoint(key, n), stop: 'node', lit: { n, of: hops } })
                 }
             }
         } else if (probe === 'object') {
@@ -620,7 +643,7 @@ export class RedisSim {
         const chain = new QueryChain(cage)
         // every stop carries its own name, so the leg a ride is on and the words a
         // caption uses for it come from one list instead of two that could drift
-        const route: Array<{ p: THREE.Vector3; stop: RidePhase }> = key
+        const route: RouteStop[] = key
             ? this.keyRoute(key, cmd.probe)
             : [{ p: this.redis.channelPoint(), stop: null }]
         const chainPts: THREE.Vector3[] = [
@@ -696,6 +719,11 @@ export class RedisSim {
                     if (key?.big && !this.carried && legStop.stop === 'value' && this.ownsRide(ride)) {
                         this.carried = key.big
                         this.redis.rideBig(key.big, packet)
+                    }
+                    // and the cursor moves inside it, one step per hop
+                    if (key?.big && legStop.lit !== undefined) {
+                        if (legStop.lit === true) this.redis.setBigStep(key.big, 0)
+                        else this.redis.setBigStep(key.big, legStop.lit.n, legStop.lit.of)
                     }
                     await this.ticker.wait(0.22)
                     from = legStop.p
@@ -933,6 +961,18 @@ export class RedisSim {
     }
 
     /**
+     * Which cell of the structure in its hands the read is touching, if any.
+     *
+     * The animation inside a cage is a claim about the algorithm — three buckets
+     * scanned for this lookup, four quicklist nodes read for this range — so it is
+     * reported as numbers, the same way the phase and the stop gap are.
+     */
+    readCursor(): { kind: string; step: number; steps: number } | null {
+        if (!this.carried) return null
+        return { kind: this.carried, ...this.redis.bigStepOf(this.carried) }
+    }
+
+    /**
      * Put a carried structure back where it lives.
      *
      * Called from every end of a walk and every end of a ride, because those are
@@ -1056,6 +1096,8 @@ export class RedisSim {
                 at && this.rideStopPoint
                     ? +at.distanceTo(this.rideStopPoint).toFixed(2)
                     : null,
+            /** which cell of the carried structure the read is on, if any */
+            cursor: this.readCursor(),
             /** the last handful of writes, oldest first */
             trace: this.rideTrace.slice(-16),
         }
