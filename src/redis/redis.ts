@@ -10,6 +10,7 @@ import { BigValues, BIG_SPOT } from './values'
 import type { BigKind } from './values'
 import { verifyDisk } from './verify'
 import { DictTable } from './dict'
+import { DictView, HeapView } from './redis_viz'
 import { auxBlocks, encodingOf, mixHex, rebaseAnchors } from './types'
 import { BIG_REAL, REDIS_ANCHOR } from './types'
 import { KeyKind, KIND_NAME } from './kind'
@@ -45,7 +46,6 @@ import {
     FIELD,
     KEY,
     LOOP,
-    PITCH,
     RDB,
     SHELL,
     BLOCK,
@@ -62,7 +62,6 @@ import {
     BLOCK_BYTES,
     BLOCK_TOP,
     COLS,
-    DICT,
     DISK_LABEL_PAD,
     EPOLL,
     FLOOR_LABEL_Y,
@@ -83,8 +82,6 @@ import {
     ROWS,
     STAGING_ROW,
     VALUE_BYTES,
-    dictX,
-    dictZ,
     encodingLimit,
     heapOccupancyMask,
     heapX,
@@ -110,17 +107,11 @@ export class RedisInstance {
     readonly keyGeo = new RoundedBoxGeometry(KEY.w, KEY.h, KEY.d, 1, 0.012)
 
     private disk!: THREE.InstancedMesh
-    private dictMesh!: THREE.InstancedMesh
-
-    private heapMesh!: THREE.InstancedMesh
 
     private heapMask?: Uint8Array
 
     private heapPages: number[] = []
     private keysMesh!: THREE.InstancedMesh
-
-    private pageGhost: THREE.Mesh | null = null
-    private ghostPage: number | null = null
 
     private showcasePage: number = 0
 
@@ -156,8 +147,8 @@ export class RedisInstance {
 
     private readonly dict = new DictTable()
 
-    private dictShade: number[] = []
-    private dictTableLab!: CSS2DObject
+    private dictView!: DictView
+    private heapView!: HeapView
 
     private pointerWeb?: LineSegments2
 
@@ -249,6 +240,27 @@ export class RedisInstance {
     rewrites = 0
 
     constructor(private ticker: Ticker) {
+        const self = this
+        const host = {
+            group: this.group,
+            ticker: this.ticker,
+            pickables: this.pickables,
+            register: (obj: THREE.Object3D, info: Info) => void this.register(obj, info),
+            keys: this.keys,
+        }
+        this.dictView = new DictView(host, this.dict)
+        this.heapView = new HeapView({
+            ...host,
+            get heapMask() {
+                return self.heapMask
+            },
+            get heapPages() {
+                return self.heapPages
+            },
+            get bigKeys() {
+                return self.bigKeys
+            },
+        })
         this.values = new BigValues({
             group: this.group,
             frame: (centre, size, colour, opts) => this.frame(centre, size, colour, opts),
@@ -588,110 +600,13 @@ export class RedisInstance {
     }
 
     private buildMemory() {
-        const dGeo = new RoundedBoxGeometry(0.3, 0.07, 0.3, 1, 0.015)
-        const dMat = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            emissive: PALETTE.cyan,
-            emissiveIntensity: 0.28,
-            roughness: 0.4,
-            metalness: 0.35,
-        })
-        const dict = new THREE.InstancedMesh(dGeo, dMat, DICT.cols * DICT.rows)
-        dict.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        this.group.add(dict)
-        this.dictMesh = dict
-
-        let i = 0
-        for (let r = 0; r < DICT.rows; r++) {
-            for (let c = 0; c < DICT.cols; c++) {
-                this.tmpObj.position.set(dictX(c), DICT.y, dictZ(r))
-                this.tmpObj.scale.setScalar(1)
-                this.tmpObj.updateMatrix()
-                dict.setMatrixAt(i, this.tmpObj.matrix)
-                this.dictShade[i] = rand(0.25, 0.5)
-                i++
-            }
-        }
-        if (dict.instanceColor) dict.instanceColor.needsUpdate = true
-        this.paintDict()
-
-        const dW = DICT.cols * PITCH
-        const dD = DICT.rows * PITCH
-        const dictPick = new THREE.Mesh(
-            new THREE.BoxGeometry(dW, 0.6, dD),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        dictPick.position.set(0, DICT.y, DICT.cz)
-        this.group.add(dictPick)
-        this.register(dictPick, {
-            title: 'Hash table — the bucket array, and the rehash',
-            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap — one contiguous allocation of pointers, and each of those pointers leads to a key entry floating in the plane above. A bucket is one pointer — 8 B on a 64-bit build — so the array costs capacity × 8 B; the keys and their dictEntry chains are the separate allocations above. Measured against the data this is nothing: the whole array is 1 KiB, so the 412 MiB hash at the back of the cage is about 420,000 arrays of this size. Each tile here is a bucket and nothing else, and the faint line leaving it is the pointer — the bytes are always at the far end. The two 16×8 halves are the two tables: 32 buckets is 16×2, 64 is 16×4, 128 is 16×8. There is no index to choose and no planner to consult — the data structure is the query plan. It also GROWS: when the entries outnumber the buckets, redis allocates a second table at twice the size and migrates buckets into it one at a time — the tiles vanishing on one half and lighting up on the other. Both tables are live meanwhile, and every lookup checks both, which is why the growth is incremental: a stop-the-world rehash of a million keys would be a latency spike, and a billion-key one would be a stall you could not hide. The two halves during a rehash are literal: there really are two tables allocated at once.',
-            meta: 'dict · ht_table[2] · 8 B per bucket · incremental rehash',
-            stats: () => this.dictStats(),
-        })
-        const dictLab = label('DICT · BUCKETS')
-        dictLab.position.set(-dW / 2 - 0.3, DICT.y + 0.55, DICT.cz - dD / 2)
-        this.group.add(dictLab)
-        const tableLab = label('')
-        tableLab.position.set(-dW / 2 - 0.3, DICT.y + 0.22, DICT.cz - dD / 2)
-        this.group.add(tableLab)
-        this.dictTableLab = tableLab
-        this.paintDict()
+        this.dictView.build()
 
         const pageCount = HEAP.cols * HEAP.rows
         this.heapMask = heapOccupancyMask(pageCount, HEAP_OCCUPANCY)
         this.heapPages = []
         for (let p = 0; p < pageCount; p++) if (this.heapMask[p] === 1) this.heapPages.push(p)
-        const heapGeo = new RoundedBoxGeometry(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE, 1, 0.01)
-        const heapMat = new THREE.MeshStandardMaterial({
-            color: 0xffffff,
-            emissive: PALETTE.cyan,
-            emissiveIntensity: 0.05,
-            roughness: 0.5,
-            metalness: 0.3,
-        })
-        const heap = new THREE.InstancedMesh(heapGeo, heapMat, pageCount)
-        heap.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
-        for (let r = 0; r < HEAP.rows; r++) {
-            for (let c = 0; c < HEAP.cols; c++) {
-                const id = r * HEAP.cols + c
-                this.tmpObj.position.set(heapX(c), HEAP.y, heapZ(r))
-                this.tmpObj.scale.setScalar(1)
-                this.tmpObj.updateMatrix()
-                heap.setMatrixAt(id, this.tmpObj.matrix)
-            }
-        }
-        this.group.add(heap)
-        this.heapMesh = heap
-        heap.userData.infoFor = (hit: THREE.Intersection) => this.heapPageInfo(hit)
-        this.pickables.push(heap)
-
-        const ghostGeo = new THREE.BoxGeometry(HEAP_PAGE * 1.04, HEAP_PAGE * 1.04, HEAP_PAGE * 1.04)
-        const ghost = new THREE.Mesh(
-            ghostGeo,
-            new THREE.MeshStandardMaterial({
-                color: 0x0a2f38,
-                emissive: PALETTE.ice,
-                emissiveIntensity: 0.3,
-                transparent: true,
-                opacity: 0.14,
-                depthWrite: false,
-            }),
-        )
-        ghost.add(
-            new THREE.LineSegments(
-                new THREE.EdgesGeometry(ghostGeo),
-                new THREE.LineBasicMaterial({
-                    color: PALETTE.ice,
-                    transparent: true,
-                    opacity: 0.5,
-                }),
-            ),
-        )
-        ghost.visible = false
-        ghost.renderOrder = 2
-        this.group.add(ghost)
-        this.pageGhost = ghost
+        this.heapView.build()
 
         const kMat = new THREE.MeshStandardMaterial({
             color: 0xffffff,
@@ -708,7 +623,7 @@ export class RedisInstance {
         aux.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
         this.auxMesh = aux
 
-        i = 0
+        let i = 0
         for (let r = 0; r < KEYS.rows; r++) {
             for (let c = 0; c < KEYS.cols; c++) {
                 const page = this.heapPages[i % this.heapPages.length]
@@ -1359,48 +1274,6 @@ export class RedisInstance {
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
     }
 
-    private heapInfo() {
-        const pageCount = HEAP.cols * HEAP.rows
-        const hW = (HEAP.cols - 1) * CELL + HEAP_PAGE
-        const hD = (HEAP.rows - 1) * CELL + HEAP_PAGE
-        const box = new THREE.Box3().setFromCenterAndSize(
-            new THREE.Vector3(0, HEAP.y, HEAP.cz),
-            new THREE.Vector3(hW, Math.max(BLOCK.h, HEAP_PAGE) + 0.06, hD),
-        )
-        return {
-            key: 'redis-heap',
-            info: {
-                title: 'Memory — the heap, a volume of its own',
-                body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 KiB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MiB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
-                meta: `heap · ${pageCount} × 4 KiB · ${fmtBytes(pageCount * 4096)} arena · scattered pages · separate volume`,
-                stats: () => {
-                    const pageBytes = 4096
-                    const arena = pageCount * pageBytes
-                    const small = this.keys.filter((k) => k.live && !k.big)
-                    const smallBytes = small.reduce((n, k) => n + k.bytes, 0)
-                    const bigBytes = (Object.keys(this.bigKeys) as BigKind[]).reduce(
-                        (n, k) => n + (this.bigKeys[k]?.live ? BIG_REAL[k].mib * 1024 * 1024 : 0),
-                        0,
-                    )
-                    const inUse = this.heapMask
-                        ? this.heapMask.reduce((n, v) => n + (v ? 1 : 0), 0)
-                        : 0
-                    const pct = Math.round((inUse / pageCount) * 100)
-                    return [
-                        { label: 'pages', value: `${pageCount} × 4 KiB` },
-                        { label: 'arena', value: fmtBytes(arena) },
-                        { label: 'in use', value: `${inUse} · ${pct}%` },
-                        { label: 'free', value: `${pageCount - inUse} · ${100 - pct}%` },
-                        { label: 'dataset', value: fmtBytes(smallBytes) },
-                        { label: 'big values', value: `≈ ${fmtBytes(bigBytes)}` },
-                        { label: 'resident', value: `≈ ${fmtBytes(smallBytes + bigBytes)}` },
-                    ]
-                },
-            } as Info,
-            box: this.toWorld(box),
-        }
-    }
-
     private occupyHeapPage() {
         if (!this.heapMask) return
         const pageCount = HEAP.cols * HEAP.rows
@@ -1409,7 +1282,7 @@ export class RedisInstance {
         if (free.length === 0) return
         const page = free[randInt(0, free.length - 1)]
         this.heapMask[page] = 1
-        this.fadeHeapPage(page, true)
+        this.heapView.fade(page, true)
     }
 
     private releaseHeapPage() {
@@ -1420,52 +1293,7 @@ export class RedisInstance {
         if (used.length <= 1) return
         const page = used[randInt(0, used.length - 1)]
         this.heapMask[page] = 0
-        this.fadeHeapPage(page, false)
-    }
-
-    private fadeHeapPage(page: number, on: boolean) {
-        const row = Math.floor(page / HEAP.cols)
-        const col = page % HEAP.cols
-        const from = on ? 0.001 : 1
-        const to = on ? 1 : 0.001
-        const hex = on ? mixHex(0x06222c, PALETTE.cyan, 0.82) : mixHex(0x04141c, PALETTE.cyan, 0.07)
-        this.heapMesh.setColorAt(page, this.tmpColor.setHex(hex))
-        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        void this.ticker
-            .add(0.32, (k) => {
-                const s = from + (to - from) * Math.min(1, k)
-                this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
-                this.tmpObj.scale.setScalar(Math.max(0.001, s))
-                this.tmpObj.updateMatrix()
-                this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
-                this.heapMesh.instanceMatrix.needsUpdate = true
-            })
-            .then(() => this.paintHeap())
-    }
-    private heapPageInfo(hit: THREE.Intersection) {
-        if (hit.distance > BLOCK_PICK_RANGE) return this.heapInfo()
-        const pageCount = HEAP.cols * HEAP.rows
-        const id = this.instanceAt(hit, pageCount)
-        if (id === null) return null
-        const used = this.heapMask?.[id] === 1
-        const row = Math.floor(id / HEAP.cols)
-        const col = id % HEAP.cols
-        const box = new THREE.Box3().setFromCenterAndSize(
-            new THREE.Vector3(heapX(col), HEAP.y, heapZ(row)),
-            new THREE.Vector3(HEAP_PAGE, HEAP_PAGE, HEAP_PAGE),
-        )
-        const inUse = this.heapMask ? this.heapMask.reduce((n, v) => n + (v ? 1 : 0), 0) : 0
-        return {
-            key: `redis-heap-${id}`,
-            info: {
-                title: `heap page #${id} — ${used ? 'in use' : 'free'} · 4 KiB`,
-                body: used
-                    ? 'One 4 KiB page of the process heap, and it is allocated. The keys and values are allocated on pages like this one: the bucket array holds pointers, the dictEntry holds the key and value pointers, and the bytes at the end of those pointers live in memory of this kind. A page is the operating system unit; jemalloc hands out larger runs and carves them into size classes, so several small objects can share one page, and a large value is spread over many. Nothing about this page is a file and nothing about it is a cache: it is the dataset.'
-                    : 'One 4 KiB page of the process heap, and nothing is allocated on it. The arena includes it, but no object lives here — it is free space left where an allocation once was or has never been used. Nothing compacts it into the used region: the OS does not defragment RAM, and the allocator only reuses a page when the next allocation fits.',
-                meta: `heap page · 4 KiB · ${used ? 'allocated' : 'free'} · ${inUse}/${pageCount} pages in use`,
-            } as Info,
-            box: this.toWorld(box),
-        }
+        this.heapView.fade(page, false)
     }
 
     private keyInfo(i: number) {
@@ -1693,57 +1521,7 @@ export class RedisInstance {
     }
 
     focusPageAt(at: THREE.Vector3 | null) {
-        const page = at ? this.pageAtPoint(at) : null
-        if (page === this.ghostPage) return
-        if (this.ghostPage !== null) this.closeGhost()
-        this.ghostPage = page
-        this.applyGhost()
-    }
-
-    private pageAtPoint(at: THREE.Vector3): number | null {
-        if (Math.abs(at.y - HEAP.y) > HEAP_PAGE * 2) return null
-        const c = Math.round(at.x / CELL + (HEAP.cols - 1) / 2)
-        const r = Math.round((at.z - HEAP.cz) / CELL + (HEAP.rows - 1) / 2)
-        if (c < 0 || c >= HEAP.cols || r < 0 || r >= HEAP.rows) return null
-        const page = r * HEAP.cols + c
-        return this.heapMask?.[page] === 1 ? page : null
-    }
-
-    private closeGhost() {
-        const page = this.ghostPage
-        this.ghostPage = null
-        if (page === null) return
-        this.paintPage(page)
-        if (this.pageGhost) this.pageGhost.visible = false
-    }
-
-    private applyGhost() {
-        const page = this.ghostPage
-        if (page === null || !this.pageGhost) return
-        const col = page % HEAP.cols
-        const row = Math.floor(page / HEAP.cols)
-        const at = new THREE.Vector3(heapX(col), HEAP.y, heapZ(row))
-        this.pageGhost.position.copy(at)
-        this.pageGhost.visible = true
-        this.tmpObj.position.copy(at)
-        this.tmpObj.scale.setScalar(0.0001)
-        this.tmpObj.rotation.set(0, 0, 0)
-        this.tmpObj.updateMatrix()
-        this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
-        this.heapMesh.instanceMatrix.needsUpdate = true
-    }
-
-    private paintPage(page: number) {
-        if (!this.heapMesh) return
-        const col = page % HEAP.cols
-        const row = Math.floor(page / HEAP.cols)
-        const used = this.heapMask?.[page] === 1
-        this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
-        this.tmpObj.scale.setScalar(used ? 1 : 0.001)
-        this.tmpObj.rotation.set(0, 0, 0)
-        this.tmpObj.updateMatrix()
-        this.heapMesh.setMatrixAt(page, this.tmpObj.matrix)
-        this.heapMesh.instanceMatrix.needsUpdate = true
+        this.heapView.focus(at)
     }
 
     keyTop(key: RedisKey): THREE.Vector3 {
@@ -1988,30 +1766,12 @@ export class RedisInstance {
         this.rebuildPointerWeb()
     }
 
-    private tileBucket(half: 0 | 1, id: number): number {
-        return this.dict.bucketAtTile(half, id)
-    }
-
-    private usedBuckets(size: number): Set<number> {
-        return this.dict.used(this.keys, size)
-    }
-
     get hashSize() {
         return this.dict.size
     }
 
-    private dictStats() {
-        return this.dict.stats(this.keys)
-    }
-
     bucketTop(key: RedisKey): THREE.Vector3 {
-        const place = this.dict.placeOf(key.i)
-        const tile = this.dict.tile(place.half, place.bucket)
-        return new THREE.Vector3(
-            dictX(tile % DICT.cols),
-            DICT.y + 0.05,
-            dictZ(Math.floor(tile / DICT.cols)),
-        )
+        return this.dictView.bucketTop(key)
     }
 
     get rehashing() {
@@ -2019,56 +1779,7 @@ export class RedisInstance {
     }
 
     private paintDict() {
-        const d = this.dict
-        const N = DICT.cols * DICT.rows
-        const usedOld = this.usedBuckets(d.size)
-        const usedNew = d.size1 > 0 ? this.usedBuckets(d.size1) : null
-        const liveHalf = d.half
-        const otherHalf = (liveHalf === 0 ? 1 : 0) as 0 | 1
-        const empty = mixHex(0x0d3a48, PALETTE.cyan, 0.14)
-
-        for (let id = 0; id < N; id++) {
-            const bOld = this.tileBucket(liveHalf, id)
-            const bNew = this.tileBucket(otherHalf, id)
-            let live = false
-            let used = false
-            if (d.size1 > 0) {
-                if (bOld >= 0 && bOld < d.size && bOld >= d.idx) {
-                    live = true
-                    used = usedOld.has(bOld)
-                } else if (bNew >= 0 && bNew < d.idx) {
-                    live = true
-                    used = usedNew?.has(bNew) ?? false
-                }
-            } else if (bOld >= 0 && bOld < d.size) {
-                live = true
-                used = usedOld.has(bOld)
-            }
-
-            this.tmpObj.position.set(
-                dictX(id % DICT.cols),
-                DICT.y,
-                dictZ(Math.floor(id / DICT.cols)),
-            )
-            this.tmpObj.scale.setScalar(live ? 1 : 0.001)
-            this.tmpObj.updateMatrix()
-            this.dictMesh.setMatrixAt(id, this.tmpObj.matrix)
-            const hex = used
-                ? mixHex(0x0d3a48, PALETTE.cyan, 0.5 * (this.dictShade[id] ?? 0.4) + 0.25)
-                : empty
-            this.dictMesh.setColorAt(id, this.tmpColor.setHex(hex))
-        }
-        this.dictMesh.instanceMatrix.needsUpdate = true
-        if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
-
-        const text =
-            d.size1 > 0
-                ? `ht[0] ${d.size} → ht[1] ${d.size1} · ${d.idx}/${d.size}`
-                : `ht[0] ${d.size} buckets`
-        const el = this.dictTableLab?.element as HTMLElement | undefined
-        if (el && el.textContent !== text) el.textContent = text
-
-        this.rebuildPointerWeb()
+        this.dictView.paint()
     }
 
     private rebuildPointerWeb() {
@@ -2097,24 +1808,7 @@ export class RedisInstance {
     }
 
     private paintHeap() {
-        if (!this.heapMesh) return
-        const free = mixHex(0x04141c, PALETTE.cyan, 0.07)
-        const pageCount = HEAP.cols * HEAP.rows
-        const mask = this.heapMask
-        for (let id = 0; id < pageCount; id++) {
-            const row = Math.floor(id / HEAP.cols)
-            const col = id % HEAP.cols
-            const on = mask?.[id] === 1
-            this.tmpObj.position.set(heapX(col), HEAP.y, heapZ(row))
-            this.tmpObj.scale.setScalar(on ? 1 : 0.001)
-            this.tmpObj.updateMatrix()
-            this.heapMesh.setMatrixAt(id, this.tmpObj.matrix)
-            const hex = on ? mixHex(0x06222c, PALETTE.cyan, 0.82) : free
-            this.heapMesh.setColorAt(id, this.tmpColor.setHex(hex))
-        }
-        this.heapMesh.instanceMatrix.needsUpdate = true
-        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        this.applyGhost()
+        this.heapView.paint()
     }
 
     private maybeGrow() {
@@ -2133,36 +1827,11 @@ export class RedisInstance {
     }
 
     pulseBucket(key: RedisKey) {
-        const place = this.dict.placeOf(key.i)
-        const tile = this.dict.tile(place.half, place.bucket)
-        this.dictMesh.setColorAt(tile, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.4)))
-        if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
-        void this.ticker.add(PULSE_TIME, (k) => {
-            this.dictMesh.setColorAt(
-                tile,
-                this.tmpColor
-                    .setHex(pulseHex(PALETTE.ice, 0.4))
-                    .multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
-            )
-            if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
-        })
-        void this.ticker.wait(PULSE_TIME).then(() => this.paintDict())
+        this.dictView.pulse(key)
     }
 
     pulsePage(key: RedisKey) {
-        const page = key.page
-        this.heapMesh.setColorAt(page, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.5)))
-        if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        void this.ticker.add(PULSE_TIME, (k) => {
-            this.heapMesh.setColorAt(
-                page,
-                this.tmpColor
-                    .setHex(pulseHex(PALETTE.ice, 0.5))
-                    .multiplyScalar(1 + (PULSE_GAIN - 1) * (1 - k)),
-            )
-            if (this.heapMesh.instanceColor) this.heapMesh.instanceColor.needsUpdate = true
-        })
-        void this.ticker.wait(PULSE_TIME).then(() => this.paintHeap())
+        this.heapView.pulse(key.page)
     }
 
     flashKey(key: RedisKey, hex: number, dur = PULSE_TIME) {
