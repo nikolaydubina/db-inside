@@ -732,7 +732,18 @@ export class RedisSim {
                     // at the stop that reads the header — and it goes with the ride.
                     if (cmd.probe === 'object' && key && !key.big && !key.aux && legStop.stop === 'value') {
                         this.objectRead = true
-                        this.redis.rideObject(packet)
+                        // the layout that is true of this value, and the part the read has
+                        // just found. For an inline value that is the value itself — header
+                        // and bytes are one allocation, and the bytes are what was asked
+                        // for. For a raw one nothing lights yet: what the header holds is
+                        // an address, and the bytes are not on this page.
+                        this.redis.rideObject(packet, key.raw ? 'pointer' : 'inline')
+                        this.redis.lightObject(key.raw ? 'none' : 'payload')
+                    }
+                    // the pointer led somewhere: the bytes are on this page, and they are
+                    // what the read came for
+                    if (cmd.probe === 'object' && key?.raw && legStop.stop === 'hop') {
+                        this.redis.lightObject('payload')
                     }
                     // and the cursor moves inside it, one step per hop
                     if (key?.big && legStop.lit !== undefined) {
@@ -999,6 +1010,7 @@ export class RedisSim {
         // object it found on a page
         if (this.objectRead) {
             this.redis.rideObject(null)
+            this.redis.lightObject('none')
             this.objectRead = false
         }
         if (!this.carried) return

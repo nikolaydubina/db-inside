@@ -43,6 +43,18 @@ export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
  * shape is the real structure, the count is not.
  */
 export type BigKind = 'hash' | 'zset' | 'list'
+/**
+ * The value object's companion cage: air on every face, and how wide it is carried.
+ *
+ * OBJECT_PAD is the same on all six faces, so the dashed box hugs the blocks it holds
+ * — elongated in x, one block high in y, one block deep in z. OBJECT_ACROSS is
+ * deliberately under the two units every other companion spans: a hash's bucket array
+ * is dozens of cells, this is two blocks, and at the big structures' size it read as a
+ * crate on the packet's back.
+ */
+const OBJECT_PAD = 0.06
+const OBJECT_ACROSS = 1.0
+
 export const BIG_SPOT: Record<BigKind, THREE.Vector3> = {
     hash: new THREE.Vector3(-8.6, 3.4, -6.2),
     zset: new THREE.Vector3(0, 3.4, -6.2),
@@ -239,8 +251,15 @@ export class RedisInstance {
     private rawKey: RedisKey | null = null
     /** the value-object diagram, drawn only while a read holds it */
     private objectCage: THREE.Group | null = null
+    /** its two layouts — one per place a payload can be — drawn one at a time */
+    private objectRow: Record<'inline' | 'pointer', THREE.Group> | null = null
     /** the extent of the dashed cage it is carried in */
-    private objectArea: THREE.Box3 | null = null
+    private objectArea: Record<'inline' | 'pointer', THREE.Box3> | null = null
+    /** the dashed cage of each layout, drawn with the row it belongs to */
+    private objectOutline: Record<'inline' | 'pointer', THREE.Object3D | null> | null = null
+    /** the header and payload materials, so the read can light the part it reached */
+    private objectHeaderMat: THREE.MeshStandardMaterial | null = null
+    private objectPayloadMat: THREE.MeshStandardMaterial | null = null
     /** where it is built from, and the stop a read picks it up at */
     private objectHome = new THREE.Vector3()
     private objectStop = new THREE.Vector3()
@@ -1586,22 +1605,19 @@ export class RedisInstance {
         const headerGeo = new THREE.BoxGeometry(0.36, 0.24, 0.32)
         const payloadGeo = new THREE.BoxGeometry(0.3, 0.2, 0.26)
 
-        // Two rows — and they are ALTERNATIVES, not two halves of a diagram: a
-        // value's payload is either in the header's own allocation or behind a
-        // pointer, never both at once. So each row is a group of its own, and a read
-        // brings up the one it actually found: the inline row for an int or an embstr,
-        // the pointer row for a raw sds. Drawing both at once was a diagram of a
-        // possibility, and it made every value look like it was both things.
+        // The two layouts sit on the same spot and only one is drawn at a time: the
+        // payload is either in the header's own allocation or behind a pointer, never
+        // both, so the top row IS the value for an int or an embstr and the bottom row
+        // is the value for a raw sds.
         const rows: Record<'inline' | 'pointer', THREE.Group> = {
             inline: new THREE.Group(),
             pointer: new THREE.Group(),
         }
-        for (const [name, dy, inline] of [
-            ['inline', 0.24, true],
-            ['pointer', -0.26, false],
+        for (const [name, inline] of [
+            ['inline', true],
+            ['pointer', false],
         ] as const) {
             const row = rows[name]
-            row.position.set(0, dy, 0)
             cage.add(row)
             const header = new THREE.Mesh(headerGeo, headerMat)
             header.position.set(-0.66, 0, 0)
@@ -1626,26 +1642,29 @@ export class RedisInstance {
                 row.add(link)
             }
         }
-        // Two rows, stacked in HEIGHT rather than depth: seen from the front they are
-        // two lines of one diagram, and a header in one row cannot hide a header in the
-        // other. The top row is one allocation (header and payload touching), the bottom
-        // row is two, and the gap between its blocks is the hop. This is the whole shape
-        // of a value object — both cases at once, which is what makes it a concept
-        // rather than an anecdote — and it travels as one thing.
         this.objectCage = cage
-        // The companion CAGE — the same dashed box the big structures are carried in.
+        this.objectRow = rows
+        this.objectHeaderMat = headerMat
+        this.objectPayloadMat = payloadMat
+        // ONE DASHED CAGE PER LAYOUT, each hugging its own row.
         //
-        // One box for the whole diagram, wide enough for the pointer layout, because
-        // the two layouts are the same object: the dashed outline a reader sees is the
-        // same volume in both stories, and it is the thing that gets scaled and placed
-        // by the same numbers rideBig uses.
-        const area = new THREE.Box3().union(this.rowArea(rows.inline)).union(this.rowArea(rows.pointer))
-        const size = area.getSize(new THREE.Vector3())
-        const centre = area.getCenter(new THREE.Vector3())
-        const outline = new OutlineBox(size.x, size.y, size.z, PALETTE.ice, 0.26, { dashed: true })
-        outline.centre(centre.x, centre.y, centre.z)
-        cage.add(outline)
-        this.objectArea = area
+        // Not one box around both: the two layouts are drawn one at a time, so a box
+        // around their union has air in it where no blocks ever are — tall in y, and
+        // lumpy in x. A cage per layout hugs what is actually there: elongated in x,
+        // one block high in y, the block's depth in z, plus the same fixed pad on
+        // every face.
+        this.objectArea = { inline: new THREE.Box3(), pointer: new THREE.Box3() }
+        this.objectOutline = { inline: null, pointer: null }
+        for (const name of ['inline', 'pointer'] as const) {
+            const box = this.rowArea(rows[name]).expandByScalar(OBJECT_PAD)
+            this.objectArea[name] = box
+            const size = box.getSize(new THREE.Vector3())
+            const centre = box.getCenter(new THREE.Vector3())
+            const outline = new OutlineBox(size.x, size.y, size.z, PALETTE.ice, 0.26, { dashed: true })
+            outline.centre(centre.x, centre.y, centre.z)
+            cage.add(outline)
+            this.objectOutline[name] = outline
+        }
     }
 
     /** The box one row of the value-object diagram occupies, in cage units. */
@@ -1656,11 +1675,12 @@ export class RedisInstance {
             if (!m.isMesh) return
             m.geometry.computeBoundingBox()
             const b = m.geometry.boundingBox?.clone()
-            // the row's own offset is not part of the box: carry() centres the row
-            // over the marker, so only the blocks' spread matters
             if (b) area.union(b.translate(m.position))
         })
-        return area
+        // The row's OWN offset belongs to the box. Left out, the dashed cage came out
+        // one row high around two rows stacked 0.5 apart, and the blocks stuck out of
+        // the top and bottom of their own outline.
+        return area.translate(row.position)
     }
 
     /* ------------------------------ big values ------------------------------- */
@@ -2783,21 +2803,23 @@ export class RedisInstance {
     /**
      * Carry the value object with the read that found it, or put it away.
      *
-     * The same mechanism as rideBig, and for the same reason. Sixteen bytes inside a
-     * 4 kB block are not an exhibit on that block: they are what the read finds when
-     * it gets there, so the diagram comes up in its hands at the size the big
-     * structures are drawn at, and goes when the read goes. Standing over the heap for
-     * good, it was a floating cube and a tag over a page nobody was reading, and it
-     * made one block in the arena look like the special one.
-     *
-     * The drawing is the diagram as it always stood: both rows, inline above and
-     * pointer below, because that pair IS what a value object is — sixteen bytes of
-     * header and one of two places for the payload. Only the cage and the placing
-     * changed: it is carried like a hash's bucket array instead of standing on a page.
+     * `layout` is the half that is TRUE of this value: `inline` for an int or an
+     * embstr, where the bytes are in the header's own allocation, and `pointer` for a
+     * raw sds, where the header holds an address and the bytes are on another page.
+     * One row is drawn at a time, each with its own hugging cage.
      */
-    rideObject(packet: THREE.Object3D | null) {
+    rideObject(packet: THREE.Object3D | null, layout: 'inline' | 'pointer' = 'inline') {
         const g = this.objectCage
         if (!g) return
+        if (this.objectRow) {
+            this.objectRow.inline.visible = layout === 'inline'
+            this.objectRow.pointer.visible = layout === 'pointer'
+        }
+        if (this.objectOutline) {
+            const o = this.objectOutline
+            if (o.inline) o.inline.visible = layout === 'inline'
+            if (o.pointer) o.pointer.visible = layout === 'pointer'
+        }
         if (!packet) {
             this.group.add(g)
             g.position.copy(this.objectHome)
@@ -2806,13 +2828,27 @@ export class RedisInstance {
             return
         }
         g.visible = true
-        // EXACTLY what rideBig does with a hash, a zset or a list: the dashed cage's
-        // own box decides the scale, and the lift clears the marker by the same gap.
-        const area = this.objectArea
+        const area = this.objectArea?.[layout]
         const size = area?.getSize(new THREE.Vector3()) ?? null
         const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
-        const longest = size ? Math.max(size.x, size.y, size.z) : 2
-        this.carry(g, size, centre, packet, 2 / (longest || 1))
+        const longest = size ? Math.max(size.x, size.y, size.z) : 1
+        // OBJECT_ACROSS, not the big structures' two units: this one is two blocks, and
+        // at their size the read looked like it was carrying a crate.
+        this.carry(g, size, centre, packet, OBJECT_ACROSS / (longest || 1))
+    }
+
+    /**
+     * Light the part of the value object the read has just reached.
+     *
+     * A value read is a sequence of discoveries — here is the header, and here is
+     * where the bytes are — so the drawing says which one just happened. `header` for
+     * the sixteen bytes that carry the encoding, `payload` for the allocation the
+     * pointer led to, `none` while the read is still in the air or when the payload is
+     * not on this page at all.
+     */
+    lightObject(part: 'none' | 'header' | 'payload') {
+        if (this.objectHeaderMat) this.objectHeaderMat.emissiveIntensity = part === 'header' ? 2.6 : 0.16
+        if (this.objectPayloadMat) this.objectPayloadMat.emissiveIntensity = part === 'payload' ? 2.6 : 0.36
     }
 
     /**
