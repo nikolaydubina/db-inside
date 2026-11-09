@@ -223,7 +223,7 @@ export const VIEWS: ViewDef[] = [
         id: 'pages',
         label: 'pages',
         entity: 'page blocks',
-        hint: 'down at block level: individual 8 kB pages of a table run',
+        hint: 'down at block level: individual 8 KiB pages of a table run',
         pose: () => shot(L(pageX(24), 0.25, pageZ(14)), [1.6, 1.1, 2.4], 30, [0, 0.1, 0]),
     },
 ]

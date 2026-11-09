@@ -932,7 +932,7 @@ export class RedisSim {
 
         void this.redis.runRdbSave().then(() => {
             this.saving = false
-            this.note = `bgsave · dump.rdb written, ${this.rdbKb()} kB in ${this.redis.rdbBlocksUsed} blocks`
+            this.note = `bgsave · dump.rdb written, ${this.rdbKib()} KiB in ${this.redis.rdbBlocksUsed} blocks`
         })
     }
 
@@ -943,7 +943,7 @@ export class RedisSim {
         void this.redis.runRdbSave().then(() => {
             this.blocked = false
             this.lockedNote = null
-            this.note = `save · done, ${this.rdbKb()} kB; the queue drains again`
+            this.note = `save · done, ${this.rdbKib()} KiB; the queue drains again`
         })
     }
 
@@ -971,7 +971,7 @@ export class RedisSim {
         return this.reload(this.redis.dataset)
     }
 
-    private rdbKb() {
+    private rdbKib() {
         return (this.redis.rdbBytes / 1024).toFixed(1)
     }
 

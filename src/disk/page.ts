@@ -22,9 +22,9 @@ export class PageBlock {
     }
 }
 
-export const PAGE_8K = new PageBlock('8 kB page', 8192, 0.46, 0.23, 0.23)
+export const PAGE_8K = new PageBlock('8 KiB page', 8192, 0.46, 0.23, 0.23)
 
-export const PAGE_4K = new PageBlock('4 kB block', PAGE_8K.bytes / 2, 0.23, 0.23, 0.23)
+export const PAGE_4K = new PageBlock('4 KiB block', PAGE_8K.bytes / 2, 0.23, 0.23, 0.23)
 
 export const CELL_PITCH = 0.25
 

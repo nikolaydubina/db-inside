@@ -137,8 +137,8 @@ Things the scene does not show yet. The first block is already listed in the Sto
       `pg_statistic`/ANALYZE surface behind it.
 
 **Correctness / polish**
-- [ ] WAL story prose says "16 MB segment blocks" while the run is drawn as 12 blocks; the inspector
-      copy already states 16 MB per segment.
+- [ ] WAL story prose says "16 MiB segment blocks" while the run is drawn as 12 blocks; the inspector
+      copy already states 16 MiB per segment.
 - [ ] a few 3D labels still collide (`PARSER`).
 - [ ] this README predates story mode and the workload regimes.
 

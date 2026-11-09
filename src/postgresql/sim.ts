@@ -123,7 +123,7 @@ export class EngineSim {
     ambient = true
 
     regime: Regime = 'default'
-    note = 'shared_buffers · 8 kB pages'
+    note = 'shared_buffers · 8 KiB pages'
 
     private parked: { pod: BackendPod; packet: THREE.Group }[] = []
 

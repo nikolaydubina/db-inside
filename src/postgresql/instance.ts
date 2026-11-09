@@ -297,9 +297,9 @@ export class PostgresInstance {
         diskFloorPick.position.set(0, 0.15, DISK_FIELD.cz)
         this.group.add(diskFloorPick)
         this.register(diskFloorPick, {
-            title: 'Disk — a field of 8 kB pages',
-            body: 'Every block is one 8 kB page; brighter and taller means fuller. The grid under the blocks is the 4 kB filesystem cell — two cells make one page — so a page covers two squares and the address lattice stays the unit the OS allocates in. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
-            meta: 'disk · one block = 8 kB page · lived-in, not a grid of blanks',
+            title: 'Disk — a field of 8 KiB pages',
+            body: 'Every block is one 8 KiB page; brighter and taller means fuller. The grid under the blocks is the 4 KiB filesystem cell — two cells make one page — so a page covers two squares and the address lattice stays the unit the OS allocates in. Most of these pages belong to tables and indexes we do not draw — system catalogues, other tables — and each keeps its own slightly different shade. The three outlined runs are the tables we do label. The gaps are free space: no page there at all, just room the files can grow into. RAM only ever holds copies, so only copies float.',
+            meta: 'disk · one block = 8 KiB page · lived-in, not a grid of blanks',
             stats: () => this.pageStats(this.pages8k),
         })
 
@@ -394,8 +394,8 @@ export class PostgresInstance {
         this.group.add(pick)
         this.register(pick, {
             title: 'Shared buffers',
-            body: 'The page cache every backend shares. Each block is one buffer slot holding a full 8 kB page — identical to a page on disk. The slot is always 8 kB; what varies is how packed the page inside is, and that is what brightness and height show. Lifecycle: a miss picks a victim with the clock sweep (usage_count 0), writes it back if it is dirty, then reads the new page in. The slot itself never moves — only which page lives in it changes. Hue is state: cyan = cached and clean, amber = dirty (waiting to be written), green = just served a hit.',
-            meta: 'shared_buffers · RAM · 8 kB pages · clock sweep',
+            body: 'The page cache every backend shares. Each block is one buffer slot holding a full 8 KiB page — identical to a page on disk. The slot is always 8 KiB; what varies is how packed the page inside is, and that is what brightness and height show. Lifecycle: a miss picks a victim with the clock sweep (usage_count 0), writes it back if it is dirty, then reads the new page in. The slot itself never moves — only which page lives in it changes. Hue is state: cyan = cached and clean, amber = dirty (waiting to be written), green = just served a hit.',
+            meta: 'shared_buffers · RAM · 8 KiB pages · clock sweep',
             stats: () => {
                 const slots = this.pages.length
                 const total = slots * PAGE_BYTES
@@ -410,7 +410,7 @@ export class PostgresInstance {
                     if (p.dirty) dirty++
                 }
                 return [
-                    { label: 'slots', value: `${slots} × 8 kB` },
+                    { label: 'slots', value: `${slots} × 8 KiB` },
                     { label: 'total', value: fmtBytes(total) },
                     { label: 'occupied', value: `${occupied} slots · ${fmtBytes(used)}` },
                     { label: 'dirty', value: `${dirty} slots` },
@@ -538,14 +538,14 @@ export class PostgresInstance {
         wb.add(wbPick)
         this.register(wbPick, {
             title: 'wal_buffers — the not-yet-written tail of the log',
-            body: 'wal_buffers is a circular strip of 8 kB shared-memory pages that holds the newest WAL records. It is NOT a copy of heap pages: the records describe changes to pages, but the buffer holds the log stream itself. Anything here is not durable yet — it becomes durable when the WAL writer writes it to the segment blocks below and fsyncs. After that the memory is simply overwritten, so these cubes are a staging area, and the segment below is the lasting artefact.',
-            meta: 'wal_buffers · RAM · 8 kB pages · circular · flushed by WAL writer',
+            body: 'wal_buffers is a circular strip of 8 KiB shared-memory pages that holds the newest WAL records. It is NOT a copy of heap pages: the records describe changes to pages, but the buffer holds the log stream itself. Anything here is not durable yet — it becomes durable when the WAL writer writes it to the segment blocks below and fsyncs. After that the memory is simply overwritten, so these cubes are a staging area, and the segment below is the lasting artefact.',
+            meta: 'wal_buffers · RAM · 8 KiB pages · circular · flushed by WAL writer',
             stats: () => {
                 const cubes = this.walBufBlocks.length
                 const total = cubes * PAGE_BYTES
                 const fill = Math.max(0, Math.min(1, this.walBuffered))
                 return [
-                    { label: 'cubes', value: `${cubes} × 8 kB` },
+                    { label: 'cubes', value: `${cubes} × 8 KiB` },
                     { label: 'total', value: fmtBytes(total) },
                     {
                         label: 'occupied',
@@ -770,7 +770,7 @@ export class PostgresInstance {
         return {
             title: `${file} · system page`,
             body:
-                `${run.what} This particular block is one 8 kB page of ${file}. It is drawn grey because it is ` +
+                `${run.what} This particular block is one 8 KiB page of ${file}. It is drawn grey because it is ` +
                 `not user data: you cannot query it as a table, and VACUUM writes into it rather than reclaiming ` +
                 `it. In a real PGDATA these live in base/<dboid>/ next to the heap files, plus pg_xact for the ` +
                 `commit status — small, but every query touches them.`,
@@ -795,14 +795,14 @@ export class PostgresInstance {
         const owner = p.table
             ? `the heap file of TABLE: ${p.table}`
             : 'a relation the scene does not label'
-        const kB = (n: number) => (n / 1024).toFixed(1).replace(/\.0$/, '')
+        const KiB = (n: number) => (n / 1024).toFixed(1).replace(/\.0$/, '')
         const dead = p.dead
             ? ' It currently holds dead row versions — VACUUM will reclaim the space inside this page.'
             : ''
         return {
-            title: `Page ${p.i} · 8 kB contiguous`,
+            title: `Page ${p.i} · 8 KiB contiguous`,
             body:
-                `A block is one contiguous 8 kB stretch of a file — the smallest unit Postgres ever reads or ` +
+                `A block is one contiguous 8 KiB stretch of a file — the smallest unit Postgres ever reads or ` +
                 `writes, and the unit shared_buffers caches. It is not a row and not a table: rows are packed ` +
                 `into the front of it, left to right, and the free space left over sits in the middle. Reading ` +
                 `"one page" therefore means one 8192-byte request, never a partial read. This one belongs to ` +
@@ -810,7 +810,7 @@ export class PostgresInstance {
                 dead,
             meta:
                 `bytes ${start}–${end} · page ${p.i} of the file · ${packed}% packed` +
-                ` · ${kB(PAGE_BYTES)} KiB block${p.dead ? ' · dead tuples' : ''}`,
+                ` · ${KiB(PAGE_BYTES)} KiB block${p.dead ? ' · dead tuples' : ''}`,
         }
     }
 
@@ -940,11 +940,11 @@ export class PostgresInstance {
                 body:
                     'Not all of pgdata is your data. Inside this cage: the catalog relations every database carries ' +
                     'a copy of (what each table is, what columns it has, what depends on what), the free space and ' +
-                    'visibility maps that sit beside each relation, and the commit log. They are ordinary 8 kB pages ' +
+                    'visibility maps that sit beside each relation, and the commit log. They are ordinary 8 KiB pages ' +
                     'like everything else here — the same block size, the same buffer pool — they are just small, ' +
                     'because there are few of them: a fresh cluster holds the whole set in a few megabytes. Hover a ' +
                     'grey block to see which file it belongs to.',
-                meta: 'catalogs · free space map · visibility map · commit log · 8 kB pages',
+                meta: 'catalogs · free space map · visibility map · commit log · 8 KiB pages',
                 stats: () => this.pageStats(pages),
             },
             cage,
@@ -1002,7 +1002,7 @@ export class PostgresInstance {
         }
         const avgFill = occupiedPages > 0 ? occupiedBytes / (occupiedPages * PAGE_BYTES) : 0
         return [
-            { label: 'blocks', value: `${pages} × 8 kB` },
+            { label: 'blocks', value: `${pages} × 8 KiB` },
             { label: 'total', value: fmtBytes(total) },
             { label: 'occupied', value: `${occupiedPages} pages · ${fmtBytes(occupiedBytes)}` },
             { label: 'free slots', value: `${pages - occupiedPages} pages` },
@@ -1076,7 +1076,7 @@ export class PostgresInstance {
         freePick.userData.noOutline = true
         this.register(freePick, {
             title: 'Free space — room the files can grow into',
-            body: 'These slots hold no page at all. A table or index is a contiguous run of 8 kB pages, so when a relation runs out of pages it simply takes the next slots in its own file — this is where that growth comes from. Free space is not a fixed size and nothing owns it in advance: the files claim it as they fill. A table that was rewritten by VACUUM FULL gives slots back here.',
+            body: 'These slots hold no page at all. A table or index is a contiguous run of 8 KiB pages, so when a relation runs out of pages it simply takes the next slots in its own file — this is where that growth comes from. Free space is not a fixed size and nothing owns it in advance: the files claim it as they fill. A table that was rewritten by VACUUM FULL gives slots back here.',
             meta: 'unallocated · no page on disk · allocated on demand',
         })
     }
@@ -1164,7 +1164,7 @@ export class PostgresInstance {
             pick,
             {
                 title: 'B-tree index — the tree as it sits in RAM',
-                body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table. The dashed box is not a block of memory — the tree has no such footprint; it is the shape of the structure, drawn so you can follow a descent. The pages it lives in are 8 kB blocks on the plate, like every other page.',
+                body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table. The dashed box is not a block of memory — the tree has no such footprint; it is the shape of the structure, drawn so you can follow a descent. The pages it lives in are 8 KiB blocks on the plate, like every other page.',
                 meta: 'b-tree · 3 levels · key → TID · pages cached in RAM',
             },
             PALETTE.violet,
@@ -1232,7 +1232,7 @@ export class PostgresInstance {
             pick,
             {
                 title: 'GIN — Generalized Inverted Index',
-                body: 'Maps each element of a composite value — a jsonb key, an array element, a full-text lexeme — to a posting list of row TIDs. Fast for containment (`@>`, `?`, `@@`) and full-text search, expensive to update because one row can write many postings. Dashed, because this is the shape of the structure rather than a block of memory: the postings live in 8 kB pages on the plate.',
+                body: 'Maps each element of a composite value — a jsonb key, an array element, a full-text lexeme — to a posting list of row TIDs. Fast for containment (`@>`, `?`, `@@`) and full-text search, expensive to update because one row can write many postings. Dashed, because this is the shape of the structure rather than a block of memory: the postings live in 8 KiB pages on the plate.',
                 meta: 'gin · element → posting list · jsonb / arrays / tsvector',
             },
             PALETTE.magenta,
@@ -1392,7 +1392,7 @@ export class PostgresInstance {
             pick.userData.info = {
                 title: `Backend · connection ${i + 1}`,
                 body: 'One live client connection, handled by its own backend process, forked by the postmaster when the client connected. It parses, plans and executes its own queries in its own address space, then returns the result through this same slot. That is why the boxes above it are that backend\u2019s private memory and die with it, and why the bill is per connection: a few megabytes each, capped by max_connections. The redis cage next door serves the same kind of socket from one thread and a kernel fd set, which is the whole reason it can hold two orders of magnitude more of them.',
-                meta: 'process · ~5 MB private heap · MaxConnections 100',
+                meta: 'process · ~5 MiB private heap · MaxConnections 100',
             }
 
             this.group.add(g)
@@ -1423,7 +1423,7 @@ export class PostgresInstance {
             g.add(bufPick)
             this.register(bufPick, {
                 title: 'Backend input buffer',
-                body: 'Each backend reads its connection into a private buffer in its own process memory — 8 kB to start, grown as needed. This is per-process heap, not shared_buffers: no other backend can see it. The wire from the client comes down into the port, requests stack up above it, and the one at the bottom is what the backend is executing right now. Cyan is executing, violet is already received and waiting. A connection runs one statement at a time, in order — this is where pipelining waits.',
+                body: 'Each backend reads its connection into a private buffer in its own process memory — 8 KiB to start, grown as needed. This is per-process heap, not shared_buffers: no other backend can see it. The wire from the client comes down into the port, requests stack up above it, and the one at the bottom is what the backend is executing right now. Cyan is executing, violet is already received and waiting. A connection runs one statement at a time, in order — this is where pipelining waits.',
                 meta: 'per-connection RAM · private heap · pipelining waits here',
             })
 

@@ -49,7 +49,7 @@ export const SYSTEM_RUNS: {
         c1: 29,
         rows: [24, 27],
         files: ['pg_class', 'pg_attribute', 'pg_index', 'pg_type', 'pg_proc', 'pg_depend'],
-        what: 'The catalog relations every database carries a copy of: what each table is, which columns it has, which indexes exist, and what depends on what. Same 8 kB page as a heap — they are small because there are few of them, not because the pages are smaller: a fresh cluster keeps the whole set in a few megabytes. Queries read them too — the planner asks pg_class and pg_statistic what it is planning over.',
+        what: 'The catalog relations every database carries a copy of: what each table is, which columns it has, which indexes exist, and what depends on what. Same 8 KiB page as a heap — they are small because there are few of them, not because the pages are smaller: a fresh cluster keeps the whole set in a few megabytes. Queries read them too — the planner asks pg_class and pg_statistic what it is planning over.',
     },
     {
         area: 'fork',
@@ -58,7 +58,7 @@ export const SYSTEM_RUNS: {
         c1: 31,
         rows: [24, 27],
         files: ['_fsm', '_vm'],
-        what: 'Two thin side files per relation, in 8 kB pages like everything else. One byte of free space map per heap page covers 64 MB of relation; two bits of visibility map per page cover 256 MB. The free space map says which pages have room for a new tuple, so an insert need not read every page; the visibility map says which pages are all-visible, which is what lets VACUUM and index-only scans skip work.',
+        what: 'Two thin side files per relation, in 8 KiB pages like everything else. One byte of free space map per heap page covers 64 MiB of relation; two bits of visibility map per page cover 256 MiB. The free space map says which pages have room for a new tuple, so an insert need not read every page; the visibility map says which pages are all-visible, which is what lets VACUUM and index-only scans skip work.',
     },
     {
         area: 'clog',
@@ -67,7 +67,7 @@ export const SYSTEM_RUNS: {
         c1: 33,
         rows: [24, 27],
         files: ['pg_xact', 'pg_multixact'],
-        what: 'Two bits per transaction, and nothing else: committed, aborted, in progress, or not yet assigned. One 8 kB page therefore covers 32,768 transactions, which is why the commit log stays tiny even on a busy server. Every visibility check starts here.',
+        what: 'Two bits per transaction, and nothing else: committed, aborted, in progress, or not yet assigned. One 8 KiB page therefore covers 32,768 transactions, which is why the commit log stays tiny even on a busy server. Every visibility check starts here.',
     },
 ]
 
@@ -130,8 +130,8 @@ export const TABLE_REGIONS: TableRegion[] = [
         r1: 21,
         color: PALETTE.teal,
         info: {
-            title: 'TABLE: users — contiguous 8 kB pages',
-            body: "A table is not a separate kind of object: it is a named, contiguous run of 8 kB pages, and this outline is all that 'table' means at the storage layer. Rows live inside those pages. Page height is how full the page is: INSERTs fill a page up and allocate a new one from the run when it is full, DELETEs drain it. Dead row versions collect inside the page until VACUUM reclaims that space — the page itself stays in the file either way.",
+            title: 'TABLE: users — contiguous 8 KiB pages',
+            body: "A table is not a separate kind of object: it is a named, contiguous run of 8 KiB pages, and this outline is all that 'table' means at the storage layer. Rows live inside those pages. Page height is how full the page is: INSERTs fill a page up and allocate a new one from the run when it is full, DELETEs drain it. Dead row versions collect inside the page until VACUUM reclaims that space — the page itself stays in the file either way.",
             meta: 'demo table · 160 pages · heap file on disk',
         },
     },

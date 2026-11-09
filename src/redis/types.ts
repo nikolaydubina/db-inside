@@ -18,10 +18,10 @@ import {
 
 export type KeyKind = 'string' | 'list' | 'hash' | 'set' | 'zset'
 
-export const BIG_REAL: Record<BigKind, { entries: number; mb: number; unit: string }> = {
-    hash: { entries: 5_300_000, mb: 412, unit: 'fields' },
-    zset: { entries: 1_400_000, mb: 168, unit: 'members' },
-    list: { entries: 2_100_000, mb: 96, unit: 'elements' },
+export const BIG_REAL: Record<BigKind, { entries: number; mib: number; unit: string }> = {
+    hash: { entries: 5_300_000, mib: 393, unit: 'fields' },
+    zset: { entries: 1_400_000, mib: 160, unit: 'members' },
+    list: { entries: 2_100_000, mib: 92, unit: 'elements' },
 }
 
 export interface RedisKey {
@@ -65,8 +65,8 @@ export function encodingOf(key: RedisKey): string {
             return key.big
                 ? 'quicklist · listpacks'
                 : key.aux
-                    ? 'quicklist · 2 nodes'
-                    : 'quicklist · 1 node'
+                  ? 'quicklist · 2 nodes'
+                  : 'quicklist · 1 node'
     }
 }
 

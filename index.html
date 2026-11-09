@@ -110,7 +110,7 @@
                     <h2>PostgreSQL</h2>
                     <ul>
                         <li>the pipeline: parser and rewriter → planner → executor</li>
-                        <li>shared buffers: 8 kB pages in RAM, clock sweep, dirty pages</li>
+                        <li>shared buffers: 8 KiB pages in RAM, clock sweep, dirty pages</li>
                         <li>the WAL run on disk, and wal_buffers above it waiting for fsync</li>
                         <li>
                             a B-tree, a BRIN, a GIN and a hash index, drawn where they sit in RAM
@@ -228,7 +228,7 @@
                         </div>
                     </dl>
                     <div class="bar"><i id="st-bar"></i></div>
-                    <p class="hint" id="st-note">shared_buffers · 8 kB pages</p>
+                    <p class="hint" id="st-note">shared_buffers · 8 KiB pages</p>
                     <h3 class="sub-head">Processes</h3>
                     <ul class="procs" id="procs"></ul>
 

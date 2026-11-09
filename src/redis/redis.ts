@@ -9,6 +9,7 @@ import type { Info } from '../postgresql/instance'
 import { BigValues, BIG_SPOT } from './values'
 import type { BigKind } from './values'
 import { verifyDisk } from './verify'
+import { DictTable } from './dict'
 import { auxBlocks, encodingOf, mixHex, rebaseAnchors } from './types'
 import { BIG_REAL, REDIS_ANCHOR } from './types'
 import type { KeyKind, RedisKey, RedisPort } from './types'
@@ -64,8 +65,6 @@ import {
     DISK_LABEL_PAD,
     EPOLL,
     FLOOR_LABEL_Y,
-    HASH_MAX,
-    HASH_SIZES,
     HEAP,
     HEAP_OCCUPANCY,
     HEAP_PAGE,
@@ -154,13 +153,7 @@ export class RedisInstance {
 
     private diskBoost = new Map<number, { v: number; hex: number }>()
 
-    private htSize = 32
-
-    private ht1Size = 0
-
-    private rehashIdx = -1
-
-    private htHalf: 0 | 1 = 0
+    private readonly dict = new DictTable()
 
     private dictShade: number[] = []
     private dictTableLab!: CSS2DObject
@@ -337,7 +330,7 @@ export class RedisInstance {
                 const name = (obj.userData.info as Info | undefined)?.title ?? 'unnamed pick'
                 throw new Error(
                     `[redis] pick and its cage disagree by ${d.toFixed(3)} — ${name}. ` +
-                    'Build both with frame(): one centre, one size.',
+                        'Build both with frame(): one centre, one size.',
                 )
             }
         }
@@ -362,7 +355,7 @@ export class RedisInstance {
             SHELL.h - inset - ink.y1,
             SHELL.d / 2 - inset + ink.x0,
         )
-            ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
+        ;(sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
         this.group.add(sticker)
 
         this.motes = dustField(SHELL.w, SHELL.h, SHELL.d)
@@ -468,14 +461,14 @@ export class RedisInstance {
             aofPick,
             {
                 title: 'Append-Only File (AOF)',
-                body: 'This is a log of commands, not a copy of the data: every write appends its bytes after the last byte of the file, so the only unit here is the 4 kB block a filesystem stores it in. The file therefore GROWS — the blocks in front of the head are empty floor it takes as it needs them, and it keeps taking them for as long as writes arrive. It never wraps and never drops: wrapping over old data is what the WAL does next door, with a checkpoint deciding when a segment is free, and there is no such decision here. The only thing that makes this file shorter is a rewrite, which writes a new file containing the minimum commands that reproduce the current dataset and swaps it in. If nothing rewrites it and the floor fills, the disk is full and the appends start failing: redis then rejects the writes and keeps serving reads — the opposite of throwing bytes away quietly.',
+                body: 'This is a log of commands, not a copy of the data: every write appends its bytes after the last byte of the file, so the only unit here is the 4 KiB block a filesystem stores it in. The file therefore GROWS — the blocks in front of the head are empty floor it takes as it needs them, and it keeps taking them for as long as writes arrive. It never wraps and never drops: wrapping over old data is what the WAL does next door, with a checkpoint deciding when a segment is free, and there is no such decision here. The only thing that makes this file shorter is a rewrite, which writes a new file containing the minimum commands that reproduce the current dataset and swaps it in. If nothing rewrites it and the floor fills, the disk is full and the appends start failing: redis then rejects the writes and keeps serving reads — the opposite of throwing bytes away quietly.',
                 meta: 'appendonlydir · one growing file · shortened only by bgrewriteaof',
                 stats: () => {
                     const blocks = this.aofUsed
                     const total = blocks * BLOCK_BYTES
                     const fill = total > 0 ? Math.min(1, this.aofBytes / total) : 0
                     return [
-                        { label: 'blocks', value: `${blocks} × 4 kB` },
+                        { label: 'blocks', value: `${blocks} × 4 KiB` },
                         { label: 'total', value: fmtBytes(total) },
                         { label: 'file length', value: fmtBytes(this.aofBytes) },
                         { label: 'filled', value: `${Math.round(fill * 100)}%` },
@@ -518,7 +511,7 @@ export class RedisInstance {
             rdbPick,
             {
                 title: 'RDB — the base file',
-                body: 'This is a dump, not a log: the keyspace is walked once and every key and value is written out as it stands, so loading it rebuilds the data structures rather than replaying commands. That is why it loads fast, why it only knows about the instant it was taken, and why everything after it comes from the AOF. It is written by the forked child (bgsave) and read back at start-up before the log is replayed on top. Its blocks are the same 4 kB the filesystem always hands out, packed tight with no gaps — the file is written fresh every time, so unlike a table file it has no holes to defragment. What varies is its length: that is the size of your data. Writes cost memory, not time: the child needs a copy-on-write view of the whole dataset, so a big instance briefly needs close to twice its size to save.',
+                body: 'This is a dump, not a log: the keyspace is walked once and every key and value is written out as it stands, so loading it rebuilds the data structures rather than replaying commands. That is why it loads fast, why it only knows about the instant it was taken, and why everything after it comes from the AOF. It is written by the forked child (bgsave) and read back at start-up before the log is replayed on top. Its blocks are the same 4 KiB the filesystem always hands out, packed tight with no gaps — the file is written fresh every time, so unlike a table file it has no holes to defragment. What varies is its length: that is the size of your data. Writes cost memory, not time: the child needs a copy-on-write view of the whole dataset, so a big instance briefly needs close to twice its size to save.',
                 meta: 'dump.rdb · state, not history · written by bgsave, read on start',
                 stats: () => {
                     const blocks = this.rdbLen
@@ -526,7 +519,7 @@ export class RedisInstance {
                     const fill = total > 0 ? Math.min(1, this.rdbBytes / total) : 0
                     const keys = this.rdbBlocks.slice(0, blocks).reduce((n, b) => n + b.length, 0)
                     return [
-                        { label: 'blocks', value: `${blocks} × 4 kB` },
+                        { label: 'blocks', value: `${blocks} × 4 KiB` },
                         { label: 'total', value: fmtBytes(total) },
                         { label: 'file length', value: fmtBytes(this.rdbBytes) },
                         { label: 'filled', value: `${Math.round(fill * 100)}%` },
@@ -576,7 +569,7 @@ export class RedisInstance {
 
         this.register(platePick, {
             title: 'Disk — persistence only',
-            body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 kB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
+            body: 'The dataset is not on this floor. Two files are: the incremental AOF at the front edge, where every write command is appended, and the base RDB dump on the left — a compact copy produced by forking the server. Everything else is free space the files could grow into. Kill the process and whatever is only in RAM is gone; these two files are what comes back. A block here is all-or-nothing: a filesystem gives out 4 KiB at a time, so if a block is in the file at all it is a full block, and it is drawn at the bright end of the scale. The only exception is the last block of a file, which holds whatever the length left over — that one is shorter and dimmer, and that is the only place where "how full" varies.',
             meta: 'appendonlydir · base rdb + incr aof · the rest is unused',
             stats: () => {
                 const cells = COLS * ROWS
@@ -584,7 +577,7 @@ export class RedisInstance {
                 const usedCells = this.aofUsed + this.rdbLen
                 const usedBytes = this.aofBytes + this.rdbBytes
                 return [
-                    { label: 'cells', value: `${cells} × 4 kB` },
+                    { label: 'cells', value: `${cells} × 4 KiB` },
                     { label: 'total', value: fmtBytes(total) },
                     { label: 'files', value: `${usedCells} cells · ${fmtBytes(usedBytes)}` },
                     { label: 'free', value: fmtBytes(Math.max(0, total - usedBytes)) },
@@ -631,7 +624,7 @@ export class RedisInstance {
         this.group.add(dictPick)
         this.register(dictPick, {
             title: 'Hash table — the bucket array, and the rehash',
-            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap — one contiguous allocation of pointers, and each of those pointers leads to a key entry floating in the plane above. A bucket is one pointer — 8 B on a 64-bit build — so the array costs capacity × 8 B; the keys and their dictEntry chains are the separate allocations above. Measured against the data this is nothing: the whole array is 1 kB, so the 412 MB hash at the back of the cage is about 420,000 arrays of this size. Each tile here is a bucket and nothing else, and the faint line leaving it is the pointer — the bytes are always at the far end. The two 16×8 halves are the two tables: 32 buckets is 16×2, 64 is 16×4, 128 is 16×8. There is no index to choose and no planner to consult — the data structure is the query plan. It also GROWS: when the entries outnumber the buckets, redis allocates a second table at twice the size and migrates buckets into it one at a time — the tiles vanishing on one half and lighting up on the other. Both tables are live meanwhile, and every lookup checks both, which is why the growth is incremental: a stop-the-world rehash of a million keys would be a latency spike, and a billion-key one would be a stall you could not hide. The two halves during a rehash are literal: there really are two tables allocated at once.',
+            body: 'The dictionary is what makes Redis O(1): hash the key, land on a bucket, follow its chain. This plane is the bucket array itself, sitting in the process heap — one contiguous allocation of pointers, and each of those pointers leads to a key entry floating in the plane above. A bucket is one pointer — 8 B on a 64-bit build — so the array costs capacity × 8 B; the keys and their dictEntry chains are the separate allocations above. Measured against the data this is nothing: the whole array is 1 KiB, so the 412 MiB hash at the back of the cage is about 420,000 arrays of this size. Each tile here is a bucket and nothing else, and the faint line leaving it is the pointer — the bytes are always at the far end. The two 16×8 halves are the two tables: 32 buckets is 16×2, 64 is 16×4, 128 is 16×8. There is no index to choose and no planner to consult — the data structure is the query plan. It also GROWS: when the entries outnumber the buckets, redis allocates a second table at twice the size and migrates buckets into it one at a time — the tiles vanishing on one half and lighting up on the other. Both tables are live meanwhile, and every lookup checks both, which is why the growth is incremental: a stop-the-world rehash of a million keys would be a latency spike, and a billion-key one would be a stall you could not hide. The two halves during a rehash are literal: there really are two tables allocated at once.',
             meta: 'dict · ht_table[2] · 8 B per bucket · incremental rehash',
             stats: () => this.dictStats(),
         })
@@ -741,8 +734,8 @@ export class RedisInstance {
                     kind === 'string'
                         ? 0
                         : near
-                            ? Math.max(1, limit - randInt(1, 4))
-                            : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
+                          ? Math.max(1, limit - randInt(1, 4))
+                          : Math.max(1, Math.round(limit * rand(0.3, 1.25)))
                 const key: RedisKey = {
                     i,
                     page,
@@ -871,7 +864,7 @@ export class RedisInstance {
                 const total = AOF_BUF_CELLS * BLOCK_BYTES
                 const fill = Math.max(0, Math.min(1, this.aofBuffered))
                 return [
-                    { label: 'cubes', value: `${AOF_BUF_CELLS} × 4 kB` },
+                    { label: 'cubes', value: `${AOF_BUF_CELLS} × 4 KiB` },
                     { label: 'total', value: fmtBytes(total) },
                     {
                         label: 'occupied',
@@ -925,7 +918,7 @@ export class RedisInstance {
             this.register(pick, {
                 title: `Connection ${n + 1} — a socket on one thread`,
                 body: 'A connection is a file descriptor, not a process. Every connected client registers one entry in the readiness set just below and lands in the same command queue, and the commands are executed one at a time by the same thread. There is no per-connection stack and no per-connection heap worth speaking of — a client struct, a querybuf, a reply buffer, on the order of tens of kilobytes — so the limit here is fds (maxclients, 10000 by default), not processes. Compare the postgres cage next door, where the same socket is a forked process with megabytes of its own address space: 100 connections there, 10000 here, and the difference is exactly that. A violet socket is in subscriber mode instead: while it holds a subscription it may only SUBSCRIBE, UNSUBSCRIBE and PING, so it is never handed an ordinary command — published messages are copied into it and forgotten by the server.',
-                meta: 'fd · ~30 kB · maxclients 10000 · shares the single thread',
+                meta: 'fd · ~30 KiB · maxclients 10000 · shares the single thread',
             })
 
             this.group.add(g)
@@ -1343,18 +1336,18 @@ export class RedisInstance {
         )
         const info: Info = onAof
             ? {
-                title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
-                body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
-                meta: 'appendonly.aof · replayed in order on start',
-            }
+                  title: `AOF — record ${(aofSeq ?? 0) + 1} of ${this.aofUsed}`,
+                  body: 'One command, appended in order after the last byte of the file. Replay is re-execution: start from the base file and run every record after it, and you are back where the server was. That is why AOF is safe but slow to load, and why records must be deterministic — a command that depends on the clock or on random data is rewritten before it is logged. The file only ever gets longer; a record is never overwritten and never reused.',
+                  meta: 'appendonly.aof · replayed in order on start',
+              }
             : {
-                title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
-                body:
-                    'One 4 kB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' +
-                    `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` +
-                    'The block size never varies, only how much of the file is used.',
-                meta: 'dump.rdb · state, not history · loaded on start',
-            }
+                  title: `RDB — block ${(rdbSeq ?? 0) + 1} of ${this.rdbLen}`,
+                  body:
+                      'One 4 KiB block of the dump — a binary serialisation of the keyspace, written in one pass with no padding, so every block but the last is completely full. Because values differ in size, the number of keys that end up in a block does not: this one holds ' +
+                      `${this.rdbBlocks[rdbSeq ?? 0]?.length ?? 0}. ` +
+                      'The block size never varies, only how much of the file is used.',
+                  meta: 'dump.rdb · state, not history · loaded on start',
+              }
         return { key: `redis-disk-${i}`, info, box: this.toWorld(box) }
     }
 
@@ -1370,15 +1363,15 @@ export class RedisInstance {
             key: 'redis-heap',
             info: {
                 title: 'Memory — the heap, a volume of its own',
-                body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 kB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
-                meta: `heap · ${pageCount} × 4 kB · ${fmtBytes(pageCount * 4096)} arena · scattered pages · separate volume`,
+                body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 KiB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MiB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
+                meta: `heap · ${pageCount} × 4 KiB · ${fmtBytes(pageCount * 4096)} arena · scattered pages · separate volume`,
                 stats: () => {
                     const pageBytes = 4096
                     const arena = pageCount * pageBytes
                     const small = this.keys.filter((k) => k.live && !k.big)
                     const smallBytes = small.reduce((n, k) => n + k.bytes, 0)
                     const bigBytes = (Object.keys(this.bigKeys) as BigKind[]).reduce(
-                        (n, k) => n + (this.bigKeys[k]?.live ? BIG_REAL[k].mb * 1024 * 1024 : 0),
+                        (n, k) => n + (this.bigKeys[k]?.live ? BIG_REAL[k].mib * 1024 * 1024 : 0),
                         0,
                     )
                     const inUse = this.heapMask
@@ -1386,7 +1379,7 @@ export class RedisInstance {
                         : 0
                     const pct = Math.round((inUse / pageCount) * 100)
                     return [
-                        { label: 'pages', value: `${pageCount} × 4 kB` },
+                        { label: 'pages', value: `${pageCount} × 4 KiB` },
                         { label: 'arena', value: fmtBytes(arena) },
                         { label: 'in use', value: `${inUse} · ${pct}%` },
                         { label: 'free', value: `${pageCount - inUse} · ${100 - pct}%` },
@@ -1457,11 +1450,11 @@ export class RedisInstance {
         return {
             key: `redis-heap-${id}`,
             info: {
-                title: `heap page #${id} — ${used ? 'in use' : 'free'} · 4 kB`,
+                title: `heap page #${id} — ${used ? 'in use' : 'free'} · 4 KiB`,
                 body: used
-                    ? 'One 4 kB page of the process heap, and it is allocated. The keys and values are allocated on pages like this one: the bucket array holds pointers, the dictEntry holds the key and value pointers, and the bytes at the end of those pointers live in memory of this kind. A page is the operating system unit; jemalloc hands out larger runs and carves them into size classes, so several small objects can share one page, and a large value is spread over many. Nothing about this page is a file and nothing about it is a cache: it is the dataset.'
-                    : 'One 4 kB page of the process heap, and nothing is allocated on it. The arena includes it, but no object lives here — it is free space left where an allocation once was or has never been used. Nothing compacts it into the used region: the OS does not defragment RAM, and the allocator only reuses a page when the next allocation fits.',
-                meta: `heap page · 4 kB · ${used ? 'allocated' : 'free'} · ${inUse}/${pageCount} pages in use`,
+                    ? 'One 4 KiB page of the process heap, and it is allocated. The keys and values are allocated on pages like this one: the bucket array holds pointers, the dictEntry holds the key and value pointers, and the bytes at the end of those pointers live in memory of this kind. A page is the operating system unit; jemalloc hands out larger runs and carves them into size classes, so several small objects can share one page, and a large value is spread over many. Nothing about this page is a file and nothing about it is a cache: it is the dataset.'
+                    : 'One 4 KiB page of the process heap, and nothing is allocated on it. The arena includes it, but no object lives here — it is free space left where an allocation once was or has never been used. Nothing compacts it into the used region: the OS does not defragment RAM, and the allocator only reuses a page when the next allocation fits.',
+                meta: `heap page · 4 KiB · ${used ? 'allocated' : 'free'} · ${inUse}/${pageCount} pages in use`,
             } as Info,
             box: this.toWorld(box),
         }
@@ -1489,14 +1482,14 @@ export class RedisInstance {
                     (isString
                         ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
                         : key.aux
-                            ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
+                          ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
                             (key.kind === 'zset'
                                 ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
                                 : key.kind === 'list'
-                                    ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
-                                    : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
+                                  ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
+                                  : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
                             ' It never converts back: the bigger encoding is kept until the key is deleted.'
-                            : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${key.kind} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
                 meta: isString
                     ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
@@ -1516,19 +1509,19 @@ export class RedisInstance {
         const shape: Record<BigKind, { label: string; value: string }[]> = {
             hash: [
                 { label: 'buckets', value: '8,388,608 × 8 B' },
-                { label: 'bucket array', value: '64 MB · contiguous' },
+                { label: 'bucket array', value: '64 MiB · contiguous' },
                 { label: 'per field', value: '24 B entry + 2 SDS' },
                 { label: 'allocations', value: '≈ 15.9 M · scattered' },
             ],
             zset: [
                 { label: 'dict buckets', value: '2,097,152 × 8 B' },
-                { label: 'dict array', value: '16 MB · contiguous' },
+                { label: 'dict array', value: '16 MiB · contiguous' },
                 { label: 'skiplist', value: '1.4 M nodes · avg 1.33 levels' },
                 { label: 'allocations', value: '≈ 4.2 M · scattered' },
             ],
             list: [
                 { label: 'nodes', value: '≈ 16,384 listpacks' },
-                { label: 'node', value: '≤ 8 kB · contiguous' },
+                { label: 'node', value: '≤ 8 KiB · contiguous' },
                 { label: 'layout', value: 'doubly linked chain' },
                 { label: 'allocations', value: '≈ 16 k · not one buffer' },
             ],
@@ -1538,7 +1531,7 @@ export class RedisInstance {
             info: {
                 title: `key #${key.i} — ${kind} · ${encodingOf(key)} · a big value`,
                 body: body[kind],
-                meta: `1 key · ${real.entries.toLocaleString('en-US')} ${real.unit} · ~${real.mb} MB · drawn as a slice`,
+                meta: `1 key · ${real.entries.toLocaleString('en-US')} ${real.unit} · ~${real.mib} MiB · drawn as a slice`,
                 stats: () => shape[kind],
             } as Info,
             box: this.toWorld(this.bigBox(kind)),
@@ -1986,91 +1979,25 @@ export class RedisInstance {
         this.rebuildPointerWeb()
     }
 
-    private bucketOf(i: number, size: number): number {
-        return ((i * 2654435761) >>> 0) % size
-    }
-
-    private bucketTile(half: 0 | 1, bucket: number): number {
-        const row = Math.floor(bucket / DICT.tableCols)
-        const col = half * DICT.tableCols + (bucket % DICT.tableCols)
-        return row * DICT.cols + col
-    }
-
     private tileBucket(half: 0 | 1, id: number): number {
-        const row = Math.floor(id / DICT.cols)
-        const col = id % DICT.cols
-        const tileHalf: 0 | 1 = col < DICT.tableCols ? 0 : 1
-        if (tileHalf !== half) return -1
-        return row * DICT.tableCols + (col % DICT.tableCols)
+        return this.dict.bucketAtTile(half, id)
     }
 
     private usedBuckets(size: number): Set<number> {
-        const s = new Set<number>()
-        for (const k of this.keys) if (k.live) s.add(this.bucketOf(k.i, size))
-        return s
+        return this.dict.used(this.keys, size)
     }
 
     get hashSize() {
-        return this.htSize
+        return this.dict.size
     }
 
     private dictStats() {
-        const oldSize = this.htSize
-        const newSize = this.ht1Size
-        const rehashing = newSize > 0 && this.rehashIdx >= 0
-        const oldBuckets = new Set<number>()
-        const newBuckets = new Set<number>()
-        let oldKeys = 0
-        let newKeys = 0
-        for (const k of this.keys) {
-            if (!k.live) continue
-            const bOld = this.bucketOf(k.i, oldSize)
-            if (!rehashing || bOld >= this.rehashIdx) {
-                oldBuckets.add(bOld)
-                oldKeys++
-            }
-            if (rehashing) {
-                const bNew = this.bucketOf(k.i, newSize)
-                if (bNew < this.rehashIdx) {
-                    newBuckets.add(bNew)
-                    newKeys++
-                }
-            }
-        }
-        const used = oldBuckets.size + newBuckets.size
-        const buckets = oldSize + (rehashing ? newSize : 0)
-        const entries = oldKeys + newKeys
-        const fill = buckets > 0 ? used / buckets : 0
-        const load = buckets > 0 ? entries / buckets : 0
-        const slot = 8
-        return [
-            { label: 'bucket', value: '8 B · one pointer' },
-            { label: 'buckets', value: rehashing ? `${oldSize} + ${newSize}` : String(oldSize) },
-            { label: 'array', value: fmtBytes(buckets * slot) },
-            { label: 'peak array', value: fmtBytes((HASH_MAX + HASH_MAX / 2) * slot) },
-            { label: 'per entry', value: '24 B + key + value' },
-            {
-                label: 'scale',
-                value: `1 MB = ${Math.round((1024 * 1024) / (buckets * slot)).toLocaleString('en-US')} × array`,
-            },
-            { label: 'used', value: `${used} / ${buckets} · ${Math.round(fill * 100)}%` },
-            { label: 'load factor', value: load.toFixed(2) },
-            { label: 'keys', value: String(entries) },
-            { label: 'chains', value: String(Math.max(0, entries - used)) },
-        ]
+        return this.dict.stats(this.keys)
     }
 
     bucketTop(key: RedisKey): THREE.Vector3 {
-        let half = this.htHalf
-        let bucket = this.bucketOf(key.i, this.htSize)
-        if (this.rehashIdx >= 0) {
-            const moved = this.bucketOf(key.i, this.ht1Size)
-            if (moved < this.rehashIdx) {
-                half = this.htHalf === 0 ? 1 : 0
-                bucket = moved
-            }
-        }
-        const tile = this.bucketTile(half, bucket)
+        const place = this.dict.placeOf(key.i)
+        const tile = this.dict.tile(place.half, place.bucket)
         return new THREE.Vector3(
             dictX(tile % DICT.cols),
             DICT.y + 0.05,
@@ -2079,14 +2006,15 @@ export class RedisInstance {
     }
 
     get rehashing() {
-        return this.rehashIdx >= 0
+        return this.dict.rehashing
     }
 
     private paintDict() {
+        const d = this.dict
         const N = DICT.cols * DICT.rows
-        const usedOld = this.usedBuckets(this.htSize)
-        const usedNew = this.ht1Size > 0 ? this.usedBuckets(this.ht1Size) : null
-        const liveHalf = this.htHalf
+        const usedOld = this.usedBuckets(d.size)
+        const usedNew = d.size1 > 0 ? this.usedBuckets(d.size1) : null
+        const liveHalf = d.half
         const otherHalf = (liveHalf === 0 ? 1 : 0) as 0 | 1
         const empty = mixHex(0x0d3a48, PALETTE.cyan, 0.14)
 
@@ -2095,15 +2023,15 @@ export class RedisInstance {
             const bNew = this.tileBucket(otherHalf, id)
             let live = false
             let used = false
-            if (this.ht1Size > 0) {
-                if (bOld >= 0 && bOld < this.htSize && bOld >= this.rehashIdx) {
+            if (d.size1 > 0) {
+                if (bOld >= 0 && bOld < d.size && bOld >= d.idx) {
                     live = true
                     used = usedOld.has(bOld)
-                } else if (bNew >= 0 && bNew < this.rehashIdx) {
+                } else if (bNew >= 0 && bNew < d.idx) {
                     live = true
                     used = usedNew?.has(bNew) ?? false
                 }
-            } else if (bOld >= 0 && bOld < this.htSize) {
+            } else if (bOld >= 0 && bOld < d.size) {
                 live = true
                 used = usedOld.has(bOld)
             }
@@ -2125,9 +2053,9 @@ export class RedisInstance {
         if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
 
         const text =
-            this.ht1Size > 0
-                ? `ht[0] ${this.htSize} → ht[1] ${this.ht1Size} · ${this.rehashIdx}/${this.htSize}`
-                : `ht[0] ${this.htSize} buckets`
+            d.size1 > 0
+                ? `ht[0] ${d.size} → ht[1] ${d.size1} · ${d.idx}/${d.size}`
+                : `ht[0] ${d.size} buckets`
         const el = this.dictTableLab?.element as HTMLElement | undefined
         if (el && el.textContent !== text) el.textContent = text
 
@@ -2181,32 +2109,23 @@ export class RedisInstance {
     }
 
     private maybeGrow() {
-        if (this.rehashIdx >= 0 || this.htSize >= HASH_MAX) return
-        if (this.liveKeys <= this.htSize) return
-        const next = HASH_SIZES.find((s) => s > this.htSize)
-        if (!next) return
-        this.ht1Size = next
-        this.rehashIdx = 0
+        const before = this.dict.size
+        const next = this.dict.grow(this.liveKeys)
+        if (next === null) return
         this.paintDict()
-        this.trace(`dict grow · ${this.htSize} → ${next} buckets`)
+        this.trace(`dict grow · ${before} → ${next} buckets`)
     }
 
     rehashStep(buckets = 1) {
-        if (this.rehashIdx < 0) return
-        this.rehashIdx = Math.min(this.htSize, this.rehashIdx + buckets)
-        if (this.rehashIdx >= this.htSize) {
-            this.htSize = this.ht1Size
-            this.ht1Size = 0
-            this.rehashIdx = -1
-            this.htHalf = this.htHalf === 0 ? 1 : 0
-            this.trace(`dict rehashed · ht[0] ${this.htSize} buckets`)
-        }
+        const step = this.dict.advance(buckets)
+        if (step === null) return
+        if (step.done) this.trace(`dict rehashed · ht[0] ${this.dict.size} buckets`)
         this.paintDict()
     }
 
     pulseBucket(key: RedisKey) {
-        const bucket = this.bucketOf(key.i, this.htSize)
-        const tile = this.bucketTile(this.htHalf, bucket)
+        const place = this.dict.placeOf(key.i)
+        const tile = this.dict.tile(place.half, place.bucket)
         this.dictMesh.setColorAt(tile, this.tmpColor.setHex(pulseHex(PALETTE.ice, 0.4)))
         if (this.dictMesh.instanceColor) this.dictMesh.instanceColor.needsUpdate = true
         void this.ticker.add(PULSE_TIME, (k) => {

@@ -61,7 +61,7 @@ export const REDIS_RAW_STORY: StoryStep[] = [
     },
     {
         title: 'and back out through the socket',
-        body: 'The bytes are copied into the reply, the thread is done with the value, and the reply climbs back to the loop and leaves the way the request came in. Two pages instead of one — and that is the whole difference between the two stories: not the size of the value on screen, but whether the read had to make a second trip. A hash of five million fields and a 2 kB string have the same thing in common, and it is not their size: their payload is not where their header is.',
+        body: 'The bytes are copied into the reply, the thread is done with the value, and the reply climbs back to the loop and leaves the way the request came in. Two pages instead of one — and that is the whole difference between the two stories: not the size of the value on screen, but whether the read had to make a second trip. A hash of five million fields and a 2 KiB string have the same thing in common, and it is not their size: their payload is not where their header is.',
         subject: (s) => s.redisRide?.() ?? null,
         dir: [0.55, 0.5, 1],
         dist: 11,

@@ -3,7 +3,7 @@ import type { StoryStep } from './types'
 export const WAL_STORY: StoryStep[] = [
     {
         title: 'a log beside the data',
-        body: 'PostgreSQL never writes a changed page straight to disk. Every change is first appended to this run of 16 MB segment blocks — the write-ahead log. If the server dies mid-write, the log is what it replays to rebuild the data files.',
+        body: 'PostgreSQL never writes a changed page straight to disk. Every change is first appended to this run of 16 MiB segment blocks — the write-ahead log. If the server dies mid-write, the log is what it replays to rebuild the data files.',
         subject: (s) => ({ id: 'wal run', box: s.walRun() }),
         dir: [0.15, 0.6, 1],
         fov: 30,
