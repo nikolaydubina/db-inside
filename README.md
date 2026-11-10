@@ -131,6 +131,7 @@ Things the scene does not show yet. The first block is already listed in the Sto
       `pg_multixact/members`, which has its own wraparound hazard.
 
 **Missing structure**
+- [ ] /dev/shm
 - [ ] `effective_cache_size`
 - [ ] `maintenance_work_mem`
 - [ ] **locks and waiting** — the biggest omission. A blocked query waits on a lock with no visual at
