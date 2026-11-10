@@ -113,6 +113,7 @@ Things the scene does not show yet. The first block is already listed in the Sto
 `soon` tag, so the gaps are visible in the app as well as here.
 
 - [ ] Hadoop
+- [ ] Clickhouse
 - [ ] kdb+
 - [ ] TigerBee
 - [ ] DuckDB
