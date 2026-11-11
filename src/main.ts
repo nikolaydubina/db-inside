@@ -649,7 +649,16 @@ const story = createStory({
     },
 })
 ;(window as unknown as Record<string, unknown>).__psqlStory = story
-installTestSurface({ story, redisSim, indexRide: { state: () => sim.indexState } })
+installTestSurface({
+    story,
+    redisSim,
+    indexRide: { state: () => sim.indexState },
+    packets: {
+        roots: () => [instance.group, redis.group],
+        parked: () => sim.queued,
+        clock: () => sim.clockTime,
+    },
+})
 
 const storiesEl = document.getElementById('stories')
 if (storiesEl) {

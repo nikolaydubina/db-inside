@@ -1,3 +1,4 @@
+import type * as THREE from 'three'
 import type { Story } from './stories/runner'
 import type { StoryStep } from './stories/types'
 
@@ -54,16 +55,30 @@ const plan = (steps: StoryStep[]) =>
         speed: s.speed ?? null,
     }))
 
+export interface PacketAudit {
+    live: number
+    parked: number
+
+    stuck: { at: number[]; color: string | null; age: number }[]
+}
+
 export interface TestSurface {
     discover(): Record<string, unknown>
     plan(storyId?: string): unknown
     ready(): boolean
     readyInfo(): { ok: boolean; loading: boolean; keys: number; hasNext: boolean; note: string }
     state(): Record<string, unknown>
+    packets(): PacketAudit
     log(): void
 
     fast(scale: number): number
 }
+
+// A packet is animated every frame it is alive, and `clock` only advances while the
+// scene runs, so a packet that has not moved in this much scene time is one that no
+// ticker item will ever move again — a stranded request. Every leg (including a
+// despawn and a story settle) is well under a second; parked requests keep turning.
+const STUCK_AFTER = 3
 
 declare global {
     interface Window {
@@ -75,8 +90,46 @@ export function installTestSurface(opts: {
     story: Story
     redisSim: RideSim
     indexRide?: { state(): Record<string, unknown> }
+    packets?: {
+        roots(): THREE.Object3D[]
+        parked(): number
+        clock(): number
+    }
 }): void {
-    const { story, redisSim, indexRide } = opts
+    const { story, redisSim, indexRide, packets } = opts
+
+    const packetSeen = new WeakMap<THREE.Object3D, { sig: string; since: number }>()
+
+    const auditPackets = (): PacketAudit => {
+        if (!packets) return { live: 0, parked: 0, stuck: [] }
+        const now = packets.clock()
+        const live: THREE.Object3D[] = []
+        for (const root of packets.roots()) {
+            root.traverse((o) => {
+                if (o.userData.marker) live.push(o)
+            })
+        }
+        const stuck: PacketAudit['stuck'] = []
+        for (const o of live) {
+            const sig = [o.position.x, o.position.y, o.position.z, o.rotation.y, o.scale.x]
+                .map((n) => n.toFixed(3))
+                .join('|')
+            const seen = packetSeen.get(o)
+            if (!seen || seen.sig !== sig) {
+                packetSeen.set(o, { sig, since: now })
+                continue
+            }
+            if (now - seen.since <= STUCK_AFTER) continue
+            const core = o.userData.core as THREE.Mesh | undefined
+            const mat = core?.material as THREE.MeshStandardMaterial | undefined
+            stuck.push({
+                at: o.position.toArray().map((n) => +n.toFixed(2)),
+                color: mat?.emissive ? mat.emissive.getHexString() : null,
+                age: +(now - seen.since).toFixed(1),
+            })
+        }
+        return { live: live.length, parked: packets.parked(), stuck }
+    }
 
     const ids = (map: Record<string, string>) => {
         const out: Record<string, string> = {}
@@ -114,6 +167,7 @@ export function installTestSurface(opts: {
             title: document.getElementById('story-title')?.textContent?.trim() ?? '',
             verdict: document.getElementById('story-state')?.textContent?.trim() ?? '',
             firstCue: story.firstCue(),
+            packets: auditPackets(),
             ride: {
                 phase: ride.phase === null ? null : STAGE_NAME[ride.phase],
                 at: ride.at,
@@ -173,6 +227,7 @@ export function installTestSurface(opts: {
         fast: (scale: number) => story.fast(scale),
         readyInfo,
         state,
+        packets: auditPackets,
 
         log: () => {
             const s = state()

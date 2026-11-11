@@ -20,6 +20,19 @@ const STORIES = [
 const STOP_BUDGET = 10_000
 const GAP = 0.35
 
+type Stuck = { at: number[]; color: string | null; age: number }[]
+
+// A packet that stops moving while scene time keeps advancing is one nothing will
+// ever despawn again: the request landed somewhere and the code carrying it threw or
+// returned early. Parked requests keep turning, so a backlog never trips this.
+const expectNoStrayPackets = (s: unknown, label: string) => {
+    const stuck = (s as { packets: { stuck: Stuck } }).packets.stuck
+    expect(
+        stuck,
+        `${label}: ${stuck.length} packet(s) stopped moving at ${JSON.stringify(stuck.map((p) => p.at))}`,
+    ).toEqual([])
+}
+
 const state = (page: import('@playwright/test').Page) =>
     page.evaluate(() => window.__test.state()) as Promise<{
         ready: boolean
@@ -29,6 +42,11 @@ const state = (page: import('@playwright/test').Page) =>
         index: number
         title: string
         verdict: string
+        packets: {
+            live: number
+            parked: number
+            stuck: { at: number[]; color: string | null; age: number }[]
+        }
         ride: {
             phase: string | null
             at: number[] | null
@@ -125,6 +143,7 @@ test.describe('redis stories', () => {
                         `step ${want.index + 1} "${want.title}" is not standing on its stop`,
                     ).toBeLessThanOrEqual(GAP)
                 }
+                expectNoStrayPackets(s, `step ${want.index + 1} "${want.title}"`)
                 await expect
                     .poll(async () => (await state(page)).verdict, { timeout: 15_000 })
                     .toBe('as described')
@@ -199,6 +218,7 @@ test.describe('postgresql index stories', () => {
                 ).toBe(0)
                 expect(s.index, `step ${want.index + 1} is not the step on screen`).toBe(i)
                 expect(ix?.stage, `step ${want.index + 1} "${want.title}"`).toBe(want.freezeAt)
+                expectNoStrayPackets(s, `step ${want.index + 1} "${want.title}"`)
                 await expect
                     .poll(async () => (await state(page)).verdict, { timeout: 15_000 })
                     .toBe('as described')

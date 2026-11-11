@@ -28,7 +28,7 @@ export class DictView {
     constructor(
         private host: VizHost,
         private table: DictTable,
-    ) {}
+    ) { }
 
     build() {
         const { group } = this.host
@@ -178,7 +178,7 @@ export class HeapView {
     private tmpObj = new THREE.Object3D()
     private tmpColor = new THREE.Color()
 
-    constructor(private host: HeapHost) {}
+    constructor(private host: HeapHost) { }
 
     get pageCount() {
         return HEAP.cols * HEAP.rows
@@ -395,11 +395,11 @@ export class HeapView {
         return {
             key: 'redis-heap',
             info: {
-                title: 'Memory — the heap, a volume of its own',
+                title: 'Memory (Heap)',
                 body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 KiB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MiB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
-                meta: `heap · ${this.pageCount} × 4 KiB · ${fmtBytes(this.pageCount * pageBytes)} arena · scattered pages · separate volume`,
+                meta: `heap · ${this.pageCount} x 4 KiB · ${fmtBytes(this.pageCount * pageBytes)} arena · scattered pages · separate volume`,
                 stats: () => [
-                    { label: 'pages', value: `${this.pageCount} × 4 KiB` },
+                    { label: 'pages', value: `${this.pageCount} x 4 KiB` },
                     { label: 'arena', value: fmtBytes(this.pageCount * pageBytes) },
                     { label: 'in use', value: `${inUse} · ${pct}%` },
                     { label: 'free', value: `${this.pageCount - inUse} · ${100 - pct}%` },

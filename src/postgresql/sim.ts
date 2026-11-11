@@ -142,6 +142,7 @@ export class EngineSim {
     queries = 0
     accesses = 0
     hits = 0
+    misses = 0
     walBytes = 0
     live = 0
 
@@ -845,6 +846,7 @@ export class EngineSim {
                 })
                 despawn(this.ticker, this.scene, packet, 0.25)
                 this.accesses++
+                this.misses++
                 this.lastLatency = rand(0.4, 1.9)
                 this.note = `${stmt.viaIndex ? 'index scan' : 'seq scan'} · buffer miss, page fetched from disk ≈ 1 ms`
                 this.inst.markDeadTuples(1)
