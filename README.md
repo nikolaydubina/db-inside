@@ -125,6 +125,11 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] FoundationDB
 - [ ] RocksDB
 - [ ] LevelDB
+- [ ] memcachd
+- [ ] EVCache
+- [ ] Vitess
+- [ ] Apache HBase
+- [ ] TiDB
 
 ### PostgreSQL
 
