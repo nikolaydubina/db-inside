@@ -35,6 +35,7 @@ import {
     BUF_DARK,
     BUF_FILL_BRIGHT,
     BUF_FILL_DARK,
+    CACHE_GHOST,
     DISK_FIELD,
     DISK_LABEL_PAD,
     DSM_CAGE,
@@ -43,9 +44,11 @@ import {
     FILL_BRIGHT,
     FILL_DARK,
     FLOOR_LABEL_Y,
-    CACHE_GHOST,
     MAINT_BOX,
+    MAINT_CELLS,
+    MAINT_COLS,
     MAINT_DEFAULT,
+    MAINT_ROWS,
     PAGE_CELL,
     PAGE_GRID,
     PAGE_TOP_Y,
@@ -243,11 +246,10 @@ export class PostgresInstance {
     private cacheSheet!: THREE.MeshBasicMaterial
     private cachePulse = 0
 
-    private maintColumn!: THREE.Mesh
     private maintCage!: OutlineBox
-    private maintBase = 0
-    private maintHeight = 1
-    private maintSpill!: THREE.Group
+    private readonly maintCells: THREE.MeshStandardMaterial[] = []
+    private maintUsed = 0
+    maintPass = 1
     maintFill = 0
 
     readonly indexCompanion: PostgresqlIndexCompanionHandle
@@ -419,28 +421,18 @@ export class PostgresInstance {
         this.group.add(cage)
         this.maintCage = cage
 
-        const column = new THREE.Mesh(
-            new THREE.BoxGeometry(b.w * 0.5, 1, b.d * 0.5),
-            glowMat(0x101a12, 0xc7ff5a, 0.55),
-        )
-        this.group.add(column)
-        this.maintColumn = column
-        this.maintBase = b.y - b.h / 2 + 0.06
-        this.maintHeight = b.h - 0.12
-        this.setMaintenanceFill(0)
-
-        const spill = new THREE.Group()
-        for (let i = 0; i < 3; i++) {
-            const m = new THREE.Mesh(
-                new THREE.BoxGeometry(0.15, 0.15, 0.15),
-                glowMat(0x1a1408, PALETTE.amber, 0.5),
-            )
-            m.position.set(b.x + 1.35 + i * 0.22, PAGE_TOP_Y + 0.08, b.z + 1.2)
-            spill.add(m)
+        // Not pages: the cells are allocations — chunks the job pallocs as it goes, in
+        // whatever sizes it asks for. They are claimed in order and handed back in one
+        // reset, which is why the next job claims the same ones again.
+        const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3)
+        for (let i = 0; i < MAINT_CELLS; i++) {
+            const mat = glowMat(0x101a12, 0xc7ff5a, 0.12)
+            const cell = new THREE.Mesh(geo, mat)
+            cell.position.copy(this.maintCellHome(i))
+            this.group.add(cell)
+            this.maintCells.push(mat)
         }
-        spill.visible = false
-        this.group.add(spill)
-        this.maintSpill = spill
+        this.maintFill = 0
 
         const lab = label(`maintenance_work_mem · ${MAINT_DEFAULT}`)
         lab.position.set(b.x - b.w / 2 - 0.05, b.y + b.h / 2 + 0.14, b.z)
@@ -455,27 +447,47 @@ export class PostgresInstance {
         this.register(
             pick,
             {
-                title: 'maintenance_work_mem — the working set of one job',
-                body: `Not a pool: this is the ceiling on what one maintenance operation may use while it runs — VACUUM, CREATE INDEX, ALTER TABLE ADD FOREIGN KEY. The column is how much of that ceiling the running job has taken; it drains when the job ends. Every operation gets the full amount, and every autovacuum worker gets its own, so four tables being vacuumed at once can take four times this. VACUUM spends it holding the dead tuples it has found until it can revisit their pages; CREATE INDEX spends it sorting the keys. Pass the ceiling and the work does not fail, it gets slower: the index build falls back to an external sort that spills runs into pgsql_tmp, and a vacuum that cannot hold its whole dead list has to walk the heap again. The default is ${MAINT_DEFAULT} — small for a large index build, which is why raising it is the standard fix for a slow CREATE INDEX.`,
-                meta: `per operation, per worker · default ${MAINT_DEFAULT} · spills to pgsql_tmp`,
+                title: 'maintenance_work_mem — bytes, not pages, for the life of one job',
+                body: `Not a pool and not pages: a byte budget for the allocations one maintenance operation makes while it runs — palloc chunks from the process heap, in whatever sizes the job asks for. The cells are those chunks; the drone claims one each time it records a dead tuple it will have to come back to. Nothing here is 4 KiB or 8 KiB and nothing here is a file: the only pages are on the far side of a spill. CREATE INDEX sorts the keys it is about to index, and past this ceiling the sort stops being memory and writes merge runs into pgsql_tmp, which are 8 KiB pages because that is the block size. VACUUM has no file to spill into: when its store is full it throws the store away and walks the heap again, which is why too small a value turns one pass into several. Every operation gets the full amount and every autovacuum worker gets its own, so four tables vacuumed at once can take four times this. At the end of the job the whole thing is reset in one go — released to the allocator, not to the operating system, and left where it is, so the next job claims the same bytes in the same order and RSS does not drop. The default is ${MAINT_DEFAULT}, small for a large index build — which is why raising it is the standard fix for a slow CREATE INDEX.`,
+                meta: `per operation, per worker · default ${MAINT_DEFAULT} · chunks, not pages · reset, not freed`,
                 stats: () => [
-                    { label: 'in use', value: `${Math.round(this.maintFill * 100)}%` },
+                    { label: 'chunks held', value: `${this.maintUsed} of ${MAINT_CELLS}` },
                     { label: 'budget', value: MAINT_DEFAULT },
-                    { label: 'scope', value: 'one operation' },
+                    { label: 'scope', value: 'one operation, one worker' },
+                    { label: 'pass', value: String(this.maintPass) },
                 ],
             },
             cage,
         )
     }
 
-    setMaintenanceFill(fraction: number) {
-        if (!this.maintColumn) return
-        const k = Math.max(0, Math.min(1, fraction))
-        this.maintFill = k
-        const h = Math.max(0.001, this.maintHeight * k)
-        this.maintColumn.scale.y = h
-        this.maintColumn.position.set(MAINT_BOX.x, this.maintBase + h / 2, MAINT_BOX.z)
-        this.maintColumn.visible = k > 0.005
+    maintCellHome(i: number): THREE.Vector3 {
+        const b = MAINT_BOX
+        const col = i % MAINT_COLS
+        const row = Math.floor(i / MAINT_COLS)
+        return new THREE.Vector3(
+            b.x + (col - (MAINT_COLS - 1) / 2) * 0.46,
+            b.y - (MAINT_ROWS - 1) * 0.21 + row * 0.42,
+            b.z,
+        )
+    }
+
+    claimMaintenanceChunk(): number | null {
+        if (this.maintUsed >= this.maintCells.length) return null
+        const i = this.maintUsed++
+        this.maintCells[i].emissiveIntensity = 1.9
+        this.maintFill = this.maintUsed / this.maintCells.length
+        return i
+    }
+
+    resetMaintenanceChunks() {
+        this.maintUsed = 0
+        this.maintFill = 0
+        for (const m of this.maintCells) m.emissiveIntensity = 0.12
+    }
+
+    dimMaintenanceChunks(k: number) {
+        for (const m of this.maintCells) m.emissiveIntensity = 0.12 + 1.78 * Math.max(0, k)
     }
 
     private buildShell() {
@@ -1788,16 +1800,13 @@ export class PostgresInstance {
         this.droneBusy = true
         const drone = this.vacuumDrone
 
-        // The dead-tuple list is what this budget holds, so the column tracks how
-        // many pages the job has to remember; past the ceiling it would spill.
-        const budget = Math.min(1, 0.18 + dead.length * 0.07)
-        await this.ticker.add(0.3, (k) => this.setMaintenanceFill(budget * k))
-        this.maintSpill.visible = budget >= 0.999
+        this.resetMaintenanceChunks()
+        this.maintPass = 1
 
         for (const p of dead) {
             const over = p.home.clone().add(new THREE.Vector3(0, 2.2, 0))
             const from = drone.position.clone()
-            await this.ticker.add(0.28, (k) => {
+            await this.ticker.add(0.26, (k) => {
                 drone.position.lerpVectors(from, over, easeInOutCubic(k))
             })
             p.dead = false
@@ -1807,12 +1816,29 @@ export class PostgresInstance {
                 if (k >= 0.999) this.tmpColorC.setHex(base)
                 this.paintBlock(p, this.tmpColorC.getHex())
             })
-            await this.ticker.wait(0.1)
+
+            // The tuple it just found has to be remembered until the page can be
+            // revisited, so the drone puts it in a chunk before moving on.
+            let chunk = this.claimMaintenanceChunk()
+            if (chunk === null) {
+                // Store full: VACUUM throws it away and starts another pass over the heap.
+                this.maintPass++
+                this.resetMaintenanceChunks()
+                chunk = this.claimMaintenanceChunk() ?? 0
+            }
+            const at = this.maintCellHome(chunk).add(new THREE.Vector3(0, 0.62, 0))
+            const toChunk = drone.position.clone()
+            await this.ticker.add(0.2, (k) => {
+                drone.position.lerpVectors(toChunk, at, easeInOutCubic(k))
+            })
+            await this.ticker.wait(0.05)
         }
         this.deadCount = 0
-        await this.ticker.wait(0.3)
-        await this.ticker.add(0.35, (k) => this.setMaintenanceFill(budget * (1 - k)))
-        this.maintSpill.visible = false
+        // One reset at the end of the job, not a chunk at a time: the context is
+        // destroyed whole and the allocator keeps the bytes for the next job.
+        await this.ticker.add(0.4, (k) => this.dimMaintenanceChunks(1 - k))
+        this.resetMaintenanceChunks()
+        await this.ticker.wait(0.25)
         this.droneBusy = false
         return dead.length
     }

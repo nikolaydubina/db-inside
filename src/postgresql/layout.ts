@@ -231,6 +231,10 @@ export const EFFECTIVE_CACHE_SIZE = '4 GB'
 
 export const MAINT_BOX = { x: -8.5, y: 4.55, z: DISK_FIELD.cz, w: 1.7, h: 1.3, d: 1.2 }
 
+export const MAINT_COLS = 3
+export const MAINT_ROWS = 3
+export const MAINT_CELLS = MAINT_COLS * MAINT_ROWS
+
 export const MAINT_DEFAULT = '64 MB'
 
 export const WORLD_ANCHOR = Object.fromEntries(

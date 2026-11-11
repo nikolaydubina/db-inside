@@ -1002,8 +1002,9 @@ export class EngineSim {
         this.vacuuming = true
         try {
             const n = await this.inst.vacuum()
+            const passes = this.inst.maintPass
             this.note = n
-                ? `vacuum · ${n} dead tuple${n > 1 ? 's' : ''} reclaimed for reuse`
+                ? `vacuum · ${n} dead tuple${n > 1 ? 's' : ''} reclaimed · ${passes} pass${passes > 1 ? 'es' : ''} over the heap`
                 : 'vacuum · nothing to reclaim, heap is clean'
         } finally {
             this.vacuuming = false
