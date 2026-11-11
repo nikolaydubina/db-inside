@@ -81,7 +81,7 @@ const steps: StoryStep[] = [
         send: 1,
         delay: 900,
         speed: 0.4,
-        expect: (c) => c.idxStage === Stage.Bitmap && c.idxTuples === 2,
+        expect: (c) => c.idxStage === Stage.Bitmap && c.idxPages >= 3,
         waitFor: 'the surviving TIDs',
         freezeAt: Stage.Bitmap,
         assert: frozeIndexAt(Stage.Bitmap, 'the bitmap AND'),

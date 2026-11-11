@@ -64,3 +64,23 @@ export const STAGE_NAME: Record<Stage, string> = {
     [Stage.Posting]: 'posting',
     [Stage.Bitmap]: 'bitmap',
 }
+
+export type StageListener = (stage: Stage, ride: number) => void
+
+export interface StageHub {
+    add(listener: StageListener): () => void
+    emit(stage: Stage, ride: number): void
+}
+
+export function stageHub(): StageHub {
+    const listeners = new Set<StageListener>()
+    return {
+        add(listener) {
+            listeners.add(listener)
+            return () => void listeners.delete(listener)
+        },
+        emit(stage, ride) {
+            for (const listener of [...listeners]) listener(stage, ride)
+        },
+    }
+}

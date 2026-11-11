@@ -79,11 +79,7 @@ export class Companion {
                 (this.depth * fit) / Math.max(0.001, size.z),
             ) * fit
         body.scale.setScalar(scale)
-        body.position.set(
-            -centre.x * scale,
-            this.height / 2 - centre.y * scale,
-            -centre.z * scale,
-        )
+        body.position.set(-centre.x * scale, this.height / 2 - centre.y * scale, -centre.z * scale)
         this.bodyHost.add(body)
     }
 

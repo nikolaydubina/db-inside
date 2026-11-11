@@ -18,6 +18,7 @@ import { createStory, PLANNED_STORIES, STORIES } from './stories'
 import type { StoryScene } from './stories'
 import { installTestSurface } from './test-surface'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
+import { Stage } from './core/stage'
 import { Db, DB_LABEL, DB_NAME, DbScope, inScope } from './core/db'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox, updateLabelLOD, fmtBytes } from './core/util'
@@ -481,6 +482,14 @@ const rig = createCameraRig({
     },
 })
 ;(window as unknown as Record<string, unknown>).__psqlViews = rig
+
+// A reply is never a subject, and the camera lets go on the stage transition
+// itself rather than on the next frame that happens to look for one.
+const releaseOnReply = (stage: Stage) => {
+    if (stage === Stage.Reply) rig.hold(null)
+}
+sim.stages.add(releaseOnReply)
+redisSim.stages.add(releaseOnReply)
 
 function dbInFrame(): Db {
     if (hud.db) return hud.db
@@ -1010,6 +1019,10 @@ let lastTime = performance.now()
 
 function frame() {
     const now = performance.now()
+    // A frame may carry at most 0.05 s of scene time, which bounds `speed`: once
+    // 0.05 × speed exceeds the shortest leg of a ride, a freeze fires mid-frame and
+    // the leg finishes past the stop it stopped on. ~6× keeps every leg in more
+    // than one frame; faster runs need a step-to-stop loop, not a bigger number.
     const raw = Math.min((now - lastTime) / 1000, 0.05)
     lastTime = now
     const dt = raw * speed
@@ -1020,8 +1033,11 @@ function frame() {
     redisSim.update(dt)
     redis.update(dt, now * 0.001)
     updateFly(raw)
+    // Released before the rig follows, not after, and released the frame the
+    // subject goes away: a stage flips inside update(), so gating on the subject
+    // itself is what stops a reply being followed for one frame more than it exists.
+    if (storyActive && !sim.indexSubject() && !redisSim.packetSubject()) rig.hold(null)
     rig.follow(raw)
-    if (storyActive && !redisSim.rideState().hasPacket && !sim.indexSubject()) rig.hold(null)
 
     if (sim.ambient) {
         trafficTimer -= dt

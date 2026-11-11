@@ -4,6 +4,7 @@ import type { EngineSim } from '../postgresql/sim'
 import type { PostgresqlIndexKind } from '../postgresql/indexes'
 import { REDIS_BIG_KIND_NAME, RedisBigKind, RedisReadOp } from '../redis/values'
 import { Stage } from '../core/stage'
+import type { StageHub } from '../core/stage'
 import { Db } from '../core/db'
 import type { StoryDef, StoryFacts, StoryScene, StoryStep } from './types'
 
@@ -32,9 +33,12 @@ export interface StoryOptions {
 
         phase(): Stage | null
 
+        stages?: StageHub
+
         setPacketScale?(scale: number): void
 
         rideState(): {
+            ride: number
             gap: number | null
             cursor?: { kind: string; step: number; steps: number } | null
         }
@@ -50,6 +54,7 @@ export interface StoryOptions {
     }
     index?: {
         run(kind: PostgresqlIndexKind, opts?: { cold?: boolean }): void
+        stages?: StageHub
         state(): {
             kind: PostgresqlIndexKind | null
             stage: Stage | null
@@ -113,6 +118,8 @@ export function createStory({
     let token = 0
 
     let frozen = false
+
+    let speedScale = 1
 
     let openedAt = -1
 
@@ -286,6 +293,7 @@ export function createStory({
         const step = steps[index]
         if (!step) return
         const mine = ++token
+        disarmFreeze()
         arrived = false
         expected = null
         subjectId = null
@@ -306,9 +314,9 @@ export function createStory({
         if (step.publish) window.setTimeout(() => keepPublishing(mine), delay)
         if (step.subscribe) window.setTimeout(() => keepSubscribing(step, mine), delay)
         const last = index === steps.length - 1
-        if (step.speed) setSpeed?.(last ? 1 : step.speed)
+        if (step.speed) setSpeed?.(last ? 1 : step.speed * speedScale)
         redis?.setPacketScale?.(1)
-        if (step.freezeAt && !last) watchPhase(step, mine)
+        if (step.freezeAt && !last) armFreeze(step, mine)
         const carried = keepsRide(step)
         if (!carried && ((step.send ?? 0) > 0 || step.sustain || step.act)) {
             window.setTimeout(() => {
@@ -321,8 +329,11 @@ export function createStory({
         }
     }
 
+    let stageHook: (() => void) | null = null
+
     const watchPhase = (step: StoryStep, mine: number, left = false) => {
-        if (mine !== token || !running || frozen) return
+        if (mine !== token || !running) return
+        if (frozen) return
         const cursor = redis?.rideState().cursor ?? null
         const deepEnough =
             step.freezeAtStep === undefined || (cursor?.step ?? -1) >= step.freezeAtStep
@@ -338,6 +349,32 @@ export function createStory({
             left = true
         }
         window.setTimeout(() => watchPhase(step, mine, left), 80)
+    }
+
+    const armFreeze = (step: StoryStep, mine: number) => {
+        if (!step.freezeAt) return
+        disarmFreeze()
+        const continuing = keepsRide(step)
+        const base = step.idx ? (indexRide?.state().trip ?? 0) : (redis?.rideState().ride ?? 0)
+        const target = step.idx ? indexRide : redis
+        if (target?.stages) {
+            stageHook = target.stages.add((stage: Stage, ride: number) => {
+                if (mine !== token || !running || frozen) return
+                if (stage !== step.freezeAt) return
+                if (continuing ? ride !== base : ride === base) return
+                const cursor = redis?.rideState().cursor ?? null
+                if (step.freezeAtStep !== undefined && (cursor?.step ?? -1) < step.freezeAtStep)
+                    return
+                frozen = true
+                setSpeed?.(0)
+            })
+        }
+        watchPhase(step, mine)
+    }
+
+    const disarmFreeze = () => {
+        stageHook?.()
+        stageHook = null
     }
 
     const keepSubscribing = (step: StoryStep, mine: number) => {
@@ -430,6 +467,7 @@ export function createStory({
         if (!running) return
         running = false
         token++
+        disarmFreeze()
         if (el) el.hidden = true
         redis?.setPacketScale?.(1)
         onExit?.()
@@ -523,6 +561,17 @@ export function createStory({
             index = i
             play()
             return true
+        },
+        fast(scale: number) {
+            // Scales the scene clock for every card from here on; the ceiling is
+            // set by the frame's 0.05 s dt clamp in main.ts — past ~10× a ride leg
+            // no longer spans a frame and freezes overshoot their stop.
+            speedScale = Math.max(0.05, scale)
+            if (running) {
+                const step = steps[index]
+                setSpeed?.(step?.speed ? step.speed * speedScale : speedScale)
+            }
+            return speedScale
         },
     }
 }

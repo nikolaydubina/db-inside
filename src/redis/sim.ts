@@ -7,7 +7,7 @@ import type { RedisInstance, RedisKey, RedisPort } from './redis'
 import { REDIS_BIG_REAL } from './redis'
 import { HEAP_PAGE } from './layout'
 import { QueryChain, pathCurve } from '../postgresql/flow'
-import { Stage } from '../core/stage'
+import { Stage, stageHub } from '../core/stage'
 import { Ticker, halo, rand, randInt, speedTime as legTime, travel } from '../core/util'
 
 type RidePhase = Stage | null
@@ -669,10 +669,13 @@ export class RedisSim {
         return 0
     }
 
+    readonly stages = stageHub()
+
     private setPhase(phase: RidePhase, stop: THREE.Vector3 | null = null) {
         this.ridePhase = phase
         this.rideStopPoint = stop
         if (phase === null) return
+        this.stages.emit(phase, this.focusRide)
         const p = this.focusPacket
         const at =
             p && p.parent

@@ -61,6 +61,8 @@ export interface TestSurface {
     readyInfo(): { ok: boolean; loading: boolean; keys: number; hasNext: boolean; note: string }
     state(): Record<string, unknown>
     log(): void
+
+    fast(scale: number): number
 }
 
 declare global {
@@ -168,6 +170,7 @@ export function installTestSurface(opts: {
         },
 
         ready,
+        fast: (scale: number) => story.fast(scale),
         readyInfo,
         state,
 

@@ -19,7 +19,7 @@ import {
     speedTime,
     travel,
 } from '../core/util'
-import { Stage } from '../core/stage'
+import { Stage, stageHub } from '../core/stage'
 import { makePacket, recolorPacket } from '../core/packet'
 import { POSTGRESQL_INDEX_NAME, PostgresqlIndexKind } from './indexes'
 
@@ -395,9 +395,12 @@ export class EngineSim {
         }
     }
 
+    readonly stages = stageHub()
+
     private setIndexStage(stage: Stage, at: THREE.Vector3) {
         this.index.stage = stage
         this.index.stop = at.clone()
+        this.stages.emit(stage, this.index.trip)
     }
 
     private async hop(
@@ -584,6 +587,7 @@ export class EngineSim {
             if (!(await this.settle(trip, 0.55))) return
 
             await this.hop(trip, packet, chain, exec, Stage.Exec)
+            if (!(await this.settle(trip, 0.45))) return
             recolorPacket(packet, PALETTE.teal)
             const rows = pathCurve([
                 exec,

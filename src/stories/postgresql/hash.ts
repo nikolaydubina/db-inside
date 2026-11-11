@@ -120,7 +120,7 @@ const steps: StoryStep[] = [
 
 export const HASH_STORY: StoryDef = {
     id: 'hash-index',
-    label: 'hash lookups',
+    label: 'hash index lookups',
     hint: 'a directory of bucket pages: equality in three reads, and no range can ever use it',
     steps,
 }
