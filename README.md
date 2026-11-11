@@ -117,6 +117,9 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] kdb+
 - [ ] TigerBee
 - [ ] DuckDB
+- [ ] Elasticsearch
+- [ ] Weaviate
+- [ ] MongoDB
 
 ### PostgreSQL
 
