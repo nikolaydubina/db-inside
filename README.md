@@ -172,6 +172,7 @@ Things the scene does not show yet. The first block is already listed in the Sto
       `pg_multixact/members`, which has its own wraparound hazard.
 
 **Missing structure**
+- [ ] row lock (zoom-in to page inside transparent page block)
 - [ ] **`work_mem` and spills during execution** — `pgsql_tmp` now has a cage, but no query in
       the scene sorts or hashes enough to write into it, so the spill path is still only a label.
 - [ ] **MVCC horizon** — dead tuples are drawn, but `xmin`/snapshots/freezing are not, which is what
@@ -212,6 +213,10 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] **a rollback** — the same write, then `ROLLBACK`: dead tuple, WAL record, nothing durable to keep.
 
 **Correctness / polish**
+- [ ] the `locks` story draws the waiter's refusal at the executor; the real relation lock goes in
+      earlier, at parse/rewrite (`RangeVarGetRelid`), so the packet should stop before the planner.
+- [ ] block-plus-pips reads as one object held by N backends only after the card is read; consider
+      making a pip legible on its own (hover per pip, or a count on the block).
 - [ ] WAL story prose says "16 MiB segment blocks" while the run is drawn as 12 blocks; the inspector
       copy already states 16 MiB per segment.
 - [ ] a few 3D labels still collide (`PARSER`).
