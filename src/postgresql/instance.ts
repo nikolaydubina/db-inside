@@ -1105,9 +1105,9 @@ export class PostgresInstance {
         pick.position.copy(cluster.position)
         this.group.add(pick)
         this.register(pick, {
-            title: 'Lock manager',
-            body: 'Table and row locks plus MVCC snapshots let many transactions run at once. Contention shows up here as wait events.',
-            meta: 'locks · MVCC snapshots',
+            title: 'Lock manager — the heavyweight lock table',
+            body: 'Every lock a transaction takes on a table, an index or another object is an entry in this hash, held in shared memory and sized up front by max_connections × max_locks_per_transaction — each cube here is one of those entries. Row locks are deliberately not in it: a row lock is a bit in the tuple header, so locking a million rows costs nothing here, while taking a lock on a thousand relations can exhaust the table and fail the statement. A request that cannot be granted waits on the same entry with granted = false, which is what pg_locks shows and what surfaces as wait_event = Lock. So contention is not a second mechanism — it is this table, with entries that are waiting rather than held. Locks last until the transaction ends, which is why one long transaction can stall every writer behind it.',
+            meta: 'lock table · shared memory · row locks live in the tuple header',
         })
     }
 

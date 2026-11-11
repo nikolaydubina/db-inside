@@ -28,7 +28,7 @@ export class DictView {
     constructor(
         private host: VizHost,
         private table: DictTable,
-    ) { }
+    ) {}
 
     build() {
         const { group } = this.host
@@ -178,7 +178,7 @@ export class HeapView {
     private tmpObj = new THREE.Object3D()
     private tmpColor = new THREE.Color()
 
-    constructor(private host: HeapHost) { }
+    constructor(private host: HeapHost) {}
 
     get pageCount() {
         return HEAP.cols * HEAP.rows
@@ -395,11 +395,11 @@ export class HeapView {
         return {
             key: 'redis-heap',
             info: {
-                title: 'Memory (Heap)',
-                body: "This is the heap: the RAM the dataset occupies, drawn as its own volume, separate from the dashed keyspace above. It is one contiguous arena of 4 KiB page cubes, and it is drawn at a working occupancy — 80% of its pages in use, the free fifth scattered between them. That is the same convention as the postgres disk: a mostly packed volume with fragmentation, not an empty grid and not a solid slab. The pattern comes from a seeded run-allocator model — pages are handed out in runs and freed runs leave holes — not from a repeating rule; the 80% and the run-and-hole shape are the claim, the exact page indices are a model. The pages are scattered by that history, not packed from the start, and nothing reorders them — the OS does not compact RAM. The dashed keyspace above is the representational view of the same bytes: it is not this volume and does not contain it. The bucket array between them holds pointers; the bytes those pointers lead to are counted here. The three dashed areas at the back are the payloads of the big values; their ~676 MiB is counted in resident but cannot be drawn as pages in this arena. The arena itself is a slice of the process address space, not all of the machine's RAM.",
-                meta: `heap · ${this.pageCount} x 4 KiB · ${fmtBytes(this.pageCount * pageBytes)} arena · scattered pages · separate volume`,
+                title: 'Heap — where the dataset actually lives',
+                body: "This is the heap, and for redis it is the dataset itself: there is no buffer pool between the process and its data. Every key is a small pile of allocations — a dict entry, a 16-byte object header, and the bytes of the value, one malloc when the encoding is embstr and two when it is raw — and these cubes are the arena the allocator serves them from, one 4 KiB page each. That is why resident memory sits above the bytes you stored: the 'dataset' figure below counts your bytes, 'resident' counts the process. It is also why DEL does not shrink the process — the allocator keeps the page and hands it to the next allocation instead of returning it to the kernel, so RSS stays where it climbed while the dataset drops. The free pages are scattered through the volume rather than banked at one end because that is how an arena ages: allocations arrive and are freed in runs, freed runs leave holes, and the kernel cannot move a page it has already touched to close them. What separates resident from dataset is allocator overhead and that fragmentation, and the only thing that reliably gives those pages back is a restart — activedefrag helps, but it is not free. The big values at the back of the cage are counted in resident but are not cubes here: their payloads are single large allocations, drawn as a projection rather than as pages.",
+                meta: `heap · ${this.pageCount} × 4 KiB · ${fmtBytes(this.pageCount * pageBytes)} arena · mostly in use, scattered`,
                 stats: () => [
-                    { label: 'pages', value: `${this.pageCount} x 4 KiB` },
+                    { label: 'pages', value: `${this.pageCount} × 4 KiB` },
                     { label: 'arena', value: fmtBytes(this.pageCount * pageBytes) },
                     { label: 'in use', value: `${inUse} · ${pct}%` },
                     { label: 'free', value: `${this.pageCount - inUse} · ${100 - pct}%` },
