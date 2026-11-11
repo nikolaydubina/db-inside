@@ -210,6 +210,29 @@ export const ANCHOR = {
 
 export const POSTGRES_ORIGIN = new THREE.Vector3(0, 0, 0)
 
+// Three memory facts the scene used to have no shape for: the on-demand shared
+// memory behind parallel queries, the cache size the planner is told about, and the
+// budget a maintenance job runs on. The first two sit beside what they belong to;
+// the third hangs over the drone that spends it.
+export const DSM_CAGE = {
+    x: -5.95,
+    y: BUFFER_Y,
+    z: ANCHOR.bufferCenter.z,
+    w: 2.3,
+    h: 1.2,
+    d: 1.7,
+}
+
+export const DSM_SEGMENTS = 4
+
+export const CACHE_GHOST = { x: 3.6, y: 1.05, z: 3.8, w: 3.8, d: 2.8 }
+
+export const EFFECTIVE_CACHE_SIZE = '4 GB'
+
+export const MAINT_BOX = { x: -8.5, y: 4.55, z: DISK_FIELD.cz, w: 1.7, h: 1.3, d: 1.2 }
+
+export const MAINT_DEFAULT = '64 MB'
+
 export const WORLD_ANCHOR = Object.fromEntries(
     Object.entries(ANCHOR).map(([k, v]) => [k, v.clone()]),
 ) as typeof ANCHOR

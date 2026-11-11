@@ -1,8 +1,9 @@
 import * as THREE from 'three'
 import {
     WORLD_ANCHOR as ANCHOR,
-    BACKEND_ORIGIN,
-    BACKEND_SLOTS,
+    CACHE_GHOST,
+    DSM_CAGE,
+    MAINT_BOX,
     PAGE_GRID,
     POSTGRES_ORIGIN,
     PROCESS,
@@ -139,28 +140,28 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(REDIS_ANCHOR.loop, [11.78, 4.62, -2.72], 37, [0.6, 1.35, 2.4]),
     },
     {
-        id: 'disk',
+        id: 'postgresql-disk',
         label: 'disk',
         entity: 'disk plate',
         hint: 'the page field from above: solid near the WAL, holes into free space',
         pose: () => shot(V(0, 0, 3.2), [0.5, 15, 21], 38),
     },
     {
-        id: 'tables',
+        id: 'postgresql-tables',
         label: 'tables',
         entity: 'table runs',
         hint: 'the three table runs: fills, dead pages, allocation',
         pose: () => shot(V(2.0, 0.4, 4.4), [1.5, 7.5, 15], 34),
     },
     {
-        id: 'wal',
+        id: 'postgresql-wal',
         label: 'wal',
         entity: 'wal run',
         hint: 'log run, write head, and the wal_buffers hovering above it',
         pose: () => shot(ANCHOR.wal, [4.5, 4.0, 7.5], 32, [0, 0.2, 0]),
     },
     {
-        id: 'wal-buffers',
+        id: 'postgresql-wal-buffers',
         label: 'wal buffers',
         entity: 'wal_buffers',
         hint: 'the tail of the log in memory: the cubes, and the segments they are destined for below',
@@ -168,7 +169,7 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(ANCHOR.walBuf, [-4.3, 4.3, 6.1], 34, [0, -0.85, 0]),
     },
     {
-        id: 'buffers',
+        id: 'postgresql-buffers',
         label: 'buffers',
         entity: 'shared buffers',
         hint: 'the RAM deck: page tiles, dirty pages, buffer hits',
@@ -176,14 +177,29 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(ANCHOR.bufferCenter, [0.8, 9.2, 5.8], 36),
     },
     {
-        id: 'pipeline',
+        id: 'postgresql-dev-shm',
+        label: 'dev/shm',
+        entity: 'dynamic shared memory',
+        hint: 'the other shared memory: segments a parallel query allocates and unlinks',
+        pose: () => shot(L(DSM_CAGE.x, DSM_CAGE.y, DSM_CAGE.z), [0.5, 6.4, 4.4], 34),
+    },
+    {
+        id: 'postgresql-os-cache',
+        label: 'os cache',
+        entity: 'the planner’s cache estimate',
+        hint: 'effective_cache_size: a number the planner is told, not memory that is allocated',
+        pose: () =>
+            shot(L(CACHE_GHOST.x, CACHE_GHOST.y, CACHE_GHOST.z), [0.6, 5.4, 5.2], 34, [0, -0.4, 0]),
+    },
+    {
+        id: 'postgresql-pipeline',
         label: 'pipeline',
         entity: 'process pipelines',
         hint: 'one dashed lane per live backend: parser → planner → executor, running in parallel',
         pose: () => shot(V(0, PROCESS.y, (PROCESS.zParse + PROCESS.zExec) / 2), [4.5, 4.2, 13], 38),
     },
     {
-        id: 'autovacuum',
+        id: 'postgresql-autovacuum',
         label: 'autovacuum',
         entity: 'the vacuum drone',
         hint: 'the drone that walks the heap: it reclaims space inside pages, never shrinks the file',
@@ -191,24 +207,15 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(ANCHOR.vacuum, [5.1, 4.4, 10.5], 34, [0, -1.4, 0]),
     },
     {
-        id: 'free',
-        label: 'free space',
-        slug: 'free-space',
-        entity: 'unallocated tail',
-        hint: 'the empty tail of the disk: slot lattice, no pages',
-        pose: () => shot(L(pageX(4), 0, pageZ(16)), [-6.0, 5.5, 11.0], 34),
-    },
-    {
-        id: 'clients',
-        label: 'clients',
-        entity: 'backend ports',
-        hint: 'connection ports on the top rim — one process per connection',
-
+        id: 'postgresql-maintenance-work',
+        label: 'maintenance work',
+        entity: 'maintenance_work_mem',
+        hint: 'the working set of one maintenance job: fills while it runs, drains when it ends',
         pose: () =>
-            shot(L(0, BACKEND_ORIGIN.y - 0.9, BACKEND_ORIGIN.z), [0, 6.4, 20.5], 36, [0, -1.3, 0]),
+            shot(L(MAINT_BOX.x, MAINT_BOX.y, MAINT_BOX.z), [2.4, 4.8, 6.6], 34, [0, -0.6, 0]),
     },
     {
-        id: 'pages',
+        id: 'postgresql-pages',
         label: 'pages',
         entity: 'page blocks',
         hint: 'down at block level: individual 8 KiB pages of a table run',
@@ -217,7 +224,7 @@ export const VIEWS: ViewDef[] = [
 ]
 
 export const tableView = (name: keyof typeof TABLE_ANCHOR): ViewDef => ({
-    id: `table-${name}`,
+    id: `postgresql-table-${name}`,
     slug: `table-${name}`,
     label: `table: ${name}`,
     entity: `table:${name}`,
@@ -225,25 +232,7 @@ export const tableView = (name: keyof typeof TABLE_ANCHOR): ViewDef => ({
     pose: () => shot(TABLE_ANCHOR[name], [3.0, 4.2, 7.0], 32, [0, 0.2, 0]),
 })
 
-export const backendView = (i: number): ViewDef => {
-    const x = BACKEND_SLOTS[i] ?? 0
-    const mid = L(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
-    return {
-        id: `backend-${i}`,
-        slug: `backend-${i + 1}`,
-        label: `backend ${i + 1}`,
-        entity: `backend ${i + 1}`,
-        hint: 'one connection close up: port, input buffer, what it is running',
-
-        pose: () => shot(mid, [0, 4.0, 16.3], 20, [0, -0.97, 0]),
-    }
-}
-
-export const ALL_VIEWS = [
-    ...VIEWS,
-    ...(['users', 'products', 'metrics'] as const).map(tableView),
-    ...BACKEND_SLOTS.map((_, i) => backendView(i)),
-]
+export const ALL_VIEWS = [...VIEWS, ...(['users', 'products', 'metrics'] as const).map(tableView)]
 
 export const viewsFor = (db: Db) =>
     ALL_VIEWS.filter((v) => !v.unlisted && inScope(v.db ?? DbScope.Postgres, db))
@@ -251,7 +240,7 @@ export const viewsFor = (db: Db) =>
 export function slugOf(v: ViewDef): string {
     if (v.slug !== undefined) return v.slug
     if (v.id === 'postgres' || v.id === 'redis') return ''
-    return v.db === DbScope.Redis ? v.id.replace(/^redis-/, '') : v.id
+    return v.db === DbScope.Redis ? v.id.replace(/^redis-/, '') : v.id.replace(/^postgresql-/, '')
 }
 
 export function defaultView(db: Db): ViewDef {

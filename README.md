@@ -14,14 +14,18 @@ Camera poses live in `src/views.ts` as named shots derived from live anchors, no
 numbers — move a structure and its view moves with it.
 
 ```js
-__psqlViews.list()            // ids, labels, which entity each one is about
-__psqlViews.go('wal')         // fly there over 0.85s
-__psqlViews.snap('buffers')   // cut straight there
-__psqlViews.isAt('wal')       // true if the camera is on that pose (assert in tests)
-__psqlViews.pose('wal')       // { pos, target, fov } without moving
-__psqlViews.anchor('wal')     // live anchor vector, for authoring new views
+__psqlViews.list()                      // ids, labels, which entity each one is about
+__psqlViews.go('postgresql-wal')        // fly there over 0.85s
+__psqlViews.snap('postgresql-buffers')  // cut straight there
+__psqlViews.isAt('postgresql-wal')      // true if the camera is on that pose (assert in tests)
+__psqlViews.pose('postgresql-wal')      // { pos, target, fov } without moving
+__psqlViews.anchor('wal')               // live anchor vector, for authoring new views
 __psqlViews.lookAt(vec3, [0,3,8], 36)   // ad-hoc framing
 ```
+
+Ids are namespaced by database — `postgresql-*`, `redis-*` — so a third engine adds a prefix
+rather than a second table of names. The URL slug drops the prefix, which keeps `?view=wal`
+meaning "the wal shot of the database you are looking at".
 
 Deep link for screenshots and tests:
 
@@ -166,9 +170,6 @@ Things the scene does not show yet. The first block is already listed in the Sto
       `pg_multixact/members`, which has its own wraparound hazard.
 
 **Missing structure**
-- [ ] /dev/shm
-- [ ] `effective_cache_size`
-- [ ] `maintenance_work_mem`
 - [ ] **locks and waiting** — the biggest omission. A blocked query waits on a lock with no visual at
       all; the lock manager exists only as an invisible pick target.
 - [ ] **`work_mem` and spills** — sorts, hash joins and `pgsql_tmp` temp files are not represented, so

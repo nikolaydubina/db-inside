@@ -131,4 +131,11 @@ export class OutlineBox extends THREE.Group {
         m.opacity = on ? Math.min(1, this.baseOpacity + 0.5) : this.baseOpacity
         return this
     }
+
+    brighten(amount: number, color?: number) {
+        const m = this.glowMat
+        if (color !== undefined) m.color.setHex(color)
+        m.opacity = Math.min(1, this.baseOpacity + Math.max(0, amount))
+        return this
+    }
 }

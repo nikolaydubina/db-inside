@@ -37,9 +37,15 @@ import {
     BUF_FILL_DARK,
     DISK_FIELD,
     DISK_LABEL_PAD,
+    DSM_CAGE,
+    DSM_SEGMENTS,
+    EFFECTIVE_CACHE_SIZE,
     FILL_BRIGHT,
     FILL_DARK,
     FLOOR_LABEL_Y,
+    CACHE_GHOST,
+    MAINT_BOX,
+    MAINT_DEFAULT,
     PAGE_CELL,
     PAGE_GRID,
     PAGE_TOP_Y,
@@ -224,6 +230,26 @@ export class PostgresInstance {
     readonly walBufBlocks: THREE.Mesh[] = []
     private walBufGroup!: THREE.Group
     readonly lockMats: THREE.MeshStandardMaterial[] = []
+
+    readonly dsmMats: THREE.MeshStandardMaterial[] = []
+    private readonly dsmBlocks: THREE.Mesh[] = []
+    private dsmCage!: OutlineBox
+    private dsmLive: number[] = []
+    private dsmTarget: number[] = []
+    private dsmNext = 0
+    private dsmPulse = 0
+
+    private cacheEdge!: OutlineBox
+    private cacheSheet!: THREE.MeshBasicMaterial
+    private cachePulse = 0
+
+    private maintColumn!: THREE.Mesh
+    private maintCage!: OutlineBox
+    private maintBase = 0
+    private maintHeight = 1
+    private maintSpill!: THREE.Group
+    maintFill = 0
+
     readonly indexCompanion: PostgresqlIndexCompanionHandle
 
     pageField!: THREE.InstancedMesh
@@ -255,6 +281,7 @@ export class PostgresInstance {
     constructor(private ticker: Ticker) {
         this.buildShell()
         this.buildBufferPool()
+        this.buildMemoryFixtures()
         this.buildWal()
         this.buildPageField()
         this.buildTableRegions()
@@ -279,13 +306,185 @@ export class PostgresInstance {
         return obj
     }
 
+    private buildMemoryFixtures() {
+        this.buildDynamicSharedMemory()
+        this.buildEffectiveCache()
+        this.buildMaintenanceWork()
+    }
+
+    private buildDynamicSharedMemory() {
+        const b = DSM_CAGE
+        const cage = new OutlineBox(b.w, b.h, b.d, PALETTE.ice, 0.24, { dashed: true })
+        cage.centre(b.x, b.y, b.z)
+        this.group.add(cage)
+        this.dsmCage = cage
+
+        const geo = new THREE.BoxGeometry(0.3, 0.26, 0.3)
+        for (let i = 0; i < DSM_SEGMENTS; i++) {
+            const mat = glowMat(0x08161d, PALETTE.ice, 0.1)
+            const m = new THREE.Mesh(geo, mat)
+            m.position.set(b.x - 0.34 + (i % 2) * 0.68, b.y - 0.26 + Math.floor(i / 2) * 0.52, b.z)
+            this.group.add(m)
+            this.dsmMats.push(mat)
+            this.dsmBlocks.push(m)
+        }
+        this.dsmLive = new Array(DSM_SEGMENTS).fill(0)
+        this.dsmTarget = new Array(DSM_SEGMENTS).fill(0)
+        this.dsmNext = 0
+
+        const lab = label('/dev/shm · DSM')
+        lab.position.set(b.x - b.w / 2 - 0.05, b.y - b.h / 2 - 0.1, b.z)
+        this.group.add(lab)
+
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(b.w, b.h, b.d),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.set(b.x, b.y, b.z)
+        this.group.add(pick)
+        this.register(
+            pick,
+            {
+                title: '/dev/shm — dynamic shared memory, one segment per query',
+                body: 'This is the second kind of shared memory in postgres, and it is not the buffer pool: segments cut on demand and mapped from /dev/shm, by default dynamic_shared_memory_type = posix on Linux. A parallel query allocates one, the leader and its workers attach to it, they hand block ranges to each other through it, and it is unlinked when the query ends — so the cage empties again. Each cube here is one live segment. Because /dev/shm is a tmpfs it has a size of its own, and that size is a hard limit: a container left at the default 64 MB makes a parallel query fail outright with “could not resize shared memory segment … No space left on device”. Nothing degrades and nothing falls back — every other memory limit on this page costs speed when you press it, this one errors.',
+                meta: 'dynamic_shared_memory_type = posix · one per parallel query · tmpfs size is a hard limit',
+                stats: () => [
+                    {
+                        label: 'segments live',
+                        value: `${this.dsmLive.filter((v) => v > 0.5).length} of ${DSM_SEGMENTS}`,
+                    },
+                    { label: 'holds', value: 'parallel state + tuple queues' },
+                    { label: 'freed', value: 'when the query ends' },
+                ],
+            },
+            cage,
+        )
+    }
+
+    private buildEffectiveCache() {
+        const b = CACHE_GHOST
+        const ghost = new THREE.Group()
+        ghost.position.set(b.x, b.y, b.z)
+
+        const edge = new OutlineBox(b.w, 0.02, b.d, PALETTE.cyan, 0.14, { dashed: true })
+        ghost.add(edge)
+        this.cacheEdge = edge
+
+        const sheet = new THREE.Mesh(
+            new THREE.PlaneGeometry(b.w, b.d),
+            new THREE.MeshBasicMaterial({
+                color: PALETTE.cyan,
+                transparent: true,
+                opacity: 0.04,
+                depthWrite: false,
+                blending: THREE.AdditiveBlending,
+                side: THREE.DoubleSide,
+            }),
+        )
+        sheet.rotation.x = -Math.PI / 2
+        ghost.add(sheet)
+        this.cacheSheet = sheet.material as THREE.MeshBasicMaterial
+
+        const lab = label(`OS PAGE CACHE · assumed ${EFFECTIVE_CACHE_SIZE}`)
+        lab.position.set(b.w / 2 + 0.05, 0.06, 0)
+        ghost.add(lab)
+        this.group.add(ghost)
+
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(1.2, 0.5, 1.2),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.set(b.x, b.y + 0.2, b.z)
+        this.group.add(pick)
+        this.register(pick, {
+            title: 'effective_cache_size — the planner’s belief, not memory',
+            body: `Nothing is allocated here and nothing is reserved: this is a number handed to the cost model, the only knob on this page that changes no memory at all. It tells the planner how much of the disk it may assume the operating system caches on its behalf — shared_buffers plus the kernel page cache — and it is used for one decision: whether a page the planner expects to read again is likely to be a disk access or a memory copy. Say the cache is large and random index lookups look cheap, so index scans win; say it is small and the planner starts preferring sequential scans that touch every page once. Convention is about three quarters of the machine’s RAM; here it is ${EFFECTIVE_CACHE_SIZE}. Both directions have a trap: too low and good index plans get thrown away, too high and the planner picks index scans the cache cannot actually hold, which turn into random I/O. It is also the honest account of a buffer miss — a miss in shared_buffers is usually a copy from this second level, not a read from the plate below.`,
+            meta: 'planner cost input · allocates nothing · ≈ ¾ of RAM by convention',
+            stats: () => [
+                { label: 'assumed', value: EFFECTIVE_CACHE_SIZE },
+                { label: 'is', value: 'shared_buffers + OS page cache' },
+                { label: 'allocates', value: 'nothing' },
+            ],
+        })
+    }
+
+    private buildMaintenanceWork() {
+        const b = MAINT_BOX
+
+        // One cage, and it is the pick's outline: hovering brightens it, and so does a
+        // job spending the budget. A dashed cage is the notation for "structure drawn,
+        // no footprint of its own" — a budget has none, so there is nothing to wrap.
+        const cage = new OutlineBox(b.w, b.h, b.d, 0xc7ff5a, 0.22, { dashed: true })
+        cage.centre(b.x, b.y, b.z)
+        this.group.add(cage)
+        this.maintCage = cage
+
+        const column = new THREE.Mesh(
+            new THREE.BoxGeometry(b.w * 0.5, 1, b.d * 0.5),
+            glowMat(0x101a12, 0xc7ff5a, 0.55),
+        )
+        this.group.add(column)
+        this.maintColumn = column
+        this.maintBase = b.y - b.h / 2 + 0.06
+        this.maintHeight = b.h - 0.12
+        this.setMaintenanceFill(0)
+
+        const spill = new THREE.Group()
+        for (let i = 0; i < 3; i++) {
+            const m = new THREE.Mesh(
+                new THREE.BoxGeometry(0.15, 0.15, 0.15),
+                glowMat(0x1a1408, PALETTE.amber, 0.5),
+            )
+            m.position.set(b.x + 1.35 + i * 0.22, PAGE_TOP_Y + 0.08, b.z + 1.2)
+            spill.add(m)
+        }
+        spill.visible = false
+        this.group.add(spill)
+        this.maintSpill = spill
+
+        const lab = label(`maintenance_work_mem · ${MAINT_DEFAULT}`)
+        lab.position.set(b.x - b.w / 2 - 0.05, b.y + b.h / 2 + 0.14, b.z)
+        this.group.add(lab)
+
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(b.w, b.h, b.d),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.set(b.x, b.y, b.z)
+        this.group.add(pick)
+        this.register(
+            pick,
+            {
+                title: 'maintenance_work_mem — the working set of one job',
+                body: `Not a pool: this is the ceiling on what one maintenance operation may use while it runs — VACUUM, CREATE INDEX, ALTER TABLE ADD FOREIGN KEY. The column is how much of that ceiling the running job has taken; it drains when the job ends. Every operation gets the full amount, and every autovacuum worker gets its own, so four tables being vacuumed at once can take four times this. VACUUM spends it holding the dead tuples it has found until it can revisit their pages; CREATE INDEX spends it sorting the keys. Pass the ceiling and the work does not fail, it gets slower: the index build falls back to an external sort that spills runs into pgsql_tmp, and a vacuum that cannot hold its whole dead list has to walk the heap again. The default is ${MAINT_DEFAULT} — small for a large index build, which is why raising it is the standard fix for a slow CREATE INDEX.`,
+                meta: `per operation, per worker · default ${MAINT_DEFAULT} · spills to pgsql_tmp`,
+                stats: () => [
+                    { label: 'in use', value: `${Math.round(this.maintFill * 100)}%` },
+                    { label: 'budget', value: MAINT_DEFAULT },
+                    { label: 'scope', value: 'one operation' },
+                ],
+            },
+            cage,
+        )
+    }
+
+    setMaintenanceFill(fraction: number) {
+        if (!this.maintColumn) return
+        const k = Math.max(0, Math.min(1, fraction))
+        this.maintFill = k
+        const h = Math.max(0.001, this.maintHeight * k)
+        this.maintColumn.scale.y = h
+        this.maintColumn.position.set(MAINT_BOX.x, this.maintBase + h / 2, MAINT_BOX.z)
+        this.maintColumn.visible = k > 0.005
+    }
+
     private buildShell() {
         const shellH = 9.8
 
         const shellW = 26.0
         const shellD = 16.0
 
-        const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34)
+        const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34, { dashed: true })
         cage.fromFloor(0, 0, 0)
         this.group.add(cage)
         this.register(cage, {
@@ -1480,6 +1679,10 @@ export class PostgresInstance {
     async scanHeap(): Promise<number> {
         const beam = this.scanner
         beam.visible = true
+        const slot = this.dsmNext % DSM_SEGMENTS
+        this.dsmNext++
+        if (this.dsmTarget.length === DSM_SEGMENTS) this.dsmTarget[slot] = 1
+        this.dsmPulse = 1
         const from = pageX(0) - 0.6
         const to = pageX(PAGE_GRID.cols - 1) + 0.6
         await this.ticker.add(1.1, (k) => {
@@ -1487,6 +1690,7 @@ export class PostgresInstance {
             ;(beam.material as THREE.MeshBasicMaterial).opacity = 0.1 + 0.55 * Math.sin(k * Math.PI)
         })
         beam.visible = false
+        if (this.dsmTarget.length === DSM_SEGMENTS) this.dsmTarget[slot] = 0
         return 0
     }
 
@@ -1584,6 +1788,12 @@ export class PostgresInstance {
         this.droneBusy = true
         const drone = this.vacuumDrone
 
+        // The dead-tuple list is what this budget holds, so the column tracks how
+        // many pages the job has to remember; past the ceiling it would spill.
+        const budget = Math.min(1, 0.18 + dead.length * 0.07)
+        await this.ticker.add(0.3, (k) => this.setMaintenanceFill(budget * k))
+        this.maintSpill.visible = budget >= 0.999
+
         for (const p of dead) {
             const over = p.home.clone().add(new THREE.Vector3(0, 2.2, 0))
             const from = drone.position.clone()
@@ -1601,6 +1811,8 @@ export class PostgresInstance {
         }
         this.deadCount = 0
         await this.ticker.wait(0.3)
+        await this.ticker.add(0.35, (k) => this.setMaintenanceFill(budget * (1 - k)))
+        this.maintSpill.visible = false
         this.droneBusy = false
         return dead.length
     }
@@ -1643,6 +1855,9 @@ export class PostgresInstance {
     pulseNode(pod: BackendPod, name: PostgresqlNodeName, strength = 1) {
         const n = pod.pipeline.nodes[name]
         if (n) n.pulse = Math.max(n.pulse, strength)
+        // The planner is the only consumer of effective_cache_size, so its pulse is
+        // the one moment the ghost cache gets brighter.
+        if (name === PostgresqlNodeName.Plan) this.cachePulse = Math.max(this.cachePulse, strength)
     }
 
     flashDisk(_idx = -1) {
@@ -1789,6 +2004,28 @@ export class PostgresInstance {
         this.lockMats.forEach((m, i) => {
             m.emissiveIntensity = 0.25 + 0.3 * breathe(time, 1.7, i)
         })
+
+        this.dsmPulse = Math.max(0, this.dsmPulse - dt * 0.9)
+        let dsmLit = 0
+        for (const v of this.dsmLive) dsmLit = Math.max(dsmLit, v)
+        this.dsmCage?.brighten(0.4 * dsmLit)
+        this.dsmMats.forEach((m, i) => {
+            const target = this.dsmTarget[i] ?? 0
+            this.dsmLive[i] =
+                (this.dsmLive[i] ?? 0) + (target - (this.dsmLive[i] ?? 0)) * Math.min(1, dt * 5)
+            const live = this.dsmLive[i]
+            m.emissiveIntensity =
+                0.08 + live * (1.0 + this.dsmPulse * 0.9 + 0.2 * breathe(time, 3, i))
+            if (live > 0.3) this.dsmBlocks[i].rotation.y += dt * (1.2 + this.dsmPulse)
+        })
+
+        this.cachePulse = Math.max(0, this.cachePulse - dt * 1.5)
+        if (this.cacheSheet) {
+            this.cacheSheet.opacity = 0.035 + 0.015 * breathe(time, 0.7, 0) + 0.14 * this.cachePulse
+            this.cacheEdge.brighten(0.4 * this.cachePulse)
+        }
+
+        this.maintCage?.brighten(0.5 * this.maintFill)
 
         for (const b of this.backends) {
             b.pulse = Math.max(0, b.pulse - dt * 2.2)
