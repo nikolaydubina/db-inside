@@ -8,9 +8,9 @@ import { RedisInstance } from './redis/redis'
 import { RedisSim } from './redis/sim'
 import type { RedisStats } from './redis/sim'
 import { createAxes } from './axes'
-import { makeFlows, makePaths } from './core/flow'
+import { makeFlows, makePaths } from './postgresql/flow'
 import { EngineSim } from './postgresql/sim'
-import type { Regime } from './postgresql/sim'
+import { PostgresqlRegime } from './postgresql/sim'
 import { installTelemetry } from './debug'
 import { createCameraRig, defaultView, slugOf, viewBySlug, viewForBox, viewsFor } from './views'
 import type { ViewDef } from './views'
@@ -18,7 +18,7 @@ import { createStory, PLANNED_STORIES, STORIES } from './stories'
 import type { StoryScene } from './stories'
 import { installTestSurface } from './test-surface'
 import { addressFromPath, decodePose, encodePose, pathFor } from './share'
-import type { ShareDb } from './share'
+import { Db, DB_LABEL, DB_NAME, DbScope, inScope } from './core/db'
 import { initHud } from './ui'
 import { Ticker, label, rand, OutlineBox, updateLabelLOD, fmtBytes } from './core/util'
 
@@ -59,8 +59,8 @@ function cast(rc: THREE.Raycaster): THREE.Intersection[] {
 }
 
 const axes = createAxes(scene)
-const markPostgres = axes.mark('postgres', new THREE.Vector3(0, 0, 0))
-const markRedis = axes.mark('redis', new THREE.Vector3(-36, 0, 0))
+const markPostgres = axes.mark(DB_NAME[Db.Postgres], new THREE.Vector3(0, 0, 0))
+const markRedis = axes.mark(DB_NAME[Db.Redis], new THREE.Vector3(-36, 0, 0))
 
 ;(window as unknown as Record<string, unknown>).__psql = {
     scene,
@@ -90,11 +90,14 @@ const MOVE_STEP = 2
 const GROUND = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
 
 const CAGE = { halfX: 13, halfZ: 8 }
-type CageName = 'postgres' | 'redis'
+type CageName = Db
 
-const CAGE_HOME: Record<CageName, [number, number]> = { postgres: [0, 0], redis: [0, -26] }
+const CAGE_HOME = {
+    postgres: [0, 0] as [number, number],
+    redis: [0, -26] as [number, number],
+}
 
-const cageGroup = (c: CageName) => (c === 'postgres' ? instance.group : redis.group)
+const cageGroup = (c: CageName) => (c === Db.Postgres ? instance.group : redis.group)
 const anchorOf = (c: CageName): [number, number] => {
     const p = cageGroup(c).position
     return [Math.round(p.x + CAGE.halfX), Math.round(p.z + CAGE.halfZ)]
@@ -120,11 +123,11 @@ const anchorOut = (c: CageName): AnchorOut => {
     return { x, y: 0, z }
 }
 
-const layoutNow = () => ({ postgres: anchorOut('postgres'), redis: anchorOut('redis') })
+const layoutNow = () => ({ postgres: anchorOut(Db.Postgres), redis: anchorOut(Db.Redis) })
 
 function updateMoveHint() {
-    const p = anchorOf('postgres')
-    const r = anchorOf('redis')
+    const p = anchorOf(Db.Postgres)
+    const r = anchorOf(Db.Redis)
     console.info(
         `%clayout%c postgres anchor (${p[0]}, ${p[1]}) · redis anchor (${r[0]}, ${r[1]})`,
         'color:#ff6b6b',
@@ -135,7 +138,7 @@ function updateMoveHint() {
 function moveCageTo(c: CageName, anchor: [number, number]) {
     const pos = new THREE.Vector3(anchor[0] - CAGE.halfX, 0, anchor[1] - CAGE.halfZ)
     const at = new THREE.Vector3(anchor[0], 0, anchor[1])
-    if (c === 'postgres') {
+    if (c === Db.Postgres) {
         if (instance.setOrigin(pos).lengthSq() === 0) return
         markPostgres(at)
     } else {
@@ -152,8 +155,8 @@ const saveLayout = () => {
 }
 
 function applyLayout(l: { postgres?: AnchorIn; redis?: AnchorIn }) {
-    if (l.postgres) moveCageTo('postgres', pairOf(l.postgres))
-    if (l.redis) moveCageTo('redis', pairOf(l.redis))
+    if (l.postgres) moveCageTo(Db.Postgres, pairOf(l.postgres))
+    if (l.redis) moveCageTo(Db.Redis, pairOf(l.redis))
 }
 
 applyLayout(CAGE_HOME)
@@ -228,8 +231,8 @@ let hoverCage: CageName | null = null
 function ownerCage(o: THREE.Object3D): CageName | null {
     let cur: THREE.Object3D | null = o
     while (cur) {
-        if (cur === instance.group) return 'postgres'
-        if (cur === redis.group) return 'redis'
+        if (cur === instance.group) return Db.Postgres
+        if (cur === redis.group) return Db.Redis
         cur = cur.parent
     }
     return null
@@ -256,8 +259,8 @@ function cageUnder(p: THREE.Vector3): CageName | null {
             p.z <= box.max.z + 1
         )
     }
-    if (covers('redis')) return 'redis'
-    if (covers('postgres')) return 'postgres'
+    if (covers(Db.Redis)) return Db.Redis
+    if (covers(Db.Postgres)) return Db.Postgres
     return null
 }
 
@@ -479,21 +482,21 @@ const rig = createCameraRig({
 })
 ;(window as unknown as Record<string, unknown>).__psqlViews = rig
 
-function dbInFrame(): ShareDb {
+function dbInFrame(): Db {
     if (hud.db) return hud.db
     const aim = world.controls.target
     const centreOf = (g: THREE.Object3D) =>
         new THREE.Box3().setFromObject(g).getCenter(new THREE.Vector3())
     return aim.distanceTo(centreOf(instance.group)) <= aim.distanceTo(centreOf(redis.group))
-        ? 'postgres'
-        : 'redis'
+        ? Db.Postgres
+        : Db.Redis
 }
 
-function cageOrigin(db: ShareDb): THREE.Vector3 {
-    return (db === 'postgres' ? instance.group : redis.group).position.clone()
+function cageOrigin(db: Db): THREE.Vector3 {
+    return (db === Db.Postgres ? instance.group : redis.group).position.clone()
 }
 
-function setAddress(db: ShareDb, view: ViewDef | null) {
+function setAddress(db: Db, view: ViewDef | null) {
     const q = new URLSearchParams(location.search)
     q.delete('cam')
     q.delete('view')
@@ -502,16 +505,16 @@ function setAddress(db: ShareDb, view: ViewDef | null) {
     history.replaceState(null, '', rest ? `${path}?${rest}` : path)
 }
 
-function panelFromQuery(): ShareDb | null {
+function panelFromQuery(): Db | null {
     const v = new URLSearchParams(location.search).get('db-panel')
-    if (v === 'redis') return 'redis'
-    if (v === 'postgresql' || v === 'postgres') return 'postgres'
+    if (v === 'redis') return Db.Redis
+    if (v === 'postgresql' || v === 'postgres') return Db.Postgres
     return null
 }
 
-function setPanelParam(open: ShareDb | null) {
+function setPanelParam(open: Db | null) {
     const q = new URLSearchParams(location.search)
-    if (open) q.set('db-panel', open === 'postgres' ? 'postgresql' : 'redis')
+    if (open) q.set('db-panel', open === Db.Postgres ? 'postgresql' : 'redis')
     else q.delete('db-panel')
     const rest = q.toString()
     history.replaceState(null, '', rest ? `${location.pathname}?${rest}` : location.pathname)
@@ -527,7 +530,7 @@ function setPanelParam(open: ShareDb | null) {
     )
 }
 
-function pinShotSubject(db: ShareDb, view: ViewDef) {
+function pinShotSubject(db: Db, view: ViewDef) {
     camera.updateMatrixWorld()
     raycaster.setFromCamera(new THREE.Vector2(0, 0), camera)
     for (const hit of cast(raycaster)) {
@@ -553,7 +556,7 @@ function pinShotSubject(db: ShareDb, view: ViewDef) {
 }
 
 let speedBeforeStory = 1
-let regimeBeforeStory: Regime = 'default'
+let regimeBeforeStory: PostgresqlRegime = PostgresqlRegime.Default
 
 const speedInput = document.querySelector<HTMLInputElement>('#speed')
 
@@ -598,6 +601,7 @@ const storyScene: StoryScene = {
         const box = new THREE.Box3(at.clone().addScalar(-0.5), at.clone().addScalar(0.5))
         return { id: p.id, box, object: p.object }
     },
+    indexRide: () => sim.indexSubject(),
 }
 
 const story = createStory({
@@ -605,6 +609,10 @@ const story = createStory({
     sim,
     scene: storyScene,
     redis: redisSim,
+    index: {
+        run: (kind, opts) => void sim.runIndexQuery(kind, opts),
+        state: () => sim.indexState,
+    },
     stories: STORIES,
     setSpeed: applySpeed,
     onEnter: () => {
@@ -613,7 +621,7 @@ const story = createStory({
         world.controls.autoRotate = false
         sim.ambient = false
         redisSim.ambient = false
-        hud.setRegime('default')
+        hud.setRegime(PostgresqlRegime.Default)
         instance.closeIdleBackendsTo(1)
         redisSim.suspendPubSub()
         hud.closePanels()
@@ -621,6 +629,7 @@ const story = createStory({
         driftOn = false
     },
     onExit: () => {
+        sim.cancelIndexRide()
         sim.ambient = true
         redisSim.ambient = true
         redisSim.resumePubSub()
@@ -631,13 +640,13 @@ const story = createStory({
     },
 })
 ;(window as unknown as Record<string, unknown>).__psqlStory = story
-installTestSurface({ story, redisSim })
+installTestSurface({ story, redisSim, indexRide: { state: () => sim.indexState } })
 
 const storiesEl = document.getElementById('stories')
 if (storiesEl) {
-    const groups: { db: 'postgres' | 'redis'; label: string }[] = [
-        { db: 'postgres', label: 'PostgreSQL' },
-        { db: 'redis', label: 'Redis' },
+    const groups: { db: Db; label: string }[] = [
+        { db: Db.Postgres, label: DB_LABEL[Db.Postgres] },
+        { db: Db.Redis, label: DB_LABEL[Db.Redis] },
     ]
     const addStory = (s: (typeof STORIES)[number]) => {
         const b = document.createElement('button')
@@ -657,8 +666,8 @@ if (storiesEl) {
         head.className = 'sgroup'
         head.textContent = g.label
         storiesEl.appendChild(head)
-        for (const s of STORIES.filter((x) => (x.db ?? 'postgres') === g.db)) addStory(s)
-        for (const p of PLANNED_STORIES.filter((x) => (x.db ?? 'postgres') === g.db)) {
+        for (const s of STORIES.filter((x) => inScope(x.db ?? DbScope.Postgres, g.db))) addStory(s)
+        for (const p of PLANNED_STORIES.filter((x) => inScope(x.db ?? DbScope.Postgres, g.db))) {
             const b = document.createElement('button')
             b.className = 'sitem soon'
             b.disabled = true
@@ -671,8 +680,8 @@ if (storiesEl) {
 }
 
 const viewHosts = [
-    { el: document.getElementById('views'), db: 'postgres' as const },
-    { el: document.getElementById('views-redis'), db: 'redis' as const },
+    { el: document.getElementById('views'), db: Db.Postgres },
+    { el: document.getElementById('views-redis'), db: Db.Redis },
 ]
 const viewButtons: { el: HTMLButtonElement; id: string }[] = []
 const markView = (id: string) => {
@@ -702,7 +711,7 @@ for (const host of viewHosts) {
 window.addEventListener('keydown', (e) => {
     if (isTyping(e.target)) return
     if (e.key >= '0' && e.key <= '9') {
-        const db = hud.db ?? 'postgres'
+        const db = hud.db ?? Db.Postgres
         const list = viewsFor(db)
         const idx =
             e.key === '0'
@@ -1012,7 +1021,7 @@ function frame() {
     redis.update(dt, now * 0.001)
     updateFly(raw)
     rig.follow(raw)
-    if (storyActive && !redisSim.rideState().hasPacket) rig.hold(null)
+    if (storyActive && !redisSim.rideState().hasPacket && !sim.indexSubject()) rig.hold(null)
 
     if (sim.ambient) {
         trafficTimer -= dt

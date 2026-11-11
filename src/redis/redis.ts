@@ -6,17 +6,16 @@ import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
 import type { CSS2DObject } from 'three/addons/renderers/CSS2DRenderer.js'
 import { BACKEND_ORIGIN, BACKEND_SLOTS, BLOCK_PICK_RANGE, PALETTE } from '../postgresql/instance'
 import type { Info } from '../postgresql/instance'
-import { BigValues, BIG_SPOT } from './values'
-import type { BigKind } from './values'
+import { RedisBigKind, BigValues, REDIS_BIG_SPOT } from './values'
 import { verifyDisk } from './verify'
 import { DictTable } from './dict'
 import { DictView, HeapView } from './redis_viz'
 import { auxBlocks, encodingOf, mixHex, rebaseAnchors } from './types'
-import { BIG_REAL, REDIS_ANCHOR } from './types'
-import { KeyKind, KIND_NAME } from './kind'
+import { REDIS_BIG_REAL, REDIS_ANCHOR } from './types'
+import { RedisKeyKind, REDIS_KEY_KIND_NAME } from './kind'
 import type { RedisKey, RedisPort } from './types'
-export { BIG_SPOT }
-export type { BigKind }
+export { REDIS_BIG_SPOT }
+export type { RedisBigKind }
 import {
     BLOCK_LIFT,
     FLOOR_Y,
@@ -90,8 +89,8 @@ import {
     zAt,
 } from './layout'
 export * from './layout'
-export type { KeyKind, RedisKey, RedisPort } from './types'
-export { BIG_REAL, REDIS_ANCHOR } from './types'
+export type { RedisKeyKind, RedisKey, RedisPort } from './types'
+export { REDIS_BIG_REAL, REDIS_ANCHOR } from './types'
 
 const OBJECT_PAD = 0.06
 const OBJECT_ACROSS = 1.0
@@ -139,7 +138,7 @@ export class RedisInstance {
 
     private hotKeys: RedisKey[] = []
 
-    private bigKeys: Partial<Record<BigKind, RedisKey>> = {}
+    private bigKeys: Partial<Record<RedisBigKind, RedisKey>> = {}
 
     private readonly values: BigValues
 
@@ -633,21 +632,21 @@ export class RedisInstance {
                     heapZ(Math.floor(page / HEAP.cols)),
                 )
                 const live = Math.random() < 0.74
-                const kinds: KeyKind[] = [
-                    KeyKind.String,
-                    KeyKind.String,
-                    KeyKind.String,
-                    KeyKind.Hash,
-                    KeyKind.List,
-                    KeyKind.Set,
-                    KeyKind.ZSet,
+                const kinds: RedisKeyKind[] = [
+                    RedisKeyKind.String,
+                    RedisKeyKind.String,
+                    RedisKeyKind.String,
+                    RedisKeyKind.Hash,
+                    RedisKeyKind.List,
+                    RedisKeyKind.Set,
+                    RedisKeyKind.ZSet,
                 ]
                 const kind = kinds[randInt(0, kinds.length - 1)]
                 const size = VALUE_BYTES[kind]
                 const limit = encodingLimit(kind)
                 const near = Math.random() < 0.18
                 const entries =
-                    kind === KeyKind.String
+                    kind === RedisKeyKind.String
                         ? 0
                         : near
                           ? Math.max(1, limit - randInt(1, 4))
@@ -680,15 +679,15 @@ export class RedisInstance {
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
         this.paintAux()
 
-        const BIG_KEY_KIND: Record<BigKind, KeyKind> = {
-            hash: KeyKind.Hash,
-            zset: KeyKind.ZSet,
-            list: KeyKind.List,
+        const BIG_KEY_KIND: Record<RedisBigKind, RedisKeyKind> = {
+            [RedisBigKind.Hash]: RedisKeyKind.Hash,
+            [RedisBigKind.ZSet]: RedisKeyKind.ZSet,
+            [RedisBigKind.List]: RedisKeyKind.List,
         }
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+        for (const kind of [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List]) {
             const key = this.keys.find((k) => k.live && !k.big && k.kind === BIG_KEY_KIND[kind])
             if (!key) continue
-            const real = BIG_REAL[kind]
+            const real = REDIS_BIG_REAL[kind]
             key.big = kind
             key.aux = true
             key.entries = real.entries
@@ -701,7 +700,7 @@ export class RedisInstance {
         keys.instanceMatrix.needsUpdate = true
 
         this.hotKeys = this.keys
-            .filter((k) => k.live && !k.big && k.kind === KeyKind.String)
+            .filter((k) => k.live && !k.big && k.kind === RedisKeyKind.String)
             .filter((_, n) => n % 7 === 0)
             .slice(0, 4)
         for (const key of this.hotKeys) {
@@ -712,7 +711,7 @@ export class RedisInstance {
         if (keys.instanceColor) keys.instanceColor.needsUpdate = true
 
         const strings = this.keys.filter(
-            (k) => k.live && !k.big && !k.hot && k.kind === KeyKind.String,
+            (k) => k.live && !k.big && !k.hot && k.kind === RedisKeyKind.String,
         )
         this.inlineKey = strings[0] ?? null
         this.rawKey = strings.find((k) => k !== this.inlineKey) ?? null
@@ -1307,26 +1306,30 @@ export class RedisInstance {
         const enc = encodingOf(key)
         const limit = encodingLimit(key.kind)
         const what =
-            key.kind === KeyKind.Hash ? 'fields' : key.kind === KeyKind.Set ? 'members' : 'elements'
+            key.kind === RedisKeyKind.Hash
+                ? 'fields'
+                : key.kind === RedisKeyKind.Set
+                  ? 'members'
+                  : 'elements'
         const ttl = key.ttl > 0 ? ` · ttl ≈ ${key.ttl.toFixed(0)} s` : ''
-        const isString = key.kind === KeyKind.String
+        const isString = key.kind === RedisKeyKind.String
         return {
             key: `redis-key-${i}`,
             info: {
-                title: `key #${i} — ${KIND_NAME[key.kind]} · ${enc}`,
+                title: `key #${i} — ${REDIS_KEY_KIND_NAME[key.kind]} · ${enc}`,
                 body:
                     'One key and its value, living in the process heap. Reads are a hash plus a pointer chase: no buffer pool, no page read, no disk. This is also why a key that is bigger than memory cannot exist here at all, and why one slow O(N) command on a big value blocks every other client. ' +
                     (isString
                         ? `A string keeps no element count, so it never converts: ${key.bytes} B is stored ${enc}, ${key.bytes <= 44 ? 'inline behind the object header in the same allocation' : 'as a separate malloc behind the header'}, and any write replaces the whole value.`
                         : key.aux
                           ? `The encoding is ${enc}. Past ${limit} ${what} the flat buffer could not take one more element in place, so redis read the whole value, freed it, and allocated the real structure in a single operation — ` +
-                            (key.kind === KeyKind.ZSet
+                            (key.kind === RedisKeyKind.ZSet
                                 ? 'two of them, in fact: a dict answering "which score for this member" and a skiplist answering "which members are between these two". That is why this key block carries two blocks above it; there really are two allocations up there.'
-                                : key.kind === KeyKind.List
+                                : key.kind === RedisKeyKind.List
                                   ? 'the next listpack node, chained onto the first. A list never changes encoding, it just grows node by node — the block above is that second node.'
                                   : 'a bucket array with one entry and one chain pointer per element. The block above the key is that structure.') +
                             ' It never converts back: the bigger encoding is kept until the key is deleted.'
-                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${KIND_NAME[key.kind]} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
+                          : `Still compact, at ${key.entries} of ${limit} ${what}: the whole value is ONE ${enc} — a single contiguous allocation, scanned linearly. It costs about its bytes and nothing more, which is why a small ${REDIS_KEY_KIND_NAME[key.kind]} is so cheap. One more write past ${limit} and the entire value is rewritten into the real structure, in one go, on the single thread — the conversion is the one write here that is O(n).`),
                 meta: isString
                     ? `${key.bytes} B · encoding ${enc}${ttl} · in RAM`
                     : `${key.entries} ${what} · encoding ${enc}${ttl} · in RAM`,
@@ -1336,27 +1339,30 @@ export class RedisInstance {
     }
 
     private bigInfo(key: RedisKey) {
-        const kind = key.big as BigKind
-        const real = BIG_REAL[kind]
-        const body: Record<BigKind, string> = {
-            hash: 'A hashtable: one bucket array, and one chain per bucket. This is ONE key — five million fields, hundreds of megabytes — and every one of them is behind that single entry in the dict. That is why HGETALL on it is not a slow query but a stall: the command runs on the one thread, walks all of it, and every other client waits. DEL of this key is the same problem. What is drawn here is the shape and not the count: nine buckets, a few chains; the real array is a few million pointers long and doubles with a rehash.',
-            zset: 'A sorted set is TWO structures at once, and this is why: a skiplist for the range queries, and a dict beside it answering "what is the score of this member" in O(1). The tower is the whole trick — each level skips over more of the list, so ZRANGEBYSCORE finds its starting point in a few hops instead of a walk. One and a half million members, one key. The drawing shows five levels and seven nodes; the real tower has the same shape with a few million nodes under it.',
-            list: 'A long list is not one array: it is a quicklist, a doubly linked chain of nodes, and each node holds a small listpack. Two million elements, one key. That shape is the reason LPUSH and RPUSH are O(1) while LINDEX in the middle is O(n): the middle is a walk along the chain, through nodes that are not next to each other in memory. The long gap in this chain is where the drawing stops — the real one runs on for tens of thousands of nodes. And the dashed cage itself is a PROJECTION, not an address: the chain is drawn at the back of the cage so its shape can be read, but its nodes are allocated in the heap below, one page each. Following the chain is following those pages; only the elements inside one node sit next to each other.',
+        const kind = key.big as RedisBigKind
+        const real = REDIS_BIG_REAL[kind]
+        const body: Record<RedisBigKind, string> = {
+            [RedisBigKind.Hash]:
+                'A hashtable: one bucket array, and one chain per bucket. This is ONE key — five million fields, hundreds of megabytes — and every one of them is behind that single entry in the dict. That is why HGETALL on it is not a slow query but a stall: the command runs on the one thread, walks all of it, and every other client waits. DEL of this key is the same problem. What is drawn here is the shape and not the count: nine buckets, a few chains; the real array is a few million pointers long and doubles with a rehash.',
+            [RedisBigKind.ZSet]:
+                'A sorted set is TWO structures at once, and this is why: a skiplist for the range queries, and a dict beside it answering "what is the score of this member" in O(1). The tower is the whole trick — each level skips over more of the list, so ZRANGEBYSCORE finds its starting point in a few hops instead of a walk. One and a half million members, one key. The drawing shows five levels and seven nodes; the real tower has the same shape with a few million nodes under it.',
+            [RedisBigKind.List]:
+                'A long list is not one array: it is a quicklist, a doubly linked chain of nodes, and each node holds a small listpack. Two million elements, one key. That shape is the reason LPUSH and RPUSH are O(1) while LINDEX in the middle is O(n): the middle is a walk along the chain, through nodes that are not next to each other in memory. The long gap in this chain is where the drawing stops — the real one runs on for tens of thousands of nodes. And the dashed cage itself is a PROJECTION, not an address: the chain is drawn at the back of the cage so its shape can be read, but its nodes are allocated in the heap below, one page each. Following the chain is following those pages; only the elements inside one node sit next to each other.',
         }
-        const shape: Record<BigKind, { label: string; value: string }[]> = {
-            hash: [
+        const shape: Record<RedisBigKind, { label: string; value: string }[]> = {
+            [RedisBigKind.Hash]: [
                 { label: 'buckets', value: '8,388,608 × 8 B' },
                 { label: 'bucket array', value: '64 MiB · contiguous' },
                 { label: 'per field', value: '24 B entry + 2 SDS' },
                 { label: 'allocations', value: '≈ 15.9 M · scattered' },
             ],
-            zset: [
+            [RedisBigKind.ZSet]: [
                 { label: 'dict buckets', value: '2,097,152 × 8 B' },
                 { label: 'dict array', value: '16 MiB · contiguous' },
                 { label: 'skiplist', value: '1.4 M nodes · avg 1.33 levels' },
                 { label: 'allocations', value: '≈ 4.2 M · scattered' },
             ],
-            list: [
+            [RedisBigKind.List]: [
                 { label: 'nodes', value: '≈ 16,384 listpacks' },
                 { label: 'node', value: '≤ 8 KiB · contiguous' },
                 { label: 'layout', value: 'doubly linked chain' },
@@ -1526,7 +1532,7 @@ export class RedisInstance {
 
     keyTop(key: RedisKey): THREE.Vector3 {
         if (key.big) {
-            const at = BIG_SPOT[key.big]
+            const at = REDIS_BIG_SPOT[key.big]
             return new THREE.Vector3(at.x, at.y + 0.5, at.z)
         }
         return this.keyPageTop(key).add(new THREE.Vector3(0, 0.001, 0))
@@ -1589,7 +1595,7 @@ export class RedisInstance {
     compactKeyLeft(): RedisKey | null {
         if (this.inlineKey?.live) return this.inlineKey
         const live = this.keys.filter(
-            (k) => k.live && !k.aux && !k.big && !k.raw && k.kind === KeyKind.String,
+            (k) => k.live && !k.aux && !k.big && !k.raw && k.kind === RedisKeyKind.String,
         )
         if (live.length === 0) return null
         const host = live.find((k) => k.page === this.showcasePage)
@@ -1620,7 +1626,7 @@ export class RedisInstance {
     }
 
     innerDictPoint(key: RedisKey): THREE.Vector3 | null {
-        if (key.kind !== KeyKind.Hash && key.kind !== KeyKind.ZSet) return null
+        if (key.kind !== RedisKeyKind.Hash && key.kind !== RedisKeyKind.ZSet) return null
         if (!key.aux && !key.big) return null
         if (!key.big) return this.valuePoint(key)
         return this.keyPageTop(key).add(new THREE.Vector3(0.1, 0.24, 0.06))
@@ -1649,7 +1655,7 @@ export class RedisInstance {
         )
     }
 
-    private bigBox(kind: BigKind): THREE.Box3 {
+    private bigBox(kind: RedisBigKind): THREE.Box3 {
         return this.values.box(kind)
     }
 
@@ -1678,7 +1684,7 @@ export class RedisInstance {
         for (const key of this.keys) this.paintAuxKey(key)
     }
 
-    liveOfKind(kind: KeyKind): RedisKey | null {
+    liveOfKind(kind: RedisKeyKind): RedisKey | null {
         const live = this.keys.filter((k) => k.live && k.kind === kind)
         if (live.length === 0) return null
         const compact = live.filter((k) => !k.aux)
@@ -1689,10 +1695,10 @@ export class RedisInstance {
         return compact[randInt(0, compact.length - 1)]
     }
 
-    setKeyKind(key: RedisKey, kind: KeyKind) {
+    setKeyKind(key: RedisKey, kind: RedisKeyKind) {
         const range = VALUE_BYTES[kind]
         key.kind = kind
-        key.entries = kind === KeyKind.String ? 0 : 1
+        key.entries = kind === RedisKeyKind.String ? 0 : 1
         key.aux = false
         key.bytes = randInt(range[0], range[1])
         this.keysMesh.setColorAt(key.i, this.tmpColor.setHex(this.keyBase(key)))
@@ -1702,12 +1708,12 @@ export class RedisInstance {
     }
 
     growKey(key: RedisKey): boolean {
-        if (key.kind === KeyKind.String || !key.live) return false
+        if (key.kind === RedisKeyKind.String || !key.live) return false
         key.entries++
         if (key.aux) return false
         if (key.entries <= encodingLimit(key.kind)) return false
         key.aux = true
-        key.bytes += 400 + key.entries * (key.kind === KeyKind.ZSet ? 48 : 24)
+        key.bytes += 400 + key.entries * (key.kind === RedisKeyKind.ZSet ? 48 : 24)
         this.auxAnim.set(key.i, 0)
         this.flashKey(key, KIND_COLOR[key.kind], 0.9)
         this.paintAuxKey(key)
@@ -1725,7 +1731,7 @@ export class RedisInstance {
         return live[randInt(0, live.length - 1)]
     }
 
-    bigKey(kind?: BigKind): RedisKey | null {
+    bigKey(kind?: RedisBigKind): RedisKey | null {
         const all = Object.values(this.bigKeys) as RedisKey[]
         const live = all.filter((k) => k && k.live && (!kind || k.big === kind))
         if (live.length === 0) return null
@@ -1849,19 +1855,19 @@ export class RedisInstance {
         })
     }
 
-    pulseBig(kind: BigKind) {
+    pulseBig(kind: RedisBigKind) {
         this.values.touched(kind)
     }
 
-    rideBig(kind: BigKind, packet: THREE.Object3D | null) {
+    rideBig(kind: RedisBigKind, packet: THREE.Object3D | null) {
         this.values.ride(kind, packet)
     }
 
-    setBigStep(kind: BigKind, n: number, of?: number) {
+    setBigStep(kind: RedisBigKind, n: number, of?: number) {
         this.values.setStep(kind, n, of)
     }
 
-    bigStepOf(kind: BigKind): { step: number; steps: number } {
+    bigStepOf(kind: RedisBigKind): { step: number; steps: number } {
         return this.values.stepOf(kind)
     }
 

@@ -18,7 +18,7 @@ buffers, wal_buffers, aof_buf) float above the disk blocks they become.
   `?db-panel=postgresql|redis` opens that engine's card; the path does not.
 
 PostgreSQL subjects: `disk`, `tables`, `wal`, `wal-buffers`, `buffers`,
-`pipeline`, `indexes`, `free-space`, `clients`, `pages`, `autovacuum`,
+`pipeline`, `free-space`, `clients`, `pages`, `autovacuum`,
 `table-users`, `table-products`, `table-metrics`, `backend-1` … `backend-6`.
 
 Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`, `pubsub`.
@@ -26,11 +26,16 @@ Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`, `pubsub`.
 ## What is in it
 
 PostgreSQL: parser and rewriter → planner → executor; shared buffers as 8 kB pages
-with dirty state and the clock sweep; a B-tree, a BRIN, a GIN and a hash index
-drawn where they sit in RAM; table runs and their pages, dead tuples, free space;
-autovacuum as a drone walking the heap (it reclaims space inside pages and never
-shrinks the file); the WAL run on disk with wal_buffers above it waiting for fsync;
-backend ports, one process per connection, each with its input buffer.
+with dirty state and the clock sweep; table runs and their pages, dead tuples, free
+space; autovacuum as a drone walking the heap (it reclaims space inside pages and
+never shrinks the file); the WAL run on disk with wal_buffers above it waiting for
+fsync; backend ports, one process per connection, each with its input buffer.
+
+Index lookups are stories rather than scenery: a statement physically walks socket →
+parser → planner → executor, then descends a B-tree, a GIN, a BRIN or a hash index
+whose pages ride above the packet as a dashed companion, then reads the heap page it
+was pointed at — from disk when cold, from a buffer slot when warm — and goes back out
+of the socket it came in on.
 
 Redis: one command thread with a command queue and the epoll fd set under it; the
 keyspace over the bucket array, including an incremental rehash; three deliberately

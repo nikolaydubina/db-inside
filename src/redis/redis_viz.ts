@@ -6,8 +6,8 @@ import type { Info } from '../postgresql/instance'
 import { PULSE_GAIN, PULSE_TIME, Ticker, fmtBytes, label, pulseHex, rand } from '../core/util'
 import type { DictTable } from './dict'
 import { BLOCK, CELL, DICT, HEAP, HEAP_PAGE, PITCH, dictX, dictZ, heapX, heapZ } from './layout'
-import type { BigKind } from './values'
-import { BIG_REAL, mixHex } from './types'
+import { RedisBigKind } from './values'
+import { REDIS_BIG_REAL, mixHex } from './types'
 import type { RedisKey } from './types'
 
 export interface VizHost {
@@ -168,7 +168,7 @@ export class DictView {
 export interface HeapHost extends VizHost {
     heapMask: Uint8Array | undefined
     heapPages: number[]
-    bigKeys: Partial<Record<BigKind, RedisKey>>
+    bigKeys: Partial<Record<RedisBigKind, RedisKey>>
 }
 
 export class HeapView {
@@ -386,8 +386,8 @@ export class HeapView {
             : 0
         const small = this.host.keys.filter((k) => k.live && !k.big)
         const smallBytes = small.reduce((n, k) => n + k.bytes, 0)
-        const bigBytes = (Object.keys(this.host.bigKeys) as BigKind[]).reduce(
-            (n, k) => n + (this.host.bigKeys[k]?.live ? BIG_REAL[k].mib * 1024 * 1024 : 0),
+        const bigBytes = [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List].reduce(
+            (n, k) => n + (this.host.bigKeys[k]?.live ? REDIS_BIG_REAL[k].mib * 1024 * 1024 : 0),
             0,
         )
         const pct = Math.round((inUse / this.pageCount) * 100)

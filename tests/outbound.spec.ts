@@ -18,7 +18,7 @@ test.describe('outbound packets', () => {
             const out: Array<{ phase: string | null; following: string | null }> = []
             ;(window as unknown as { __watch: typeof out }).__watch = out
             const h = setInterval(() => {
-                const st = window.__redis!.redisSim.rideState()
+                const st = window.__test!.state().ride as { phase: string | null }
                 out.push({ phase: st.phase, following: window.__ride!().following })
                 if (out.length > 400) clearInterval(h)
             }, 50)

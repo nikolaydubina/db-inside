@@ -1,8 +1,11 @@
 import * as THREE from 'three'
 import type { CameraPose, CameraRig } from '../views'
 import type { EngineSim } from '../postgresql/sim'
-import type { BigKind } from '../redis/redis'
-import type { RidePhase, StoryDef, StoryFacts, StoryScene, StoryStep } from './types'
+import type { PostgresqlIndexKind } from '../postgresql/indexes'
+import { REDIS_BIG_KIND_NAME, RedisBigKind, RedisReadOp } from '../redis/values'
+import { Stage } from '../core/stage'
+import { Db } from '../core/db'
+import type { StoryDef, StoryFacts, StoryScene, StoryStep } from './types'
 
 export interface StoryOptions {
     rig: CameraRig
@@ -15,7 +18,7 @@ export interface StoryOptions {
 
         publish(): void
 
-        readBig(kind: BigKind, op?: 'point' | 'walk'): boolean
+        readBig(kind: RedisBigKind, op?: RedisReadOp): boolean
 
         readInline(): boolean
 
@@ -27,7 +30,7 @@ export interface StoryOptions {
 
         resumePubSub(): void
 
-        phase(): RidePhase
+        phase(): Stage | null
 
         setPacketScale?(scale: number): void
 
@@ -45,6 +48,23 @@ export interface StoryOptions {
             fanouts: number
         }
     }
+    index?: {
+        run(kind: PostgresqlIndexKind, opts?: { cold?: boolean }): void
+        state(): {
+            kind: PostgresqlIndexKind | null
+            stage: Stage | null
+            say: string
+            trip: number
+            running: boolean
+            cold: boolean
+            pages: number
+            disk: number
+            hits: number
+            heap: number
+            tuples: number
+            gap: number | null
+        }
+    }
     stories?: StoryDef[]
 
     setSpeed?: (v: number) => void
@@ -58,6 +78,7 @@ export function createStory({
     sim,
     scene,
     redis,
+    index: indexRide,
     stories = [],
     setSpeed,
     onEnter,
@@ -101,10 +122,10 @@ export function createStory({
     const cueKind = (step: StoryStep): string => {
         if (step.publish) return 'publish'
         if (step.subscribe) return 'subscribe'
-        if ((step.tap ?? 'postgres') !== 'redis') return 'query'
+        if (step.idx || (step.tap ?? Db.Postgres) !== Db.Redis) return 'query'
         if (step.raw) return 'raw'
-        if (step.op === 'object') return 'inline'
-        if (step.big) return `big:${step.big}`
+        if (step.op === RedisReadOp.Object) return 'inline'
+        if (step.big !== undefined) return `big:${REDIS_BIG_KIND_NAME[step.big]}`
         return 'command'
     }
 
@@ -120,6 +141,7 @@ export function createStory({
     const facts = (): StoryFacts => {
         const s = sim.stats
         const r = redis?.stats
+        const ix = indexRide?.state()
         return {
             connections: s.connections,
             maxConnections: s.maxConnections,
@@ -141,15 +163,34 @@ export function createStory({
             rdPhase: redis?.phase() ?? null,
             rdStopGap: redis?.rideState().gap ?? null,
             rdCursor: redis?.rideState().cursor ?? null,
+            idxKind: ix?.kind ?? null,
+            idxStage: ix?.stage ?? null,
+            idxPages: ix?.pages ?? 0,
+            idxDisk: ix?.disk ?? 0,
+            idxHits: ix?.hits ?? 0,
+            idxHeap: ix?.heap ?? 0,
+            idxTuples: ix?.tuples ?? 0,
+            idxGap: ix?.gap ?? null,
         }
+    }
+
+    const keepsRide = (step: StoryStep) => {
+        if (!step.idx) return false
+        const st = indexRide?.state()
+        if (!st?.running || st.trip === 0) return false
+        return st.kind === step.idx && st.cold === (step.cold !== false)
     }
 
     const tap = (step: StoryStep) => {
         noteCue(cueKind(step))
-        if ((step.tap ?? 'postgres') === 'redis') {
+        if (step.idx) {
+            indexRide?.run(step.idx, { cold: step.cold !== false })
+            return
+        }
+        if ((step.tap ?? Db.Postgres) === Db.Redis) {
             if (step.raw) redis?.readRaw?.()
-            else if (step.op === 'object') redis?.readInline()
-            else if (step.big) redis?.readBig(step.big, step.op ?? 'walk')
+            else if (step.op === RedisReadOp.Object) redis?.readInline()
+            else if (step.big !== undefined) redis?.readBig(step.big, step.op ?? RedisReadOp.Walk)
             else redis?.runCommand()
         } else void sim.runQuery()
     }
@@ -268,7 +309,8 @@ export function createStory({
         if (step.speed) setSpeed?.(last ? 1 : step.speed)
         redis?.setPacketScale?.(1)
         if (step.freezeAt && !last) watchPhase(step, mine)
-        if ((step.send ?? 0) > 0 || step.sustain || step.act) {
+        const carried = keepsRide(step)
+        if (!carried && ((step.send ?? 0) > 0 || step.sustain || step.act)) {
             window.setTimeout(() => {
                 if (mine !== token || !running) return
                 const n = step.send ?? 0
@@ -284,7 +326,8 @@ export function createStory({
         const cursor = redis?.rideState().cursor ?? null
         const deepEnough =
             step.freezeAtStep === undefined || (cursor?.step ?? -1) >= step.freezeAtStep
-        if (redis?.phase() === step.freezeAt && deepEnough) {
+        const phase = step.idx ? (indexRide?.state().stage ?? null) : redis?.phase()
+        if (phase === step.freezeAt && deepEnough) {
             const deeper = cursor !== null && cursor.step > openedAt
             if (left || deeper) {
                 frozen = true

@@ -1,6 +1,6 @@
-import type { StoryStep } from './types'
+import type { StoryDef, StoryStep } from '../types'
 
-export const WAL_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'a log beside the data',
         body: 'PostgreSQL never writes a changed page straight to disk. Every change is first appended to this run of 16 MiB segment blocks — the write-ahead log. If the server dies mid-write, the log is what it replays to rebuild the data files.',
@@ -75,3 +75,10 @@ export const WAL_STORY: StoryStep[] = [
         waitFor: 'old segments recycled back to the start',
     },
 ]
+
+export const WAL_STORY: StoryDef = {
+    id: 'wal',
+    label: 'the write-ahead log',
+    hint: 'why a change is written to a log before the page it changes',
+    steps,
+}

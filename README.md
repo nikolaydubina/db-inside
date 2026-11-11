@@ -40,8 +40,30 @@ await page.screenshot({ path: 'pages.png' })
 Because every pose is a plain function of the anchors, adding a shot for a new entity is two lines:
 
 ```ts
-{ id: 'gin', label: 'gin', entity: 'gin index', hint: 'jsonb postings',
-  pose: () => shot(ANCHOR.gin, [2.5, 2.5, 5], 32) }
+{ id: 'autovacuum', label: 'autovacuum', entity: 'the vacuum drone',
+  hint: 'the drone that walks the heap',
+  pose: () => shot(ANCHOR.vacuum, [5.1, 4.4, 10.5], 34) }
+```
+
+## Stories
+
+A story is a list of cards; each card frames the subject, issues the work, and freezes the
+clock on the exact instant its caption describes. The cards live with their engine:
+
+```
+src/stories/postgresql/  queue, wal, btree, gin, brin, hash
+src/stories/redis/       pubsub, traversal, zset, hash, inline, raw
+```
+
+The dashed cage that rides above the packet is a **companion**: a structure that has no footprint
+of its own but is the thing the statement is looking at right now. `src/core/companion.ts` carries
+it on the packet's marker, `src/core/packet.ts` is the cube itself — the same object both engines
+use, red on the way in and green on the way out.
+
+```js
+__test.plan('btree')        // cards, their freeze stages and what each one waits for
+__test.state().indexRead    // { kind, stage, pages, disk, hits, heap, tuples, gap }
+page.click('#story-next')   // resumes the same ride on the next card
 ```
 
 ## Debugging
@@ -160,9 +182,10 @@ Things the scene does not show yet. The first block is already listed in the Sto
 - [ ] **the seq-scan ring buffer** — a bulk read streams through a 256 KiB ring so a scan does not
       evict the whole pool. The drawing walks every page of a scan with no such limit, so it implies a
       scan is free to displace everything.
-- [ ] **the index cage is a shape, not memory** — the B-tree/GIN/BRIN/hash trees float permanently and
-      are dashed. What actually happens is 3 page reads into 3 buffer slots, and a miss is a disk
-      read first. Make the cages hold real pages, and light the slots the descent touches.
+- [ ] **an index that is not a file** — the companion draws the index pages inside the cage on the
+      packet, but each hop lands on a shared-buffer slot that holds whatever page was there before.
+      The descent should light the slots that actually hold *its* pages, and the index file should
+      have blocks on the plate like every other relation.
 - [ ] **partitioning** — declarative range/list/hash partitions and the planner's pruning. This is what
       "shard" means inside one server; cross-server sharding is not in core and should say so rather
       than be drawn as if it were.

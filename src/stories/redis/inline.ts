@@ -1,7 +1,10 @@
-import type { StoryStep } from './types'
-import { frozeAt } from './stop'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { RedisReadOp } from '../../redis/values'
+import { Db, DbScope } from '../../core/db'
+import { frozeAt } from '../stop'
 
-export const REDIS_INLINE_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'socket → queue → loop',
         body: 'A client sends GET. The bytes enter a connection’s input buffer, the thread reads them on its next pass over epoll, and the parsed command joins the shared queue — where it waits for the one thread that drains it. Nothing has been looked up yet: the server has a key name and nothing else. This is the part that gets skipped when people say redis is a hash table — every lookup is preceded by a socket read and a place in the queue.',
@@ -9,8 +12,8 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 11,
         fov: 42,
-        tap: 'redis',
-        op: 'object',
+        tap: Db.Redis,
+        op: RedisReadOp.Object,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -18,8 +21,8 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a request on its way in',
-        freezeAt: 'socket',
-        assert: frozeAt('socket', 'the socket the request came in on'),
+        freezeAt: Stage.Socket,
+        assert: frozeAt(Stage.Socket, 'the socket the request came in on'),
     },
     {
         title: 'bucket → page → object → back out',
@@ -29,8 +32,8 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         dir: [0.5, 0.92, 0.86],
         dist: 11,
         fov: 34,
-        tap: 'redis',
-        op: 'object',
+        tap: Db.Redis,
+        op: RedisReadOp.Object,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -38,8 +41,8 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the object header and its reply',
-        freezeAt: 'value',
-        assert: frozeAt('value', 'the object header that carries the encoding'),
+        freezeAt: Stage.Value,
+        assert: frozeAt(Stage.Value, 'the object header that carries the encoding'),
     },
     {
         title: 'and back out through the socket',
@@ -49,8 +52,8 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 11,
         fov: 42,
-        tap: 'redis',
-        op: 'object',
+        tap: Db.Redis,
+        op: RedisReadOp.Object,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -58,7 +61,15 @@ export const REDIS_INLINE_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the reply back at the socket',
-        freezeAt: 'reply',
-        assert: frozeAt('reply', 'the answer, back at the socket it came in on'),
+        freezeAt: Stage.Reply,
+        assert: frozeAt(Stage.Reply, 'the answer, back at the socket it came in on'),
     },
 ]
+
+export const REDIS_INLINE_STORY: StoryDef = {
+    id: 'inline',
+    label: 'inline values',
+    hint: 'the values that end inside their own 16-byte object: int, embstr, shared ints',
+    db: DbScope.Redis,
+    steps,
+}

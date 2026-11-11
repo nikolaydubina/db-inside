@@ -1,4 +1,4 @@
-export enum KeyKind {
+export const enum RedisKeyKind {
     String = 0,
     List = 1,
     Hash = 2,
@@ -6,10 +6,10 @@ export enum KeyKind {
     ZSet = 4,
 }
 
-export const KIND_NAME: Record<KeyKind, string> = {
-    [KeyKind.String]: 'string',
-    [KeyKind.List]: 'list',
-    [KeyKind.Hash]: 'hash',
-    [KeyKind.Set]: 'set',
-    [KeyKind.ZSet]: 'zset',
+export const REDIS_KEY_KIND_NAME: Record<RedisKeyKind, string> = {
+    [RedisKeyKind.String]: 'string',
+    [RedisKeyKind.List]: 'list',
+    [RedisKeyKind.Hash]: 'hash',
+    [RedisKeyKind.Set]: 'set',
+    [RedisKeyKind.ZSet]: 'zset',
 }

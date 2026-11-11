@@ -1,6 +1,9 @@
 import * as THREE from 'three'
 import type { EngineSim, SimStats } from '../postgresql/sim'
-import type { BigKind } from '../redis/redis'
+import { RedisBigKind, RedisReadOp } from '../redis/values'
+import { Stage } from '../core/stage'
+import { Db, DbScope } from '../core/db'
+import type { PostgresqlIndexKind } from '../postgresql/indexes'
 
 export type StoryFacts = Pick<
     SimStats,
@@ -25,27 +28,21 @@ export type StoryFacts = Pick<
 
     rdFanouts: number
 
-    rdPhase: RidePhase
+    rdPhase: Stage | null
 
     rdStopGap: number | null
 
     rdCursor: { kind: string; step: number; steps: number } | null
-}
 
-export type RidePhase =
-    | 'socket'
-    | 'channel'
-    | 'delivered'
-    | 'bucket'
-    | 'page'
-    | 'entry'
-    | 'value'
-    | 'inner'
-    | 'field'
-    | 'node'
-    | 'hop'
-    | 'reply'
-    | null
+    idxKind: PostgresqlIndexKind | null
+    idxStage: Stage | null
+    idxPages: number
+    idxDisk: number
+    idxHits: number
+    idxHeap: number
+    idxTuples: number
+    idxGap: number | null
+}
 
 export interface StorySubject {
     id: string
@@ -70,6 +67,8 @@ export interface StoryScene {
     walHead(): StorySubject | null
 
     redisRide?: () => StorySubject | null
+
+    indexRide?: () => StorySubject | null
 }
 
 export interface StoryStep {
@@ -91,15 +90,19 @@ export interface StoryStep {
 
     send?: number
 
-    tap?: 'postgres' | 'redis'
+    tap?: Db
 
     publish?: boolean
 
     subscribe?: boolean
 
-    big?: BigKind
+    big?: RedisBigKind
 
-    op?: 'point' | 'walk' | 'object'
+    op?: RedisReadOp
+
+    idx?: PostgresqlIndexKind
+
+    cold?: boolean
 
     raw?: true
 
@@ -113,7 +116,7 @@ export interface StoryStep {
 
     speed?: number
 
-    freezeAt?: Exclude<RidePhase, null>
+    freezeAt?: Stage
 
     freezeAtStep?: number
 
@@ -133,6 +136,6 @@ export interface StoryDef {
     label: string
     hint: string
 
-    db?: 'postgres' | 'redis' | 'both'
+    db?: DbScope
     steps: StoryStep[]
 }

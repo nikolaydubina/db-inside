@@ -1,7 +1,6 @@
 import * as THREE from 'three'
 import { BACKEND_ORIGIN } from '../postgresql/instance'
-import { BIG_SPOT } from './values'
-import type { BigKind } from './values'
+import { RedisBigKind, REDIS_BIG_SPOT } from './values'
 import {
     AOF_BUF_Y,
     AOF_C0,
@@ -16,15 +15,16 @@ import {
     zAt,
 } from './layout'
 
-import { KeyKind, KIND_NAME } from './kind'
+import { RedisKeyKind, REDIS_KEY_KIND_NAME } from './kind'
 
-export { KeyKind, KIND_NAME }
+export { RedisKeyKind, REDIS_KEY_KIND_NAME }
 
-export const BIG_REAL: Record<BigKind, { entries: number; mib: number; unit: string }> = {
-    hash: { entries: 5_300_000, mib: 393, unit: 'fields' },
-    zset: { entries: 1_400_000, mib: 160, unit: 'members' },
-    list: { entries: 2_100_000, mib: 92, unit: 'elements' },
-}
+export const REDIS_BIG_REAL: Record<RedisBigKind, { entries: number; mib: number; unit: string }> =
+    {
+        [RedisBigKind.Hash]: { entries: 5_300_000, mib: 393, unit: 'fields' },
+        [RedisBigKind.ZSet]: { entries: 1_400_000, mib: 160, unit: 'members' },
+        [RedisBigKind.List]: { entries: 2_100_000, mib: 92, unit: 'elements' },
+    }
 
 export interface RedisKey {
     i: number
@@ -33,7 +33,7 @@ export interface RedisKey {
     home: THREE.Vector3
 
     page: number
-    kind: KeyKind
+    kind: RedisKeyKind
     live: boolean
 
     ttl: number
@@ -46,7 +46,7 @@ export interface RedisKey {
 
     aux: boolean
 
-    big?: BigKind
+    big?: RedisBigKind
 
     raw?: boolean
 
@@ -55,15 +55,15 @@ export interface RedisKey {
 
 export function encodingOf(key: RedisKey): string {
     switch (key.kind) {
-        case KeyKind.String:
+        case RedisKeyKind.String:
             return key.bytes <= 44 ? 'embstr' : 'raw'
-        case KeyKind.Hash:
+        case RedisKeyKind.Hash:
             return key.aux ? 'hashtable' : 'listpack'
-        case KeyKind.Set:
+        case RedisKeyKind.Set:
             return key.aux ? 'hashtable' : 'intset'
-        case KeyKind.ZSet:
+        case RedisKeyKind.ZSet:
             return key.aux ? 'skiplist + dict' : 'listpack'
-        case KeyKind.List:
+        case RedisKeyKind.List:
             return key.big
                 ? 'quicklist · listpacks'
                 : key.aux
@@ -73,8 +73,8 @@ export function encodingOf(key: RedisKey): string {
 }
 
 export function auxBlocks(key: RedisKey): number {
-    if (!key.aux || key.kind === KeyKind.String) return 0
-    return key.kind === KeyKind.ZSet ? 2 : 1
+    if (!key.aux || key.kind === RedisKeyKind.String) return 0
+    return key.kind === RedisKeyKind.ZSet ? 2 : 1
 }
 
 export interface RedisPort {
@@ -115,9 +115,9 @@ export function rebaseAnchors() {
     REDIS_ANCHOR.aof.set(xAt(AOF_C0), BLOCK_TOP, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.aofBuf.set(xAt(AOF_C0), AOF_BUF_Y, zAt(AOF_ROW)).add(o)
     REDIS_ANCHOR.rdb.copy(RDB_CENTRE).add(o)
-    REDIS_ANCHOR.bigHash.copy(BIG_SPOT.hash).add(o)
-    REDIS_ANCHOR.bigZset.copy(BIG_SPOT.zset).add(o)
-    REDIS_ANCHOR.bigList.copy(BIG_SPOT.list).add(o)
+    REDIS_ANCHOR.bigHash.copy(REDIS_BIG_SPOT[RedisBigKind.Hash]).add(o)
+    REDIS_ANCHOR.bigZset.copy(REDIS_BIG_SPOT[RedisBigKind.ZSet]).add(o)
+    REDIS_ANCHOR.bigList.copy(REDIS_BIG_SPOT[RedisBigKind.List]).add(o)
 }
 
 rebaseAnchors()

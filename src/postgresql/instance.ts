@@ -20,8 +20,10 @@ import {
     randInt,
     slotLattice,
 } from '../core/util'
-import type { PathEnd } from '../core/flow'
+import { PostgresqlPathEnd } from './flow'
 import { freeAt as fragmentedFree } from '../disk/fragmentation'
+import { createPostgresqlIndexCompanion } from './indexes'
+import type { PostgresqlIndexCompanionHandle } from './indexes'
 import {
     PALETTE,
     ANCHOR,
@@ -44,7 +46,6 @@ import {
     PAGE_Y,
     POSTGRES_ORIGIN,
     PROCESS,
-    RAM_LIFT,
     SYSTEM_GREY,
     SYSTEM_RUNS,
     TABLE_REGIONS,
@@ -59,7 +60,7 @@ import {
     pageZ,
     rebaseAnchors,
 } from './layout'
-import type { SystemArea } from './layout'
+import type { PostgresqlSystemArea } from './layout'
 export * from './layout'
 
 export interface StatLine {
@@ -125,13 +126,23 @@ export interface Page8K {
 
     free: boolean
 
-    system: SystemArea | null
+    system: PostgresqlSystemArea | null
 
     dead: boolean
     busy: boolean
 }
 
-export type NodeName = 'parse' | 'plan' | 'exec'
+export const enum PostgresqlNodeName {
+    Parse = 1,
+    Plan = 2,
+    Exec = 3,
+}
+
+export const POSTGRESQL_NODE_NAME: Record<PostgresqlNodeName, string> = {
+    [PostgresqlNodeName.Parse]: 'parse',
+    [PostgresqlNodeName.Plan]: 'plan',
+    [PostgresqlNodeName.Exec]: 'exec',
+}
 
 export const INBUF_CELLS = 3
 
@@ -178,7 +189,7 @@ export interface PipelineNode {
 export interface ProcessPipeline {
     group: THREE.Group
     cage: OutlineBox
-    nodes: Record<NodeName, PipelineNode>
+    nodes: Record<PostgresqlNodeName, PipelineNode>
 }
 
 const glowMat = (
@@ -212,11 +223,8 @@ export class PostgresInstance {
 
     readonly walBufBlocks: THREE.Mesh[] = []
     private walBufGroup!: THREE.Group
-    readonly btreeMats: THREE.MeshStandardMaterial[] = []
-    readonly ginMats: THREE.MeshStandardMaterial[] = []
-    readonly brinMats: THREE.MeshStandardMaterial[] = []
-    readonly hashMats: THREE.MeshStandardMaterial[] = []
     readonly lockMats: THREE.MeshStandardMaterial[] = []
+    readonly indexCompanion: PostgresqlIndexCompanionHandle
 
     pageField!: THREE.InstancedMesh
 
@@ -242,7 +250,6 @@ export class PostgresInstance {
     readonly vacuumDrone: THREE.Group
     motes!: THREE.Points
 
-    indexScan = false
     private deadCount = 0
 
     constructor(private ticker: Ticker) {
@@ -251,10 +258,7 @@ export class PostgresInstance {
         this.buildWal()
         this.buildPageField()
         this.buildTableRegions()
-        this.buildIndex()
-        this.buildGin()
-        this.buildBrin()
-        this.buildHash()
+        this.indexCompanion = createPostgresqlIndexCompanion(this.group)
         this.buildLocks()
         this.buildBackends()
         this.scanner = this.makeScanner()
@@ -1081,253 +1085,6 @@ export class PostgresInstance {
         })
     }
 
-    private markDiagram(pick: THREE.Mesh, info: Info, color: number) {
-        const size = (pick.geometry as THREE.BoxGeometry).parameters
-        const cage = new OutlineBox(size.width, size.height, size.depth, color, 0.3, {
-            dashed: true,
-        }).centre(pick.position.x, pick.position.y, pick.position.z)
-        this.group.add(cage)
-        this.register(pick, info, cage)
-        return cage
-    }
-
-    private buildIndex() {
-        const cx = ANCHOR.index.x
-        const cz = ANCHOR.index.z
-        const tree = new THREE.Group()
-        const nodeGeo = new RoundedBoxGeometry(0.66, 0.26, 0.66, 2, 0.04)
-
-        const levels = [
-            { y: 3.1, xs: [cx] },
-            { y: 2.2, xs: [cx - 1.45, cx, cx + 1.45] },
-            { y: 1.3, xs: [cx - 2.9, cx - 1.9, cx - 0.95, cx, cx + 0.95, cx + 1.9, cx + 2.9] },
-        ]
-        const pts: THREE.Vector3[][] = []
-        for (const level of levels) {
-            const rowPts: THREE.Vector3[] = []
-            for (const x of level.xs) {
-                const mat = glowMat(0x0a1f2c, PALETTE.violet, 0.55, { metalness: 0.5 })
-                const m = new THREE.Mesh(nodeGeo, mat)
-                m.position.set(x, level.y, cz)
-                m.castShadow = true
-                tree.add(m)
-                this.btreeMats.push(mat)
-                rowPts.push(m.position.clone())
-            }
-            pts.push(rowPts)
-        }
-
-        const segs: number[] = []
-        for (let l = 0; l < 2; l++) {
-            const parents = pts[l]
-            const children = pts[l + 1]
-            parents.forEach((p, i) => {
-                const span = children.length / parents.length
-                const start = Math.floor(i * span)
-                const end = Math.floor((i + 1) * span)
-                for (let c = start; c < end; c++) {
-                    segs.push(p.x, p.y, p.z, children[c].x, children[c].y, children[c].z)
-                }
-            })
-        }
-        const edgeGeo = new THREE.BufferGeometry()
-        edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(segs, 3))
-        const edges = new THREE.LineSegments(
-            edgeGeo,
-            new THREE.LineBasicMaterial({
-                color: 0x8a7bff,
-                transparent: true,
-                opacity: 0.45,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-            }),
-        )
-        tree.add(edges)
-
-        const base = new THREE.Mesh(
-            new RoundedBoxGeometry(6.5, 0.24, 2.0, 2, 0.05),
-            glowMat(0x080f1a, 0x3b2f8f, 0.4),
-        )
-        base.position.set(cx, 0.95, cz)
-        tree.add(base)
-
-        tree.position.y = RAM_LIFT - 0.55
-        this.group.add(tree)
-
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(6.8, 3.1, 1.4),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.set(cx, 1.5 + RAM_LIFT, cz)
-        this.group.add(pick)
-        this.markDiagram(
-            pick,
-            {
-                title: 'B-tree index — the tree as it sits in RAM',
-                body: 'A balanced tree over key → TID. It is shown floating because this is the tree the backends walk right now: its pages were read from its index file into shared buffers, and the hot internal pages stay there. An index scan costs ~3 page reads instead of the whole table. The dashed box is not a block of memory — the tree has no such footprint; it is the shape of the structure, drawn so you can follow a descent. The pages it lives in are 8 KiB blocks on the plate, like every other page.',
-                meta: 'b-tree · 3 levels · key → TID · pages cached in RAM',
-            },
-            PALETTE.violet,
-        )
-
-        const lab = label('B-TREE')
-        lab.position.set(cx - 1.6, 2.85 + RAM_LIFT, cz + 1.4)
-        this.group.add(lab)
-    }
-
-    private buildGin() {
-        const cx = ANCHOR.gin.x
-        const cz = ANCHOR.gin.z
-
-        const base = new THREE.Mesh(
-            new RoundedBoxGeometry(3.4, 0.26, 2.6, 2, 0.06),
-            glowMat(0x140a18, 0x6a1f4d, 0.6, { metalness: 0.4, roughness: 0.5 }),
-        )
-        base.position.set(cx, 0.36 + RAM_LIFT, cz)
-        base.castShadow = true
-        base.receiveShadow = true
-        this.group.add(base)
-
-        const pinGeo = new THREE.BoxGeometry(0.09, 1, 0.09)
-        const cols = 6
-        const rows = 4
-        const gx = 0.5
-        const gz = 0.52
-        const ox = cx - ((cols - 1) * gx) / 2
-        const oz = cz - ((rows - 1) * gz) / 2
-
-        for (let r = 0; r < rows; r++) {
-            for (let c = 0; c < cols; c++) {
-                const h = 0.45 + Math.random() * 1.15
-                const mat = glowMat(0x2a0a1e, PALETTE.magenta, 0.75)
-                const m = new THREE.Mesh(pinGeo, mat)
-                m.scale.y = h
-                m.position.set(ox + c * gx, 0.5 + RAM_LIFT + h / 2, oz + r * gz)
-                m.castShadow = true
-                this.group.add(m)
-                this.ginMats.push(mat)
-            }
-        }
-
-        const rail = new THREE.Mesh(
-            new THREE.BoxGeometry(3.0, 0.02, 0.03),
-            new THREE.MeshBasicMaterial({
-                color: 0xff8ac8,
-                transparent: true,
-                opacity: 0.5,
-                blending: THREE.AdditiveBlending,
-                depthWrite: false,
-            }),
-        )
-        rail.position.set(cx, 1.95 + RAM_LIFT, cz - 0.78)
-        this.group.add(rail)
-
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(3.6, 2.2, 2.8),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.set(cx, 1.3 + RAM_LIFT, cz)
-        this.group.add(pick)
-        this.markDiagram(
-            pick,
-            {
-                title: 'GIN — Generalized Inverted Index',
-                body: 'Maps each element of a composite value — a jsonb key, an array element, a full-text lexeme — to a posting list of row TIDs. Fast for containment (`@>`, `?`, `@@`) and full-text search, expensive to update because one row can write many postings. Dashed, because this is the shape of the structure rather than a block of memory: the postings live in 8 KiB pages on the plate.',
-                meta: 'gin · element → posting list · jsonb / arrays / tsvector',
-            },
-            PALETTE.magenta,
-        )
-
-        const lab = label('GIN')
-        lab.position.set(cx - 1.3, 2.75 + RAM_LIFT, cz + 0.3)
-        this.group.add(lab)
-    }
-
-    private buildBrin() {
-        const cx = ANCHOR.brin.x
-        const cz = ANCHOR.brin.z + 2.55
-        const slabGeo = new RoundedBoxGeometry(0.32, 0.42, 0.78, 2, 0.03)
-        const dotGeo = new THREE.BoxGeometry(0.1, 0.1, 0.1)
-
-        for (let i = 0; i < 8; i++) {
-            const mat = glowMat(0x0c0a24, PALETTE.violet, 0.7)
-            const m = new THREE.Mesh(slabGeo, mat)
-            m.position.set(cx - 2.1 + i * 0.6, 0.34 + RAM_LIFT, cz)
-            m.castShadow = true
-            this.group.add(m)
-            this.brinMats.push(mat)
-
-            for (const dz of [-0.2, 0.2]) {
-                const dot = new THREE.Mesh(dotGeo, mat)
-                dot.position.set(m.position.x, 0.61 + RAM_LIFT, cz + dz)
-                this.group.add(dot)
-            }
-        }
-
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(4.8, 0.9, 1.2),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.set(cx, 0.55 + RAM_LIFT, cz)
-        this.group.add(pick)
-        this.markDiagram(
-            pick,
-            {
-                title: 'BRIN — Block Range Index',
-                body: 'Stores only min/max per range of pages (default 128), so the whole index is a few kilobytes even for a huge heap. Floating here because the summary tuples are what lives in memory while a scan runs; it is a tiny file of its own on the plate below. Great when data is ordered by the indexed column, useless when values are scattered. The dashed box is the summary structure, not an allocation.',
-                meta: 'brin · min/max per 128 pages · tiny · summarised in RAM',
-            },
-            PALETTE.violet,
-        )
-
-        const lab = label('BRIN')
-        lab.position.set(cx + 0.1, 1.35 + RAM_LIFT, cz + 0.85)
-        this.group.add(lab)
-    }
-
-    private buildHash() {
-        const cx = ANCHOR.hash.x
-        const cz = ANCHOR.hash.z
-
-        const hubMat = glowMat(0x0a1a14, PALETTE.teal, 0.8, { metalness: 0.5 })
-        const hub = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.34, 0.5, 16), hubMat)
-        hub.position.set(cx, 0.35 + RAM_LIFT, cz)
-        hub.castShadow = true
-        this.group.add(hub)
-        this.hashMats.push(hubMat)
-
-        const bucketGeo = new THREE.CylinderGeometry(0.17, 0.17, 0.42, 12)
-        for (let i = 0; i < 8; i++) {
-            const a = (i / 8) * Math.PI * 2
-            const mat = glowMat(0x081a16, PALETTE.teal, 0.5, { metalness: 0.55 })
-            const b = new THREE.Mesh(bucketGeo, mat)
-            b.position.set(cx + Math.cos(a) * 1.12, 0.3 + RAM_LIFT, cz + Math.sin(a) * 1.12)
-            b.castShadow = true
-            this.group.add(b)
-            this.hashMats.push(mat)
-        }
-
-        const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(2.7, 1.0, 2.7),
-            new THREE.MeshBasicMaterial({ visible: false }),
-        )
-        pick.position.set(cx, 0.45 + RAM_LIFT, cz)
-        this.group.add(pick)
-        this.markDiagram(
-            pick,
-            {
-                title: 'Hash index',
-                body: 'Hashes the key into one of N buckets and stores TIDs there. Equality lookups only: no range scans, no ordering. Shown in memory: a lookup touches a single bucket page, and those pages sit in shared buffers while the index is being used. The dashed box around the fan-out is the shape of the structure, not a block of memory.',
-                meta: 'hash · 32-bit hash → bucket · equality only',
-            },
-            PALETTE.teal,
-        )
-
-        const lab = label('HASH')
-        lab.position.set(cx + 0.2, 1.35 + RAM_LIFT, cz + 1.7)
-        this.group.add(lab)
-    }
-
     private buildLocks() {
         const cluster = new THREE.Group()
         cluster.position.set(0.4, 2.5, -3.9)
@@ -1542,9 +1299,15 @@ export class PostgresInstance {
         const group = new THREE.Group()
         this.group.add(group)
 
-        const defs: { name: NodeName; z: number; color: number; text: string; info: Info }[] = [
+        const defs: {
+            name: PostgresqlNodeName
+            z: number
+            color: number
+            text: string
+            info: Info
+        }[] = [
             {
-                name: 'parse',
+                name: PostgresqlNodeName.Parse,
                 z: PROCESS.zParse,
                 color: PALETTE.cyan,
                 text: 'PARSER',
@@ -1555,7 +1318,7 @@ export class PostgresInstance {
                 },
             },
             {
-                name: 'plan',
+                name: PostgresqlNodeName.Plan,
                 z: PROCESS.zPlan,
                 color: PALETTE.violet,
                 text: 'PLANNER',
@@ -1566,7 +1329,7 @@ export class PostgresInstance {
                 },
             },
             {
-                name: 'exec',
+                name: PostgresqlNodeName.Exec,
                 z: PROCESS.zExec,
                 color: PALETTE.teal,
                 text: 'EXECUTOR',
@@ -1578,7 +1341,7 @@ export class PostgresInstance {
             },
         ]
 
-        const nodes = {} as Record<NodeName, PipelineNode>
+        const nodes = {} as Record<PostgresqlNodeName, PipelineNode>
         for (const def of defs) {
             const pos = new THREE.Vector3(x, PROCESS.y, def.z)
             const node = new THREE.Group()
@@ -1727,24 +1490,6 @@ export class PostgresInstance {
         return 0
     }
 
-    async scanIndex(): Promise<number[]> {
-        const touched: number[] = []
-        const order = [0, 1, 2, 1, 2, 2, 3, 2, 3, 3, 3]
-        for (let i = 0; i < 6; i++) {
-            const idx = order[i]
-            const mat = this.btreeMats[idx]
-            if (mat) {
-                mat.emissiveIntensity = 1.4
-                touched.push(idx)
-                void this.ticker.add(0.45, (k) => {
-                    mat.emissiveIntensity = 1.4 - 0.9 * k
-                })
-            }
-            await this.ticker.wait(0.09)
-        }
-        return touched
-    }
-
     async flushWal(): Promise<void> {
         const lit = this.walFilledSegments
         for (let i = 0; i < lit; i++) {
@@ -1773,31 +1518,29 @@ export class PostgresInstance {
         )
     }
 
-    private busiestPipeline(name: NodeName): PipelineNode {
+    private busiestPipeline(name: PostgresqlNodeName): PipelineNode {
         const open = this.backends.filter((b) => b.active)
         const pod = open.find((b) => b.busy) ?? open[0] ?? this.backends[0]
         return pod.pipeline.nodes[name]
     }
 
-    pathEnd(name: PathEnd): THREE.Vector3 {
+    pathEnd(name: PostgresqlPathEnd): THREE.Vector3 {
         switch (name) {
-            case 'parse':
-            case 'plan':
-            case 'exec':
-                return this.busiestPipeline(name).group.position.clone()
-            case 'walBuf':
+            case PostgresqlPathEnd.Parse:
+                return this.busiestPipeline(PostgresqlNodeName.Parse).group.position.clone()
+            case PostgresqlPathEnd.Plan:
+                return this.busiestPipeline(PostgresqlNodeName.Plan).group.position.clone()
+            case PostgresqlPathEnd.Exec:
+                return this.busiestPipeline(PostgresqlNodeName.Exec).group.position.clone()
+            case PostgresqlPathEnd.WalBuf:
                 return this.walBufferTop()
-            case 'walHead':
+            case PostgresqlPathEnd.WalHead:
                 return this.walHeadTop()
-            case 'buffer':
+            case PostgresqlPathEnd.Buffer:
                 return new THREE.Vector3(bufferSlotX(6), BUFFER_TOP_Y, bufferSlotZ(3))
-            case 'heap':
+            case PostgresqlPathEnd.Heap:
                 return new THREE.Vector3(ANCHOR.heap.x, PAGE_TOP_Y + 0.3, ANCHOR.heap.z)
-            case 'index':
-                return ANCHOR.index.clone()
-            case 'gin':
-                return ANCHOR.gin.clone()
-            case 'disk':
+            case PostgresqlPathEnd.Disk:
                 return new THREE.Vector3(ANCHOR.disk.x, PAGE_TOP_Y, ANCHOR.disk.z)
         }
     }
@@ -1897,7 +1640,7 @@ export class PostgresInstance {
         }
     }
 
-    pulseNode(pod: BackendPod, name: NodeName, strength = 1) {
+    pulseNode(pod: BackendPod, name: PostgresqlNodeName, strength = 1) {
         const n = pod.pipeline.nodes[name]
         if (n) n.pulse = Math.max(n.pulse, strength)
     }
@@ -2043,11 +1786,6 @@ export class PostgresInstance {
             })
         }
 
-        this.btreeMats.forEach((m, i) => {
-            const target = this.indexScan ? 0.55 + 0.35 * Math.sin(time * 2 + i) : 0.4
-            m.emissiveIntensity += (target - m.emissiveIntensity) * Math.min(1, dt * 4)
-        })
-
         this.lockMats.forEach((m, i) => {
             m.emissiveIntensity = 0.25 + 0.3 * breathe(time, 1.7, i)
         })
@@ -2058,11 +1796,15 @@ export class PostgresInstance {
             b.pipeline.group.visible = b.active
 
             if (b.active) {
-                for (const key of ['parse', 'plan', 'exec'] as NodeName[]) {
+                for (const key of [
+                    PostgresqlNodeName.Parse,
+                    PostgresqlNodeName.Plan,
+                    PostgresqlNodeName.Exec,
+                ]) {
                     const n = b.pipeline.nodes[key]
                     const phase = n.home.x * 0.7 + n.home.z
                     n.pulse = Math.max(0, n.pulse - dt * 1.9)
-                    n.ring.rotation.z += dt * (key === 'exec' ? 1.5 : 0.7)
+                    n.ring.rotation.z += dt * (key === PostgresqlNodeName.Exec ? 1.5 : 0.7)
                     n.group.position.set(
                         n.home.x + Math.sin(time * 0.42 + phase) * 0.05,
                         n.home.y +
@@ -2102,16 +1844,6 @@ export class PostgresInstance {
                 }
             })
         }
-
-        this.ginMats.forEach((m, i) => {
-            m.emissiveIntensity = 0.62 + 0.34 * breathe(time, 2.0, i * 0.55)
-        })
-        this.brinMats.forEach((m, i) => {
-            m.emissiveIntensity = 0.6 + 0.3 * breathe(time, 0.8, i * 0.8)
-        })
-        this.hashMats.forEach((m, i) => {
-            m.emissiveIntensity = 0.35 + 0.3 * breathe(time, 1.5, i * 0.9)
-        })
 
         driftDust(this.motes, dt, time)
 

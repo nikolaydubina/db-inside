@@ -1,6 +1,6 @@
-import type { StoryStep } from './types'
+import type { StoryDef, StoryStep } from '../types'
 
-export const QUEUE_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'the setup',
         body: 'One PostgreSQL instance, one client pressing run, and six connection slots — max_connections = 6. Everything from here happens inside this one server.',
@@ -109,3 +109,10 @@ export const QUEUE_STORY: StoryStep[] = [
         speed: 4,
     },
 ]
+
+export const QUEUE_STORY: StoryDef = {
+    id: 'queue',
+    label: 'too many requests',
+    hint: 'what happens when more queries arrive than the connections can run',
+    steps,
+}

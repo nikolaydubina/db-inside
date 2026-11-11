@@ -1,7 +1,10 @@
-import type { StoryStep } from './types'
-import { frozeAt, frozeAtCell } from './stop'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { RedisBigKind, RedisReadOp } from '../../redis/values'
+import { Db, DbScope } from '../../core/db'
+import { frozeAt, frozeAtCell } from '../stop'
 
-export const REDIS_HASH_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'the value is its own bucket array',
         body: 'This is the big hash, and it is not a fat string: it is a dict of its own — a bucket array of pointers, more than a million buckets in the real one, with the fields hanging off it in chains. The keyspace dict found the key; everything inside this cage is inside the value. That nesting is why a huge hash is still O(1) for one field: the inner table is as ordinary as the outer one.',
@@ -9,9 +12,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 12,
         fov: 42,
-        tap: 'redis',
-        big: 'hash',
-        op: 'point',
+        tap: Db.Redis,
+        big: RedisBigKind.Hash,
+        op: RedisReadOp.Point,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -19,8 +22,8 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null && c.bigKeys >= 2,
         waitFor: 'the value’s own bucket array',
-        freezeAt: 'inner',
-        assert: frozeAt('inner', 'the value’s own bucket array'),
+        freezeAt: Stage.Inner,
+        assert: frozeAt(Stage.Inner, 'the value’s own bucket array'),
     },
     {
         title: 'HGET: hash the field, follow the chain',
@@ -29,9 +32,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 10,
         fov: 40,
-        tap: 'redis',
-        big: 'hash',
-        op: 'point',
+        tap: Db.Redis,
+        big: RedisBigKind.Hash,
+        op: RedisReadOp.Point,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -39,8 +42,11 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the bucket inside the value’s table that the field hashed to',
-        freezeAt: 'field',
-        assert: frozeAt('field', 'the bucket inside the value’s table that the field hashed to'),
+        freezeAt: Stage.Field,
+        assert: frozeAt(
+            Stage.Field,
+            'the bucket inside the value’s table that the field hashed to',
+        ),
     },
     {
         title: 'HGETALL: there is no order to jump through',
@@ -49,9 +55,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'hash',
-        op: 'walk',
+        tap: Db.Redis,
+        big: RedisBigKind.Hash,
+        op: RedisReadOp.Walk,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -59,9 +65,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a walk across every bucket',
-        freezeAt: 'node',
+        freezeAt: Stage.Node,
         freezeAtStep: 3,
-        assert: frozeAtCell('node', 'a bucket partway through the scan', 3),
+        assert: frozeAtCell(Stage.Node, 'a bucket partway through the scan', 3),
     },
     {
         title: 'why one command can stop the server',
@@ -70,9 +76,9 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'hash',
-        op: 'walk',
+        tap: Db.Redis,
+        big: RedisBigKind.Hash,
+        op: RedisReadOp.Walk,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -80,7 +86,15 @@ export const REDIS_HASH_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the walk still running on the one thread',
-        freezeAt: 'node',
-        assert: frozeAt('node', 'the page a node of this walk was allocated on'),
+        freezeAt: Stage.Node,
+        assert: frozeAt(Stage.Node, 'the page a node of this walk was allocated on'),
     },
 ]
+
+export const REDIS_HASH_STORY: StoryDef = {
+    id: 'hash',
+    label: 'hash lookups',
+    hint: 'HGET is one bucket; HGETALL walks every bucket — the same value, two different jobs',
+    db: DbScope.Redis,
+    steps,
+}

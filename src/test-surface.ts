@@ -1,17 +1,22 @@
 import type { Story } from './stories/runner'
 import type { StoryStep } from './stories/types'
 
+import { STAGE_NAME, Stage } from './core/stage'
+import { POSTGRESQL_INDEX_NAME } from './postgresql/indexes'
+import type { PostgresqlIndexKind } from './postgresql/indexes'
+import { REDIS_BIG_KIND_NAME } from './redis/values'
+import { DB_SCOPE_NAME } from './core/db'
+
 interface RideSim {
     stats: { loading: boolean; keys: number; note: string }
-    phase(): string | null
+    phase(): Stage | null
     rideState(): {
-        phase: string | null
+        phase: Stage | null
         at: number[] | null
         stopAt: number[] | null
         gap: number | null
         hasPacket: boolean
     }
-
     readCursor(): { kind: string; step: number; steps: number } | null
 }
 
@@ -39,26 +44,22 @@ const plan = (steps: StoryStep[]) =>
         title: s.title,
         waitFor: s.waitFor,
 
-        freezeAt: s.freezeAt ?? null,
+        freezeAt: s.freezeAt === undefined ? null : STAGE_NAME[s.freezeAt],
 
         asserts: !!s.assert,
         subject: s.subject ? 'live subject' : (s.view ?? 'none'),
-        big: s.big ?? null,
+        big: s.big === undefined ? null : REDIS_BIG_KIND_NAME[s.big],
         op: s.op ?? null,
+        idx: s.idx === undefined ? null : POSTGRESQL_INDEX_NAME[s.idx],
         speed: s.speed ?? null,
     }))
 
 export interface TestSurface {
     discover(): Record<string, unknown>
-
     plan(storyId?: string): unknown
-
     ready(): boolean
-
     readyInfo(): { ok: boolean; loading: boolean; keys: number; hasNext: boolean; note: string }
-
     state(): Record<string, unknown>
-
     log(): void
 }
 
@@ -68,8 +69,12 @@ declare global {
     }
 }
 
-export function installTestSurface(opts: { story: Story; redisSim: RideSim }): void {
-    const { story, redisSim } = opts
+export function installTestSurface(opts: {
+    story: Story
+    redisSim: RideSim
+    indexRide?: { state(): Record<string, unknown> }
+}): void {
+    const { story, redisSim, indexRide } = opts
 
     const ids = (map: Record<string, string>) => {
         const out: Record<string, string> = {}
@@ -94,6 +99,7 @@ export function installTestSurface(opts: { story: Story; redisSim: RideSim }): v
 
     const state = () => {
         const ride = redisSim.rideState()
+        const ix = (indexRide?.state() ?? null) as Record<string, any> | null
         const stepText = document.getElementById('story-step')?.textContent?.trim() ?? ''
         return {
             ready: ready(),
@@ -107,13 +113,28 @@ export function installTestSurface(opts: { story: Story; redisSim: RideSim }): v
             verdict: document.getElementById('story-state')?.textContent?.trim() ?? '',
             firstCue: story.firstCue(),
             ride: {
-                phase: ride.phase,
+                phase: ride.phase === null ? null : STAGE_NAME[ride.phase],
                 at: ride.at,
                 stopAt: ride.stopAt,
                 gap: ride.gap,
                 hasPacket: ride.hasPacket,
                 cursor: redisSim.readCursor(),
             },
+            indexRead: ix
+                ? {
+                      kind:
+                          ix.kind === null
+                              ? null
+                              : POSTGRESQL_INDEX_NAME[ix.kind as PostgresqlIndexKind],
+                      stage: ix.stage === null ? null : STAGE_NAME[ix.stage as Stage],
+                      pages: ix.pages,
+                      disk: ix.disk,
+                      hits: ix.hits,
+                      heap: ix.heap,
+                      tuples: ix.tuples,
+                      gap: ix.gap,
+                  }
+                : null,
         }
     }
 
@@ -127,7 +148,7 @@ export function installTestSurface(opts: { story: Story; redisSim: RideSim }): v
             stories: story.stories.map((d) => ({
                 id: d.id,
                 label: d.label,
-                db: d.db ?? 'postgres',
+                db: d.db === undefined ? null : DB_SCOPE_NAME[d.db],
                 steps: d.steps.length,
             })),
             recipe: [

@@ -1,6 +1,8 @@
-import type { StoryStep } from './types'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { DbScope } from '../../core/db'
 
-export const REDIS_PUBSUB_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'a channel with nobody on it',
         body: 'PUBLISH is addressed to a channel, not to a key. A channel is a name in its own dictionary — pubsub_channels — and the only thing hanging off that name is a list of connected sockets. Here the list is empty, and publishing to an empty list is not an error in Redis: the command succeeds and reaches nobody. That is the difference between this and a write: nothing is created to hold the message.',
@@ -29,8 +31,8 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
         speed: 0.25,
         publish: true,
         delay: 500,
-        freezeAt: 'socket',
-        expect: (c) => c.rdPhase === 'socket',
+        freezeAt: Stage.Socket,
+        expect: (c) => c.rdPhase === Stage.Socket,
         waitFor: 'the command waiting in a socket',
     },
     {
@@ -41,8 +43,8 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
         fov: 36,
         dist: 18,
         speed: 0.25,
-        freezeAt: 'channel',
-        expect: (c) => c.rdPhase === 'channel',
+        freezeAt: Stage.Channel,
+        expect: (c) => c.rdPhase === Stage.Channel,
         waitFor: 'the subscriber list being walked',
     },
     {
@@ -53,8 +55,8 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
         fov: 38,
         dist: 22,
         speed: 0.25,
-        freezeAt: 'delivered',
-        expect: (c) => c.rdPhase === 'delivered',
+        freezeAt: Stage.Delivered,
+        expect: (c) => c.rdPhase === Stage.Delivered,
         waitFor: 'the copy in a listener\u2019s output buffer',
     },
     {
@@ -67,3 +69,11 @@ export const REDIS_PUBSUB_STORY: StoryStep[] = [
         waitFor: 'the message leaving nothing behind',
     },
 ]
+
+export const REDIS_PUBSUB_STORY: StoryDef = {
+    id: 'pubsub',
+    label: 'pub/sub',
+    hint: 'no keys, no storage, pure fan-out to N sockets: a path that never touches the keyspace or the log',
+    db: DbScope.Redis,
+    steps,
+}

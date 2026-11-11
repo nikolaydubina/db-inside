@@ -6,18 +6,34 @@ import type { Info } from '../postgresql/instance'
 import { OutlineBox, breathe, label, radialTexture, setLabelEnabled } from '../core/util'
 import { KEY, HEAP_PAGE } from './layout'
 
-export type BigKind = 'hash' | 'zset' | 'list'
-
-export const BIG_COLOR: Record<BigKind, number> = {
-    hash: PALETTE.violet,
-    zset: PALETTE.ice,
-    list: PALETTE.teal,
+export const enum RedisReadOp {
+    Point = 1,
+    Walk = 2,
+    Object = 3,
 }
 
-export const BIG_SPOT: Record<BigKind, THREE.Vector3> = {
-    hash: new THREE.Vector3(-8.6, 3.4, -6.2),
-    zset: new THREE.Vector3(0, 3.4, -6.2),
-    list: new THREE.Vector3(8.6, 3.4, -6.2),
+export const enum RedisBigKind {
+    Hash = 1,
+    ZSet = 2,
+    List = 3,
+}
+
+export const REDIS_BIG_KIND_NAME: Record<RedisBigKind, string> = {
+    [RedisBigKind.Hash]: 'hash',
+    [RedisBigKind.ZSet]: 'zset',
+    [RedisBigKind.List]: 'list',
+}
+
+export const REDIS_BIG_COLOR: Record<RedisBigKind, number> = {
+    [RedisBigKind.Hash]: PALETTE.violet,
+    [RedisBigKind.ZSet]: PALETTE.ice,
+    [RedisBigKind.List]: PALETTE.teal,
+}
+
+export const REDIS_BIG_SPOT: Record<RedisBigKind, THREE.Vector3> = {
+    [RedisBigKind.Hash]: new THREE.Vector3(-8.6, 3.4, -6.2),
+    [RedisBigKind.ZSet]: new THREE.Vector3(0, 3.4, -6.2),
+    [RedisBigKind.List]: new THREE.Vector3(8.6, 3.4, -6.2),
 }
 
 export interface Host {
@@ -30,42 +46,54 @@ export interface Host {
     ): { cage: OutlineBox; pick: THREE.Mesh; box: THREE.Box3 }
     addPick(pick: THREE.Mesh): void
     keyInfo(i: number): { info: Info } | null
-    readonly bigKeys: Partial<Record<BigKind, { i: number }>>
+    readonly bigKeys: Partial<Record<RedisBigKind, { i: number }>>
 }
 
 export class BigValues {
     private readonly host: Host
-    private groups: Partial<Record<BigKind, THREE.Group>> = {}
-    private labels: Partial<Record<BigKind, THREE.Object3D>> = {}
-    private areas: Partial<Record<BigKind, THREE.Box3>> = {}
+    private groups: Partial<Record<RedisBigKind, THREE.Group>> = {}
+    private labels: Partial<Record<RedisBigKind, THREE.Object3D>> = {}
+    private areas: Partial<Record<RedisBigKind, THREE.Box3>> = {}
 
-    private mats: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
+    private mats: Partial<Record<RedisBigKind, THREE.MeshStandardMaterial>> = {}
 
-    private warm: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
-    private hot: Partial<Record<BigKind, THREE.MeshStandardMaterial>> = {}
+    private warm: Partial<Record<RedisBigKind, THREE.MeshStandardMaterial>> = {}
+    private hot: Partial<Record<RedisBigKind, THREE.MeshStandardMaterial>> = {}
 
-    private steps: Partial<Record<BigKind, THREE.Mesh[][]>> = {}
+    private steps: Partial<Record<RedisBigKind, THREE.Mesh[][]>> = {}
 
-    private step: Record<BigKind, number> = { hash: -1, zset: -1, list: -1 }
-    private pulse: Record<BigKind, number> = { hash: 0, zset: 0, list: 0 }
+    private step: Record<RedisBigKind, number> = {
+        [RedisBigKind.Hash]: -1,
+        [RedisBigKind.ZSet]: -1,
+        [RedisBigKind.List]: -1,
+    }
+    private pulse: Record<RedisBigKind, number> = {
+        [RedisBigKind.Hash]: 0,
+        [RedisBigKind.ZSet]: 0,
+        [RedisBigKind.List]: 0,
+    }
     private halos: THREE.Sprite[] = []
 
     constructor(host: Host) {
         this.host = host
     }
 
-    build(keys: Iterable<{ big?: BigKind; i: number }>, hotKeys: Array<{ home: THREE.Vector3 }>) {
+    build(
+        keys: Iterable<{ big?: RedisBigKind; i: number }>,
+        hotKeys: Array<{ home: THREE.Vector3 }>,
+    ) {
         for (const key of keys) {
             if (key.big) this.host.bigKeys[key.big] = key
         }
 
-        this.wrapBig('hash', () => this.buildBigHash())
-        this.wrapBig('zset', () => this.buildBigZset())
-        this.wrapBig('list', () => this.buildBigList())
+        this.wrapBig(RedisBigKind.Hash, () => this.buildBigHash())
+        this.wrapBig(RedisBigKind.ZSet, () => this.buildBigZset())
+        this.wrapBig(RedisBigKind.List, () => this.buildBigList())
 
         this.buildTiers()
 
-        for (const kind of ['hash', 'zset', 'list'] as const) this.ride(kind, null)
+        for (const kind of [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List])
+            this.ride(kind, null)
         this.buildHotHalos(hotKeys)
     }
 
@@ -74,17 +102,16 @@ export class BigValues {
     }
 
     update(dt: number, time: number, hot: Array<{ live: boolean }>) {
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+        for (const kind of [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List]) {
             this.pulse[kind] = Math.max(0, this.pulse[kind] - dt * 2.2)
             const mat = this.mats[kind]
             if (!mat) continue
-            mat.emissiveIntensity =
-                0.42 + 0.1 * breathe(time, 1.4, kind.length) + this.pulse[kind] * 2.2
+            mat.emissiveIntensity = 0.42 + 0.1 * breathe(time, 1.4, kind) + this.pulse[kind] * 2.2
         }
 
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+        for (const kind of [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List]) {
             const hotMat = this.hot[kind]
-            if (hotMat) hotMat.emissiveIntensity = 2.0 + 0.9 * breathe(time, 5.5, kind.length)
+            if (hotMat) hotMat.emissiveIntensity = 2.0 + 0.9 * breathe(time, 5.5, kind)
             const warm = this.warm[kind]
             if (warm) warm.emissiveIntensity = 0.95 + 0.12 * this.pulse[kind]
         }
@@ -97,12 +124,12 @@ export class BigValues {
         })
     }
 
-    private wrapBig(kind: BigKind, build: () => void) {
+    private wrapBig(kind: RedisBigKind, build: () => void) {
         const group = this.host.group
         const before = new Set(group.children)
         build()
         const g = new THREE.Group()
-        g.position.copy(BIG_SPOT[kind])
+        g.position.copy(REDIS_BIG_SPOT[kind])
         group.add(g)
         for (const child of [...group.children]) {
             if (child === g || before.has(child)) continue
@@ -111,12 +138,12 @@ export class BigValues {
         this.groups[kind] = g
     }
 
-    ride(kind: BigKind, packet: THREE.Object3D | null) {
+    ride(kind: RedisBigKind, packet: THREE.Object3D | null) {
         const g = this.groups[kind]
         if (!g) return
         if (!packet) {
             this.host.group.add(g)
-            g.position.copy(BIG_SPOT[kind])
+            g.position.copy(REDIS_BIG_SPOT[kind])
             g.scale.setScalar(1)
             g.visible = false
 
@@ -133,7 +160,7 @@ export class BigValues {
         const size = area?.getSize(new THREE.Vector3()) ?? null
 
         const centre = area?.getCenter(new THREE.Vector3()) ?? new THREE.Vector3()
-        centre.sub(BIG_SPOT[kind])
+        centre.sub(REDIS_BIG_SPOT[kind])
         const longest = size ? Math.max(size.x, size.y, size.z) : 2
         this.carry(g, size, centre, packet, 2 / (longest || 1))
     }
@@ -155,10 +182,10 @@ export class BigValues {
         g.position.set(-centre.x * scale, lift - centre.y * scale, -centre.z * scale)
     }
 
-    private material(kind: BigKind): THREE.MeshStandardMaterial {
+    private material(kind: RedisBigKind): THREE.MeshStandardMaterial {
         const mat = new THREE.MeshStandardMaterial({
             color: 0x0d0a16,
-            emissive: BIG_COLOR[kind],
+            emissive: REDIS_BIG_COLOR[kind],
             emissiveIntensity: 0.42,
             roughness: 0.4,
             metalness: 0.35,
@@ -177,12 +204,12 @@ export class BigValues {
         this.carry(g, size, centre, packet, scale)
     }
 
-    box(kind: BigKind): THREE.Box3 {
+    box(kind: RedisBigKind): THREE.Box3 {
         return (this.areas[kind] ?? new THREE.Box3()).clone()
     }
 
     private buildTiers() {
-        for (const kind of ['hash', 'zset', 'list'] as BigKind[]) {
+        for (const kind of [RedisBigKind.Hash, RedisBigKind.ZSet, RedisBigKind.List]) {
             const base = this.mats[kind]
             if (!base) continue
             const warm = base.clone()
@@ -194,7 +221,7 @@ export class BigValues {
         }
     }
 
-    setStep(kind: BigKind, n: number, of?: number) {
+    setStep(kind: RedisBigKind, n: number, of?: number) {
         const steps = this.steps[kind]
         if (!steps || steps.length === 0) return
         const rest = this.mats[kind]
@@ -217,24 +244,24 @@ export class BigValues {
         })
     }
 
-    private bucketFor(kind: BigKind, buckets: number): number {
+    private bucketFor(kind: RedisBigKind, buckets: number): number {
         const i = this.host.bigKeys[kind]?.i ?? 0
         return Math.abs((i * 2654435761) % buckets)
     }
 
-    stepOf(kind: BigKind): { step: number; steps: number } {
+    stepOf(kind: RedisBigKind): { step: number; steps: number } {
         return { step: this.step[kind], steps: this.steps[kind]?.length ?? 0 }
     }
 
-    touched(kind: BigKind) {
+    touched(kind: RedisBigKind) {
         this.pulse[kind] = 1
     }
 
-    private frameOf(kind: BigKind, w: number, h: number, d: number, cy: number) {
-        const at = BIG_SPOT[kind]
+    private frameOf(kind: RedisBigKind, w: number, h: number, d: number, cy: number) {
+        const at = REDIS_BIG_SPOT[kind]
         const centre = new THREE.Vector3(at.x, at.y + cy, at.z)
         const size = new THREE.Vector3(w, h, d)
-        const { pick, box } = this.host.frame(centre, size, BIG_COLOR[kind], {
+        const { pick, box } = this.host.frame(centre, size, REDIS_BIG_COLOR[kind], {
             dashed: true,
             opacity: 0.2,
         })
@@ -245,15 +272,15 @@ export class BigValues {
             pick.userData.infoFor = () => this.host.keyInfo(key.i)
             this.host.addPick(pick)
         }
-        const lab = label(`${kind.toUpperCase()} · 1 KEY`)
+        const lab = label(`${REDIS_BIG_KIND_NAME[kind].toUpperCase()} · 1 KEY`)
         lab.position.set(at.x - w / 2 - 0.45, at.y + cy + h / 2 + 0.3, at.z - d / 2 - 0.1)
         this.host.group.add(lab)
         this.labels[kind] = lab
     }
 
     private buildBigHash() {
-        const at = BIG_SPOT.hash
-        const mat = this.material('hash')
+        const at = REDIS_BIG_SPOT[RedisBigKind.Hash]
+        const mat = this.material(RedisBigKind.Hash)
         const cols = 9
         const rows = 3
         const pitch = 0.36
@@ -285,13 +312,13 @@ export class BigValues {
                 steps[c].push(e)
             }
         }
-        this.steps.hash = steps
-        this.frameOf('hash', cols * pitch + 0.5, 1.6, rows * pitch + 1.2, 0.34)
+        this.steps[RedisBigKind.Hash] = steps
+        this.frameOf(RedisBigKind.Hash, cols * pitch + 0.5, 1.6, rows * pitch + 1.2, 0.34)
     }
 
     private buildBigZset() {
-        const at = BIG_SPOT.zset
-        const mat = this.material('zset')
+        const at = REDIS_BIG_SPOT[RedisBigKind.ZSet]
+        const mat = this.material(RedisBigKind.ZSet)
         const pitch = 0.42
         const heights = [5, 1, 2, 1, 4, 1, 3, 1, 2, 1, 5]
         const cols = heights.length
@@ -320,19 +347,19 @@ export class BigValues {
                 prev = x
             }
         }
-        this.steps.zset = steps
+        this.steps[RedisBigKind.ZSet] = steps
         const dictGeo = new RoundedBoxGeometry(0.2, 0.06, 0.2, 1, 0.01)
         for (let c = 0; c < 6; c++) {
             const tile = new THREE.Mesh(dictGeo, mat)
             tile.position.set(at.x - 0.75 + c * 0.3, at.y - 0.55, at.z + 0.95)
             this.host.group.add(tile)
         }
-        this.frameOf('zset', 5.0, 2.7, 2.5, 0.5)
+        this.frameOf(RedisBigKind.ZSet, 5.0, 2.7, 2.5, 0.5)
     }
 
     private buildBigList() {
-        const at = BIG_SPOT.list
-        const mat = this.material('list')
+        const at = REDIS_BIG_SPOT[RedisBigKind.List]
+        const mat = this.material(RedisBigKind.List)
         const nodes = 5
         const steps: THREE.Mesh[][] = Array.from({ length: nodes }, () => [])
         const nodeGeo = new RoundedBoxGeometry(0.72, 0.22, 0.34, 1, 0.02)
@@ -358,8 +385,8 @@ export class BigValues {
                 x += 1.02 + skip
             }
         }
-        this.steps.list = steps
-        this.frameOf('list', 7.4, 1.4, 1.9, 0.1)
+        this.steps[RedisBigKind.List] = steps
+        this.frameOf(RedisBigKind.List, 7.4, 1.4, 1.9, 0.1)
     }
 
     private buildHotHalos(hotKeys: Array<{ home: THREE.Vector3 }>) {

@@ -10,6 +10,7 @@ import {
     pageZ,
 } from './postgresql/instance'
 import { REDIS_ANCHOR, REDIS_ORIGIN } from './redis/redis'
+import { Db, DB_NAME, DbScope, inScope } from './core/db'
 import type { Ticker } from './core/util'
 import { easeInOutCubic } from './core/util'
 
@@ -22,22 +23,16 @@ export interface CameraPose {
 export interface ViewDef {
     id: string
     label: string
-
     slug?: string
-
     entity: string
     hint: string
-
-    db?: 'postgres' | 'redis' | 'both'
-
+    db?: DbScope
     whole?: boolean
-
     unlisted?: boolean
     pose(): CameraPose
 }
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
-
 const L = (x: number, y: number, z: number) => V(x, y, z).add(POSTGRES_ORIGIN)
 
 const shot = (
@@ -64,7 +59,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'overview',
         label: 'overview',
-        db: 'both',
+        db: DbScope.Both,
         whole: true,
 
         unlisted: true,
@@ -90,7 +85,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis',
         label: 'redis',
-        db: 'redis',
+        db: DbScope.Redis,
         whole: true,
         entity: 'redis cage',
         hint: 'the redis instance: almost nothing on the disk, everything in the air',
@@ -99,7 +94,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis-dict',
         label: 'dict',
-        db: 'redis',
+        db: DbScope.Redis,
         entity: 'the keyspace dict',
         hint: 'the bucket array: a key hashes into one slot, and a slot is a pointer to a page',
 
@@ -109,7 +104,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis-disk',
         label: 'disk',
-        db: 'redis',
+        db: DbScope.Redis,
         entity: 'persistence',
         hint: 'only two files are here: the incremental AOF and the base RDB',
         pose: () => shot(REDIS_ORIGIN.clone().add(V(0, 0, 3.25)), [-5.6, 10.6, 15.6], 38),
@@ -117,7 +112,7 @@ export const VIEWS: ViewDef[] = [
     {
         id: 'redis-aof',
         label: 'aof',
-        db: 'redis',
+        db: DbScope.Redis,
         entity: 'aof tail',
         hint: 'the end of the log: the block being appended, and the bytes still in aof_buf above it',
 
@@ -127,7 +122,7 @@ export const VIEWS: ViewDef[] = [
         id: 'redis-loop',
         label: 'command loop',
         slug: 'loop',
-        db: 'redis',
+        db: DbScope.Redis,
         entity: 'the command loop',
         hint: 'one thread: the queue draining into it, epoll feeding it, every command passing through it',
 
@@ -137,7 +132,7 @@ export const VIEWS: ViewDef[] = [
         id: 'redis-pubsub',
         label: 'channel',
         slug: 'channel',
-        db: 'redis',
+        db: DbScope.Redis,
         entity: 'the channel',
         hint: 'the command loop and the sockets listening to it: a publish touches no key and no file',
 
@@ -188,13 +183,6 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(V(0, PROCESS.y, (PROCESS.zParse + PROCESS.zExec) / 2), [4.5, 4.2, 13], 38),
     },
     {
-        id: 'indexes',
-        label: 'indexes',
-        entity: 'index structures',
-        hint: 'b-tree, BRIN, GIN and hash floating as they sit in RAM',
-        pose: () => shot(L(5.0, 2.4, -2.6), [7.5, 5.0, 12.5], 36),
-    },
-    {
         id: 'autovacuum',
         label: 'autovacuum',
         entity: 'the vacuum drone',
@@ -242,7 +230,6 @@ export const backendView = (i: number): ViewDef => {
     const mid = L(x, BACKEND_ORIGIN.y - 1.15, BACKEND_ORIGIN.z)
     return {
         id: `backend-${i}`,
-
         slug: `backend-${i + 1}`,
         label: `backend ${i + 1}`,
         entity: `backend ${i + 1}`,
@@ -258,27 +245,27 @@ export const ALL_VIEWS = [
     ...BACKEND_SLOTS.map((_, i) => backendView(i)),
 ]
 
-export const viewsFor = (db: 'postgres' | 'redis') =>
-    ALL_VIEWS.filter((v) => !v.unlisted && (v.db === 'both' || (v.db ?? 'postgres') === db))
+export const viewsFor = (db: Db) =>
+    ALL_VIEWS.filter((v) => !v.unlisted && inScope(v.db ?? DbScope.Postgres, db))
 
 export function slugOf(v: ViewDef): string {
     if (v.slug !== undefined) return v.slug
     if (v.id === 'postgres' || v.id === 'redis') return ''
-    return v.db === 'redis' ? v.id.replace(/^redis-/, '') : v.id
+    return v.db === DbScope.Redis ? v.id.replace(/^redis-/, '') : v.id
 }
 
-export function defaultView(db: 'postgres' | 'redis'): ViewDef {
-    const v = ALL_VIEWS.find((x) => x.id === db)
-    if (!v) throw new Error(`[views] no default shot for ${db}`)
+export function defaultView(db: Db): ViewDef {
+    const v = ALL_VIEWS.find((x) => x.id === DB_NAME[db])
+    if (!v) throw new Error(`[views] no default shot for ${DB_NAME[db]}`)
     return v
 }
 
-export function viewBySlug(db: 'postgres' | 'redis', slug: string): ViewDef | null {
+export function viewBySlug(db: Db, slug: string): ViewDef | null {
     if (!slug) return defaultView(db)
     return viewsFor(db).find((v) => slugOf(v) === slug) ?? null
 }
 
-export function viewForBox(db: 'postgres' | 'redis', box: THREE.Box3, pad = 1.5): ViewDef | null {
+export function viewForBox(db: Db, box: THREE.Box3, pad = 1.5): ViewDef | null {
     if (box.isEmpty()) return null
     const centre = box.getCenter(new THREE.Vector3())
     let best: ViewDef | null = null

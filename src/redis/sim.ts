@@ -1,26 +1,16 @@
 import * as THREE from 'three'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
-import { KeyKind } from './kind'
-import type { BigKind, RedisInstance, RedisKey, RedisPort } from './redis'
-import { BIG_REAL } from './redis'
+import { RedisKeyKind } from './kind'
+import { RedisBigKind, RedisReadOp } from './values'
+import { REDIS_BIG_KIND_NAME } from './values'
+import type { RedisInstance, RedisKey, RedisPort } from './redis'
+import { REDIS_BIG_REAL } from './redis'
 import { HEAP_PAGE } from './layout'
-import { QueryChain, pathCurve } from '../core/flow'
+import { QueryChain, pathCurve } from '../postgresql/flow'
+import { Stage } from '../core/stage'
 import { Ticker, halo, rand, randInt, speedTime as legTime, travel } from '../core/util'
 
-export type RidePhase =
-    | 'socket'
-    | 'channel'
-    | 'delivered'
-    | 'bucket'
-    | 'page'
-    | 'entry'
-    | 'value'
-    | 'inner'
-    | 'field'
-    | 'node'
-    | 'hop'
-    | 'reply'
-    | null
+type RidePhase = Stage | null
 
 type RouteStop = {
     p: THREE.Vector3
@@ -62,13 +52,13 @@ interface Command {
 
     weight: number
 
-    kind?: KeyKind
+    kind?: RedisKeyKind
 
     fanout?: boolean
 
     walk?: boolean
 
-    probe?: 'point' | 'walk' | 'object'
+    probe?: RedisReadOp
 
     cue?: boolean
 }
@@ -78,12 +68,12 @@ const PUBLISH: Command = { name: 'PUBLISH', write: false, weight: 7, fanout: tru
 const COMMANDS: Command[] = [
     { name: 'GET', write: false, weight: 34 },
     { name: 'MGET', write: false, weight: 7 },
-    { name: 'SET', write: true, weight: 20, kind: KeyKind.String },
-    { name: 'INCR', write: true, weight: 7, kind: KeyKind.String },
-    { name: 'HSET', write: true, weight: 8, kind: KeyKind.Hash },
-    { name: 'SADD', write: true, weight: 6, kind: KeyKind.Set },
-    { name: 'LPUSH', write: true, weight: 5, kind: KeyKind.List },
-    { name: 'ZADD', write: true, weight: 5, kind: KeyKind.ZSet },
+    { name: 'SET', write: true, weight: 20, kind: RedisKeyKind.String },
+    { name: 'INCR', write: true, weight: 7, kind: RedisKeyKind.String },
+    { name: 'HSET', write: true, weight: 8, kind: RedisKeyKind.Hash },
+    { name: 'SADD', write: true, weight: 6, kind: RedisKeyKind.Set },
+    { name: 'LPUSH', write: true, weight: 5, kind: RedisKeyKind.List },
+    { name: 'ZADD', write: true, weight: 5, kind: RedisKeyKind.ZSet },
     { name: 'EXPIRE', write: true, weight: 4 },
     { name: 'DEL', write: true, weight: 5 },
     PUBLISH,
@@ -241,7 +231,7 @@ export class RedisSim {
 
     private focusName = ''
 
-    private carried: BigKind | null = null
+    private carried: RedisBigKind | null = null
 
     private objectRead = false
 
@@ -271,42 +261,47 @@ export class RedisSim {
         return any.length > 0 ? any[randInt(0, any.length - 1)] : null
     }
 
-    private keyRoute(key: RedisKey, probe: 'point' | 'walk' | 'object' = 'walk'): RouteStop[] {
+    private keyRoute(key: RedisKey, probe: RedisReadOp = RedisReadOp.Walk): RouteStop[] {
         const r = this.redis
-        const walk: RouteStop[] = [{ p: r.bucketTop(key), stop: 'bucket' }]
+        const walk: RouteStop[] = [{ p: r.bucketTop(key), stop: Stage.Bucket }]
         if (key.big) {
-            walk.push({ p: r.keyPageTop(key), stop: 'page' })
-            walk.push({ p: r.valuePoint(key), stop: 'value' })
+            walk.push({ p: r.keyPageTop(key), stop: Stage.Page })
+            walk.push({ p: r.valuePoint(key), stop: Stage.Value })
             const inner = r.innerDictPoint(key)
 
             if (inner)
-                walk.push({ p: inner, stop: 'inner', lit: probe === 'point' ? true : undefined })
-            if (probe === 'point') {
-                walk.push({ p: r.nodePoint(key, 1), stop: 'field', lit: true })
-                walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
+                walk.push({
+                    p: inner,
+                    stop: Stage.Inner,
+                    lit: probe === RedisReadOp.Point ? true : undefined,
+                })
+            if (probe === RedisReadOp.Point) {
+                walk.push({ p: r.nodePoint(key, 1), stop: Stage.Field, lit: true })
+                walk.push({ p: r.hopPoint(key, 0), stop: Stage.Hop })
             } else {
-                const hops = key.kind === KeyKind.String ? 1 : key.kind === KeyKind.Hash ? 2 : 3
+                const hops =
+                    key.kind === RedisKeyKind.String ? 1 : key.kind === RedisKeyKind.Hash ? 2 : 3
 
                 for (let n = 0; n <= hops; n++) {
-                    walk.push({ p: r.hopPoint(key, n), stop: 'node', lit: { n, of: hops } })
+                    walk.push({ p: r.hopPoint(key, n), stop: Stage.Node, lit: { n, of: hops } })
                 }
             }
-        } else if (probe === 'object') {
-            walk.push({ p: r.keyPageTop(key), stop: 'page' })
-            walk.push({ p: r.objectPoint(), stop: 'value' })
+        } else if (probe === RedisReadOp.Object) {
+            walk.push({ p: r.keyPageTop(key), stop: Stage.Page })
+            walk.push({ p: r.objectPoint(), stop: Stage.Value })
 
-            if (key.raw) walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
+            if (key.raw) walk.push({ p: r.hopPoint(key, 0), stop: Stage.Hop })
         } else if (key.aux) {
-            walk.push({ p: r.keyPageTop(key), stop: 'page' })
-            walk.push({ p: r.keyTop(key), stop: 'entry' })
+            walk.push({ p: r.keyPageTop(key), stop: Stage.Page })
+            walk.push({ p: r.keyTop(key), stop: Stage.Entry })
 
-            walk.push({ p: r.valuePoint(key), stop: 'value' })
-            walk.push({ p: r.hopPoint(key, 0), stop: 'hop' })
-            if (key.kind === KeyKind.ZSet || key.kind === KeyKind.Hash)
-                walk.push({ p: r.hopPoint(key, 1), stop: 'hop' })
+            walk.push({ p: r.valuePoint(key), stop: Stage.Value })
+            walk.push({ p: r.hopPoint(key, 0), stop: Stage.Hop })
+            if (key.kind === RedisKeyKind.ZSet || key.kind === RedisKeyKind.Hash)
+                walk.push({ p: r.hopPoint(key, 1), stop: Stage.Hop })
         } else {
-            walk.push({ p: r.keyPageTop(key), stop: 'page' })
-            walk.push({ p: r.keyTop(key), stop: 'value' })
+            walk.push({ p: r.keyPageTop(key), stop: Stage.Page })
+            walk.push({ p: r.keyTop(key), stop: Stage.Value })
         }
 
         const hover = PACKET / 2 + PACKET_GAP
@@ -388,7 +383,7 @@ export class RedisSim {
         fIn.flash(0.9)
 
         if (this.ownsRide(ride)) {
-            this.setPhase('socket', portTop.clone())
+            this.setPhase(Stage.Socket, portTop.clone())
         }
 
         void this.ticker.wait(0.4).then(() => wire.fadeOut(this.ticker, 0.9))
@@ -412,7 +407,7 @@ export class RedisSim {
         ]
 
         if (this.ownsRide(ride)) {
-            this.setPhase('socket', portTop.clone())
+            this.setPhase(Stage.Socket, portTop.clone())
             await this.ticker.wait(0.3)
         }
 
@@ -447,7 +442,7 @@ export class RedisSim {
                     if (
                         key?.big &&
                         !this.carried &&
-                        legStop.stop === 'value' &&
+                        legStop.stop === Stage.Value &&
                         this.ownsRide(ride)
                     ) {
                         this.carried = key.big
@@ -455,11 +450,11 @@ export class RedisSim {
                     }
 
                     if (
-                        cmd.probe === 'object' &&
+                        cmd.probe === RedisReadOp.Object &&
                         key &&
                         !key.big &&
                         !key.aux &&
-                        legStop.stop === 'value'
+                        legStop.stop === Stage.Value
                     ) {
                         this.objectRead = true
 
@@ -467,7 +462,11 @@ export class RedisSim {
                         this.redis.lightObject(key.raw ? 'none' : 'payload')
                     }
 
-                    if (cmd.probe === 'object' && key?.raw && legStop.stop === 'hop') {
+                    if (
+                        cmd.probe === RedisReadOp.Object &&
+                        key?.raw &&
+                        legStop.stop === Stage.Hop
+                    ) {
                         this.redis.lightObject('payload')
                     }
 
@@ -542,7 +541,7 @@ export class RedisSim {
                 this.redis.flashKey(key, PALETTE.ice, 0.45)
                 this.note = hit ? `${cmd.name} · hash hit, no disk` : `${cmd.name} · miss`
                 if (key.big) {
-                    const real = BIG_REAL[key.big]
+                    const real = REDIS_BIG_REAL[key.big]
                     bigRead = true
                     this.note = `${cmd.name} · one value, ${real.entries.toLocaleString('en-US')} ${real.unit} — walked on the single thread`
                     await this.ticker.wait(0.35)
@@ -584,7 +583,7 @@ export class RedisSim {
         const owned = this.ownsRide(ride)
         await travel(this.ticker, out, replyIn, legTime(replyIn))
         this.endRide(ride)
-        if (owned) this.setPhase('reply', portTop.clone())
+        if (owned) this.setPhase(Stage.Reply, portTop.clone())
         await travel(this.ticker, out, replyOut, legTime(replyOut))
         despawn(this.ticker, out, 0.3)
         replyChain.fadeOut(this.ticker, 1.0)
@@ -636,7 +635,7 @@ export class RedisSim {
 
     readCursor(): { kind: string; step: number; steps: number } | null {
         if (!this.carried) return null
-        return { kind: this.carried, ...this.redis.bigStepOf(this.carried) }
+        return { kind: REDIS_BIG_KIND_NAME[this.carried], ...this.redis.bigStepOf(this.carried) }
     }
 
     private dropCarried() {
@@ -710,7 +709,7 @@ export class RedisSim {
     }
 
     packetSubject(): { id: string; object: THREE.Object3D } | null {
-        if (this.ridePhase === 'reply') return null
+        if (this.ridePhase === Stage.Reply) return null
         if (!this.focusCue) return null
         const p = this.focusPacket
         if (!p || !p.parent) return null
@@ -761,7 +760,7 @@ export class RedisSim {
             return { pod, toSocket, out, top }
         })
 
-        if (this.ownsRide(ride)) this.setPhase('channel', null)
+        if (this.ownsRide(ride)) this.setPhase(Stage.Channel, null)
         for (let i = 0; i < arcs.length; i++) {
             const arc = arcs[i]
             const packet = i === 0 && message ? message : this.packet(PALETTE.violet, PACKET)
@@ -769,7 +768,7 @@ export class RedisSim {
             packet.position.copy(from)
             if (ride !== 0 && ride === this.focusRide && i === 0) this.focusPacket = packet
             void travel(this.ticker, packet, arc.toSocket, legTime(arc.toSocket)).then(() => {
-                if (i === 0 && this.ownsRide(ride)) this.setPhase('delivered', null)
+                if (i === 0 && this.ownsRide(ride)) this.setPhase(Stage.Delivered, null)
                 this.redis.pulseSend(arc.pod)
                 despawn(this.ticker, packet, 0.15)
                 const away = this.packet(PALETTE.violet, PACKET * 0.8)
@@ -990,18 +989,18 @@ export class RedisSim {
         void this.runOp({ ...PUBLISH, cue: true })
     }
 
-    readBig(kind: BigKind, op: 'point' | 'walk' = 'walk'): boolean {
+    readBig(kind: RedisBigKind, op: RedisReadOp = RedisReadOp.Walk): boolean {
         if (this.loading || this.inFlight >= 6) return false
         if (this.walking || this.focusRide !== 0) return false
         const key = this.redis.bigKey(kind) ?? this.reviveBig(kind)
         if (!key) return false
         const name =
-            kind === 'zset'
-                ? op === 'point'
+            kind === RedisBigKind.ZSet
+                ? op === RedisReadOp.Point
                     ? 'ZSCORE'
                     : 'ZRANGEBYSCORE'
-                : kind === 'hash'
-                  ? op === 'point'
+                : kind === RedisBigKind.Hash
+                  ? op === RedisReadOp.Point
                       ? 'HGET'
                       : 'HGETALL'
                   : 'LRANGE'
@@ -1014,7 +1013,14 @@ export class RedisSim {
         const key = this.redis.compactKeyLeft()
         if (!key) return false
         void this.runOp(
-            { name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true },
+            {
+                name: 'GET',
+                write: false,
+                weight: 1,
+                walk: true,
+                probe: RedisReadOp.Object,
+                cue: true,
+            },
             key,
         )
         return true
@@ -1025,13 +1031,20 @@ export class RedisSim {
         const key = this.redis.rawKeyLeft()
         if (!key) return false
         void this.runOp(
-            { name: 'GET', write: false, weight: 1, walk: true, probe: 'object', cue: true },
+            {
+                name: 'GET',
+                write: false,
+                weight: 1,
+                walk: true,
+                probe: RedisReadOp.Object,
+                cue: true,
+            },
             key,
         )
         return true
     }
 
-    private reviveBig(kind: BigKind): RedisKey | null {
+    private reviveBig(kind: RedisBigKind): RedisKey | null {
         const key = this.redis.keys.find((k) => k.big === kind)
         if (!key) return null
         this.redis.setKeyLive(key, true)

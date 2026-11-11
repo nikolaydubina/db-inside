@@ -1,7 +1,9 @@
-import type { StoryStep } from './types'
-import { frozeAt } from './stop'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { Db, DbScope } from '../../core/db'
+import { frozeAt } from '../stop'
 
-export const REDIS_RAW_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'socket → queue → loop',
         body: 'The same beginning as every command: bytes into a connection’s input buffer, the one thread reads them on its next pass over epoll, the parsed command joins the queue. Nothing is known yet — not the type, not the size, and not whether the payload is in the object or at the end of a pointer. That is all decided later, by reading the header on the page the key lands on.',
@@ -9,7 +11,7 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 11,
         fov: 42,
-        tap: 'redis',
+        tap: Db.Redis,
         raw: true,
         send: 1,
         sustain: 1,
@@ -18,8 +20,8 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a read sitting in a socket',
-        freezeAt: 'socket',
-        assert: frozeAt('socket', 'the socket the request came in on'),
+        freezeAt: Stage.Socket,
+        assert: frozeAt(Stage.Socket, 'the socket the request came in on'),
     },
     {
         title: 'the header says raw, not embstr',
@@ -28,7 +30,7 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         dir: [0.5, 0.92, 0.86],
         dist: 11,
         fov: 34,
-        tap: 'redis',
+        tap: Db.Redis,
         raw: true,
         send: 1,
         sustain: 1,
@@ -37,8 +39,8 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the object header that carries an address',
-        freezeAt: 'value',
-        assert: frozeAt('value', 'the object header that carries an address'),
+        freezeAt: Stage.Value,
+        assert: frozeAt(Stage.Value, 'the object header that carries an address'),
     },
     {
         title: 'and the bytes are on another page',
@@ -47,7 +49,7 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         dir: [0.5, 0.92, 0.86],
         dist: 11,
         fov: 34,
-        tap: 'redis',
+        tap: Db.Redis,
         raw: true,
         send: 1,
         sustain: 1,
@@ -56,8 +58,8 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the read at the payload’s own page',
-        freezeAt: 'hop',
-        assert: frozeAt('hop', 'the page the bytes were allocated on'),
+        freezeAt: Stage.Hop,
+        assert: frozeAt(Stage.Hop, 'the page the bytes were allocated on'),
     },
     {
         title: 'and back out through the socket',
@@ -66,7 +68,7 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 11,
         fov: 42,
-        tap: 'redis',
+        tap: Db.Redis,
         raw: true,
         send: 1,
         sustain: 1,
@@ -75,7 +77,15 @@ export const REDIS_RAW_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the reply back at the socket',
-        freezeAt: 'reply',
-        assert: frozeAt('reply', 'the answer, back at the socket it came in on'),
+        freezeAt: Stage.Reply,
+        assert: frozeAt(Stage.Reply, 'the answer, back at the socket it came in on'),
     },
 ]
+
+export const REDIS_RAW_STORY: StoryDef = {
+    id: 'raw',
+    label: 'large values',
+    hint: 'the same GET one page further: the header holds an address, and the bytes are elsewhere',
+    db: DbScope.Redis,
+    steps,
+}

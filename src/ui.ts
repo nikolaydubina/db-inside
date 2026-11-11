@@ -1,9 +1,13 @@
 import type { Info } from './postgresql/instance'
-import { REGIME_ORDER, regimeLabel } from './postgresql/sim'
-import type { Regime, SimStats } from './postgresql/sim'
+import {
+    POSTGRESQL_REGIME_NAME,
+    POSTGRESQL_REGIME_ORDER,
+    PostgresqlRegime,
+    postgresqlRegimeLabel,
+} from './postgresql/sim'
+import type { SimStats } from './postgresql/sim'
 import { fmtBytes } from './core/util'
-
-export type DbName = 'postgres' | 'redis'
+import { Db, dbFromName } from './core/db'
 
 export interface HudHandlers {
     runQuery(): void
@@ -21,13 +25,13 @@ export interface HudHandlers {
 
     rewriteAof(): void
     setSpeed(v: number): void
-    setRegime(r: Regime): void
+    setRegime(r: PostgresqlRegime): void
 
     setMove(on: boolean): void
 
     setZen(on: boolean): void
 
-    onDbPanel(db: DbName | null): void
+    onDbPanel(db: Db | null): void
     unpin(): void
 }
 
@@ -62,25 +66,25 @@ export function initHud(handlers: HudHandlers) {
 
     const procsEl = $<HTMLElement>('#procs')
 
-    const panels: Record<DbName, HTMLElement> = {
-        postgres: $<HTMLElement>('#db-postgres'),
-        redis: $<HTMLElement>('#db-redis'),
+    const panels: Record<Db, HTMLElement> = {
+        [Db.Postgres]: $<HTMLElement>('#db-postgres'),
+        [Db.Redis]: $<HTMLElement>('#db-redis'),
     }
     const panelColumn = $<HTMLElement>('.panel.right')
-    let db: DbName | null = null
+    let db: Db | null = null
 
     const dbButtons = Array.from(document.querySelectorAll<HTMLButtonElement>('.dbtn'))
 
-    const setDb = (next: DbName | null) => {
+    const setDb = (next: Db | null) => {
         db = next
-        for (const name of Object.keys(panels) as DbName[]) panels[name].hidden = name !== next
+        for (const name of [Db.Postgres, Db.Redis]) panels[name].hidden = name !== next
         panelColumn.hidden = next === null
         document.body.classList.toggle('db-open', next !== null)
-        for (const b of dbButtons) b.classList.toggle('active', b.dataset.db === next)
+        for (const b of dbButtons) b.classList.toggle('active', dbFromName(b.dataset.db) === next)
     }
     for (const b of dbButtons) {
         b.addEventListener('click', () => {
-            const name = (b.dataset.db as DbName) ?? 'postgres'
+            const name = dbFromName(b.dataset.db) ?? Db.Postgres
             const next = db === name ? null : name
             setDb(next)
             handlers.onDbPanel(next)
@@ -223,16 +227,16 @@ export function initHud(handlers: HudHandlers) {
 
     const regimeOpts = $<HTMLElement>('#regime-opts')
     const regimeButtons: HTMLButtonElement[] = []
-    const markRegime = (r: Regime) => {
+    const markRegime = (r: PostgresqlRegime) => {
         for (const b of regimeButtons)
-            b.setAttribute('aria-pressed', String(b.dataset.regime === r))
+            b.setAttribute('aria-pressed', String(b.dataset.regime === POSTGRESQL_REGIME_NAME[r]))
     }
-    for (const r of REGIME_ORDER) {
+    for (const r of POSTGRESQL_REGIME_ORDER) {
         const b = document.createElement('button')
         b.className = 'regime'
-        b.dataset.regime = r
-        b.textContent = regimeLabel(r)
-        b.setAttribute('aria-pressed', String(r === 'default'))
+        b.dataset.regime = POSTGRESQL_REGIME_NAME[r]
+        b.textContent = postgresqlRegimeLabel(r)
+        b.setAttribute('aria-pressed', String(r === PostgresqlRegime.Default))
         b.addEventListener('click', () => {
             markRegime(r)
             handlers.setRegime(r)
@@ -246,7 +250,7 @@ export function initHud(handlers: HudHandlers) {
         if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return
         if (e.code === 'Space') {
             e.preventDefault()
-            if (db === 'redis') handlers.runCommand()
+            if (db === Db.Redis) handlers.runCommand()
             else handlers.runQuery()
         } else if (e.key === 'c') {
             handlers.checkpoint()
@@ -302,7 +306,7 @@ export function initHud(handlers: HudHandlers) {
         setQueryBusy(on: boolean) {
             busy(btnQuery, on)
         },
-        setRegime(r: Regime) {
+        setRegime(r: PostgresqlRegime) {
             markRegime(r)
             handlers.setRegime(r)
         },

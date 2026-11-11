@@ -1,6 +1,7 @@
 import * as THREE from 'three'
+import { Db } from './core/db'
 
-export type ShareDb = 'postgres' | 'redis'
+export type ShareDb = Db
 
 export interface Address {
     db: ShareDb
@@ -8,9 +9,9 @@ export interface Address {
     slug: string
 }
 
-const dbOf = (seg: string): ShareDb | null => {
-    if (seg === 'postgresql' || seg === 'postgres' || seg === 'psql') return 'postgres'
-    if (seg === 'redis') return 'redis'
+const dbOf = (seg: string): Db | null => {
+    if (seg === 'postgresql' || seg === 'postgres' || seg === 'psql') return Db.Postgres
+    if (seg === 'redis') return Db.Redis
     return null
 }
 
@@ -25,8 +26,8 @@ export function addressFromPath(pathname: string): Address | null {
     return { db, slug: segs[1] ?? '' }
 }
 
-export function pathFor(db: ShareDb, slug = ''): string {
-    const base = db === 'postgres' ? '/postgresql' : '/redis'
+export function pathFor(db: Db, slug = ''): string {
+    const base = db === Db.Postgres ? '/postgresql' : '/redis'
     return slug ? `${base}/${slug}` : base
 }
 

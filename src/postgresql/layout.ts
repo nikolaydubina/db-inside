@@ -30,10 +30,14 @@ export const PAGE_CELL = CELL_PITCH
 
 export const SYSTEM_GREY = 0x93a1ae
 
-export type SystemArea = 'catalog' | 'fork' | 'clog'
+export const enum PostgresqlSystemArea {
+    Catalog = 1,
+    Fork = 2,
+    Clog = 3,
+}
 
 export const SYSTEM_RUNS: {
-    area: SystemArea
+    area: PostgresqlSystemArea
     label: string
 
     c0: number
@@ -43,7 +47,7 @@ export const SYSTEM_RUNS: {
     what: string
 }[] = [
     {
-        area: 'catalog',
+        area: PostgresqlSystemArea.Catalog,
         label: 'CATALOGS',
         c0: 24,
         c1: 29,
@@ -52,7 +56,7 @@ export const SYSTEM_RUNS: {
         what: 'The catalog relations every database carries a copy of: what each table is, which columns it has, which indexes exist, and what depends on what. Same 8 KiB page as a heap — they are small because there are few of them, not because the pages are smaller: a fresh cluster keeps the whole set in a few megabytes. Queries read them too — the planner asks pg_class and pg_statistic what it is planning over.',
     },
     {
-        area: 'fork',
+        area: PostgresqlSystemArea.Fork,
         label: 'FSM · VM',
         c0: 30,
         c1: 31,
@@ -61,7 +65,7 @@ export const SYSTEM_RUNS: {
         what: 'Two thin side files per relation, in 8 KiB pages like everything else. One byte of free space map per heap page covers 64 MiB of relation; two bits of visibility map per page cover 256 MiB. The free space map says which pages have room for a new tuple, so an insert need not read every page; the visibility map says which pages are all-visible, which is what lets VACUUM and index-only scans skip work.',
     },
     {
-        area: 'clog',
+        area: PostgresqlSystemArea.Clog,
         label: 'CLOG',
         c0: 32,
         c1: 33,

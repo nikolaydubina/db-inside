@@ -3,9 +3,9 @@ import * as THREE from 'three'
 import { BLOCK_LIFT, FLOOR_Y } from '../core/util'
 import { CELL_PITCH, PAGE_4K, PAGE_PITCH } from '../disk/page'
 import { BACKEND_ORIGIN, PALETTE } from '../postgresql/instance'
-import { KeyKind } from './kind'
+import { RedisKeyKind } from './kind'
 
-export { KeyKind } from './kind'
+export { RedisKeyKind } from './kind'
 
 export const REDIS_ORIGIN = new THREE.Vector3(-13, 0, -34)
 
@@ -154,23 +154,23 @@ export const AOF_FILL_BRIGHT = 0xe09a2e
 export const RDB_FILL_DARK = 0x06222c
 export const RDB_FILL_BRIGHT = 0x23c9a6
 
-export const KIND_COLOR: Record<KeyKind, number> = {
-    [KeyKind.String]: PALETTE.cyan,
-    [KeyKind.List]: PALETTE.teal,
-    [KeyKind.Hash]: PALETTE.violet,
-    [KeyKind.Set]: PALETTE.magenta,
-    [KeyKind.ZSet]: PALETTE.ice,
+export const KIND_COLOR: Record<RedisKeyKind, number> = {
+    [RedisKeyKind.String]: PALETTE.cyan,
+    [RedisKeyKind.List]: PALETTE.teal,
+    [RedisKeyKind.Hash]: PALETTE.violet,
+    [RedisKeyKind.Set]: PALETTE.magenta,
+    [RedisKeyKind.ZSet]: PALETTE.ice,
 }
 
 export const LISTPACK_MAX_ENTRIES = 128
 export const INTSET_MAX_ENTRIES = 512
-export const encodingLimit = (kind: KeyKind) =>
-    kind === KeyKind.Set ? INTSET_MAX_ENTRIES : LISTPACK_MAX_ENTRIES
+export const encodingLimit = (kind: RedisKeyKind) =>
+    kind === RedisKeyKind.Set ? INTSET_MAX_ENTRIES : LISTPACK_MAX_ENTRIES
 
-export const VALUE_BYTES: Record<KeyKind, [number, number]> = {
-    [KeyKind.String]: [48, 700],
-    [KeyKind.List]: [200, 2600],
-    [KeyKind.Hash]: [180, 3200],
-    [KeyKind.Set]: [140, 2000],
-    [KeyKind.ZSet]: [220, 2800],
+export const VALUE_BYTES: Record<RedisKeyKind, [number, number]> = {
+    [RedisKeyKind.String]: [48, 700],
+    [RedisKeyKind.List]: [200, 2600],
+    [RedisKeyKind.Hash]: [180, 3200],
+    [RedisKeyKind.Set]: [140, 2000],
+    [RedisKeyKind.ZSet]: [220, 2800],
 }

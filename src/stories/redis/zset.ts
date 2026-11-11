@@ -1,7 +1,10 @@
-import type { StoryStep } from './types'
-import { frozeAt, frozeAtCell } from './stop'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { RedisBigKind, RedisReadOp } from '../../redis/values'
+import { Db, DbScope } from '../../core/db'
+import { frozeAt, frozeAtCell } from '../stop'
 
-export const REDIS_ZSET_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'two structures, one value',
         body: 'A sorted set is not a list that happens to be ordered. It is a twin: a skiplist for anything that depends on order, and a dict for anything that depends on a member. Both hang off the same value object, both are allocations in the heap, and the dict’s array is as real as the tower. That is what the two halves of this drawing are — not a decoration of one structure, but the two structures the value actually is.',
@@ -9,9 +12,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 12,
         fov: 42,
-        tap: 'redis',
-        big: 'zset',
-        op: 'point',
+        tap: Db.Redis,
+        big: RedisBigKind.ZSet,
+        op: RedisReadOp.Point,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -19,8 +22,8 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null && c.bigKeys >= 2,
         waitFor: 'the value with its two halves in view',
-        freezeAt: 'value',
-        assert: frozeAt('value', 'the value object with its two halves'),
+        freezeAt: Stage.Value,
+        assert: frozeAt(Stage.Value, 'the value object with its two halves'),
     },
     {
         title: 'ZSCORE: one member, one bucket',
@@ -29,9 +32,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 10,
         fov: 40,
-        tap: 'redis',
-        big: 'zset',
-        op: 'point',
+        tap: Db.Redis,
+        big: RedisBigKind.ZSet,
+        op: RedisReadOp.Point,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -39,8 +42,8 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the bucket the member hashed to',
-        freezeAt: 'field',
-        assert: frozeAt('field', 'the bucket the member hashed to'),
+        freezeAt: Stage.Field,
+        assert: frozeAt(Stage.Field, 'the bucket the member hashed to'),
     },
     {
         title: 'ZRANGEBYSCORE: find a start, then walk',
@@ -49,9 +52,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'zset',
-        op: 'walk',
+        tap: Db.Redis,
+        big: RedisBigKind.ZSet,
+        op: RedisReadOp.Walk,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -59,9 +62,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a range walking the tower',
-        freezeAt: 'node',
+        freezeAt: Stage.Node,
         freezeAtStep: 2,
-        assert: frozeAtCell('node', 'a node partway along the bottom level', 2),
+        assert: frozeAtCell(Stage.Node, 'a node partway along the bottom level', 2),
     },
     {
         title: 'and the one thread pays for it',
@@ -70,9 +73,9 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'zset',
-        op: 'walk',
+        tap: Db.Redis,
+        big: RedisBigKind.ZSet,
+        op: RedisReadOp.Walk,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -80,7 +83,15 @@ export const REDIS_ZSET_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the walk still running on the one thread',
-        freezeAt: 'node',
-        assert: frozeAt('node', 'a node of the walk, one thread still inside it'),
+        freezeAt: Stage.Node,
+        assert: frozeAt(Stage.Node, 'a node of the walk, one thread still inside it'),
     },
 ]
+
+export const REDIS_ZSET_STORY: StoryDef = {
+    id: 'zset',
+    label: 'zset lookups',
+    hint: 'one member in the dict, or a range down the tower: two reads of the same value',
+    db: DbScope.Redis,
+    steps,
+}

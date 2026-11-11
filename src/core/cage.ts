@@ -29,6 +29,7 @@ const UNIT_BOX_PICK_GEO = (() => {
     g.setAttribute('position', new THREE.Float32BufferAttribute(UNIT_BOX_EDGE_POINTS, 3))
     return g
 })()
+
 export class OutlineBox extends THREE.Group {
     private glowMat: LineMaterial
     private baseColor: number

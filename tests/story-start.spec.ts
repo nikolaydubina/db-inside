@@ -3,6 +3,10 @@ import { expect, test } from '@playwright/test'
 const KIND: Record<string, string> = {
     queue: 'query',
     wal: 'query',
+    btree: 'query',
+    gin: 'query',
+    brin: 'query',
+    'hash-index': 'query',
     pubsub: 'publish',
     traversal: 'big:list',
     zset: 'big:zset',

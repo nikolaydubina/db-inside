@@ -2,16 +2,9 @@ import * as THREE from 'three'
 import { Line2 } from 'three/addons/lines/Line2.js'
 import { LineGeometry } from 'three/addons/lines/LineGeometry.js'
 import { LineMaterial } from 'three/addons/lines/LineMaterial.js'
-import {
-    ANCHOR,
-    BUFFER_TOP_Y,
-    PAGE_TOP_Y,
-    PALETTE,
-    bufferSlotX,
-    bufferSlotZ,
-} from '../postgresql/instance'
-import { registerLineMaterial, releaseLineMaterial } from './util'
-import { Ticker, easeInOutCubic } from './util'
+import { ANCHOR, BUFFER_TOP_Y, PAGE_TOP_Y, PALETTE, bufferSlotX, bufferSlotZ } from './instance'
+import { registerLineMaterial, releaseLineMaterial } from '../core/util'
+import { Ticker, easeInOutCubic } from '../core/util'
 
 export interface Paths {
     sky: THREE.CatmullRomCurve3
@@ -19,12 +12,15 @@ export interface Paths {
     plan: THREE.CatmullRomCurve3
     exec: THREE.CatmullRomCurve3
 
-    ambient: Record<AmbientName, LivePath>
+    ambient: Record<PostgresqlAmbient, LivePath>
     bufferTop: THREE.Vector3
     diskTop: THREE.Vector3
 }
 
-export type AmbientName = 'execToWal' | 'heapToBuffer' | 'indexToBuffer' | 'ginToBuffer'
+export const enum PostgresqlAmbient {
+    ExecToWal = 1,
+    HeapToBuffer = 2,
+}
 
 const V = (x: number, y: number, z: number) => new THREE.Vector3(x, y, z)
 
@@ -32,11 +28,19 @@ const curve = (pts: THREE.Vector3[]) => new THREE.CatmullRomCurve3(pts, false, '
 
 export const pathCurve = (pts: THREE.Vector3[]) => curve(pts)
 
-export type PathEnd =
-    'parse' | 'plan' | 'exec' | 'walBuf' | 'walHead' | 'buffer' | 'heap' | 'index' | 'gin' | 'disk'
+export const enum PostgresqlPathEnd {
+    Parse = 1,
+    Plan,
+    Exec,
+    WalBuf,
+    WalHead,
+    Buffer,
+    Heap,
+    Disk,
+}
 
 export interface PathHost {
-    pathEnd(name: PathEnd): THREE.Vector3
+    pathEnd(name: PostgresqlPathEnd): THREE.Vector3
 }
 
 export function bowPoints(
@@ -100,14 +104,12 @@ export function makePaths(host: PathHost): Paths {
     const diskTop = V(ANCHOR.disk.x, PAGE_TOP_Y, ANCHOR.disk.z)
 
     const centre = V(0, 0, 0)
-    const between = (from: PathEnd, to: PathEnd) =>
+    const between = (from: PostgresqlPathEnd, to: PostgresqlPathEnd) =>
         new LivePath(() => bowPoints(host.pathEnd(from), host.pathEnd(to), { centre }))
 
-    const ambient = {
-        execToWal: between('exec', 'walBuf'),
-        heapToBuffer: between('heap', 'buffer'),
-        indexToBuffer: between('index', 'buffer'),
-        ginToBuffer: between('gin', 'buffer'),
+    const ambient: Record<PostgresqlAmbient, LivePath> = {
+        [PostgresqlAmbient.ExecToWal]: between(PostgresqlPathEnd.Exec, PostgresqlPathEnd.WalBuf),
+        [PostgresqlAmbient.HeapToBuffer]: between(PostgresqlPathEnd.Heap, PostgresqlPathEnd.Buffer),
     }
 
     return {
@@ -248,8 +250,6 @@ export class FlowLine {
 export interface FlowSet {
     execToWal: FlowLine
     heapToBuffer: FlowLine
-    indexToBuffer: FlowLine
-    ginToBuffer: FlowLine
     all: FlowLine[]
 
     live: [FlowLine, LivePath][]
@@ -262,41 +262,31 @@ export function makeFlows(parent: THREE.Object3D, paths: Paths): FlowSet {
         return f
     }
 
-    const execToWal = add(paths.ambient.execToWal.points(28), PALETTE.amber, {
+    const execToWal = add(paths.ambient[PostgresqlAmbient.ExecToWal].points(28), PALETTE.amber, {
         speed: 0.4,
         opacity: 0.26,
         linger: 1.1,
     })
-    const heapToBuffer = add(paths.ambient.heapToBuffer.points(24), PALETTE.teal, {
-        speed: 0.3,
-        opacity: 0.12,
-        linger: 0.7,
-    })
-    const indexToBuffer = add(paths.ambient.indexToBuffer.points(24), PALETTE.violet, {
-        speed: 0.3,
-        opacity: 0.12,
-        linger: 0.7,
-    })
-    const ginToBuffer = add(paths.ambient.ginToBuffer.points(24), PALETTE.magenta, {
-        speed: 0.28,
-        opacity: 0.12,
-        linger: 0.7,
-    })
+    const heapToBuffer = add(
+        paths.ambient[PostgresqlAmbient.HeapToBuffer].points(24),
+        PALETTE.teal,
+        {
+            speed: 0.3,
+            opacity: 0.12,
+            linger: 0.7,
+        },
+    )
 
-    const all = [execToWal, heapToBuffer, indexToBuffer, ginToBuffer]
+    const all = [execToWal, heapToBuffer]
     const live: [FlowLine, LivePath][] = [
-        [execToWal, paths.ambient.execToWal],
-        [heapToBuffer, paths.ambient.heapToBuffer],
-        [indexToBuffer, paths.ambient.indexToBuffer],
-        [ginToBuffer, paths.ambient.ginToBuffer],
+        [execToWal, paths.ambient[PostgresqlAmbient.ExecToWal]],
+        [heapToBuffer, paths.ambient[PostgresqlAmbient.HeapToBuffer]],
     ]
     for (const [line, path] of live) line.follow(path)
 
     return {
         execToWal,
         heapToBuffer,
-        indexToBuffer,
-        ginToBuffer,
         all,
         live,
     }

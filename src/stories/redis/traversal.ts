@@ -1,7 +1,10 @@
-import type { StoryStep } from './types'
-import { frozeAt, frozeAtCell } from './stop'
+import type { StoryDef, StoryStep } from '../types'
+import { Stage } from '../../core/stage'
+import { RedisBigKind } from '../../redis/values'
+import { Db, DbScope } from '../../core/db'
+import { frozeAt, frozeAtCell } from '../stop'
 
-export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
+const steps: StoryStep[] = [
     {
         title: 'a request arrives on a socket',
         body: 'A client sends LINDEX. The bytes enter a connection’s input buffer, the thread reads them on its next pass over epoll, and the parsed command joins the shared queue. Nothing has been looked up yet: the server knows a key name and an index, and that is all. One thread will take this command, and while it runs, every other client waits behind it.',
@@ -9,8 +12,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'list',
+        tap: Db.Redis,
+        big: RedisBigKind.List,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -18,8 +21,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'a read sitting in a socket',
-        freezeAt: 'socket',
-        assert: frozeAt('socket', 'the socket the request came in on'),
+        freezeAt: Stage.Socket,
+        assert: frozeAt(Stage.Socket, 'the socket the request came in on'),
     },
     {
         title: 'the key becomes a bucket, the bucket a page',
@@ -28,8 +31,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'list',
+        tap: Db.Redis,
+        big: RedisBigKind.List,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -37,8 +40,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the bucket pointing at a page',
-        freezeAt: 'page',
-        assert: frozeAt('page', 'the page the bucket points at'),
+        freezeAt: Stage.Page,
+        assert: frozeAt(Stage.Page, 'the page the bucket points at'),
     },
     {
         title: 'a list is a chain, and the chain is on the heap',
@@ -47,8 +50,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'list',
+        tap: Db.Redis,
+        big: RedisBigKind.List,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -56,8 +59,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the walk starting at the head node',
-        freezeAt: 'node',
-        assert: frozeAt('node', 'the head node of the chain'),
+        freezeAt: Stage.Node,
+        assert: frozeAt(Stage.Node, 'the head node of the chain'),
     },
     {
         title: 'node after node, page after page',
@@ -66,8 +69,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'list',
+        tap: Db.Redis,
+        big: RedisBigKind.List,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -75,10 +78,10 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the chain being walked, a node at a time',
-        freezeAt: 'node',
+        freezeAt: Stage.Node,
 
         freezeAtStep: 2,
-        assert: frozeAtCell('node', 'a node further along the chain', 2),
+        assert: frozeAtCell(Stage.Node, 'a node further along the chain', 2),
     },
     {
         title: 'found, and back out through the socket',
@@ -87,8 +90,8 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         dir: [0.55, 0.5, 1],
         dist: 13,
         fov: 44,
-        tap: 'redis',
-        big: 'list',
+        tap: Db.Redis,
+        big: RedisBigKind.List,
         send: 1,
         sustain: 1,
         sustainWhileOpen: true,
@@ -96,7 +99,15 @@ export const REDIS_TRAVERSAL_STORY: StoryStep[] = [
         speed: 0.4,
         expect: (c) => c.rdPhase !== null,
         waitFor: 'the reply leaving the loop',
-        freezeAt: 'reply',
-        assert: frozeAt('reply', 'the answer, back at the socket it came in on'),
+        freezeAt: Stage.Reply,
+        assert: frozeAt(Stage.Reply, 'the answer, back at the socket it came in on'),
     },
 ]
+
+export const REDIS_TRAVERSAL_STORY: StoryDef = {
+    id: 'traversal',
+    label: 'pointer chases',
+    hint: 'what a read follows: bucket, entry, then the pages a big value’s nodes were allocated on',
+    db: DbScope.Redis,
+    steps,
+}

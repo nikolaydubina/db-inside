@@ -1,19 +1,27 @@
 import * as THREE from 'three'
-import { INBUF_CELLS, PALETTE, PostgresInstance } from './instance'
+import {
+    BACKEND_ORIGIN,
+    INBUF_CELLS,
+    PostgresqlNodeName,
+    PALETTE,
+    PostgresInstance,
+} from './instance'
 import type { BackendPod } from './instance'
-import { QueryChain, pathCurve } from '../core/flow'
-import type { FlowSet, Paths } from '../core/flow'
+import { PostgresqlPathEnd, QueryChain, pathCurve } from './flow'
+import type { FlowSet, Paths } from './flow'
 import {
     Ticker,
     easeInOutCubic,
     easeInQuad,
     easeOutCubic,
-    halo,
     rand,
     randInt,
     speedTime,
     travel,
 } from '../core/util'
+import { Stage } from '../core/stage'
+import { makePacket, recolorPacket } from '../core/packet'
+import { POSTGRESQL_INDEX_NAME, PostgresqlIndexKind } from './indexes'
 
 export interface SimStats {
     queries: number
@@ -43,23 +51,28 @@ export interface SimStats {
 
 const RPS_WINDOW = 2
 
-function makePacket(color: number, size: number, parent: THREE.Object3D) {
-    const g = new THREE.Group()
-    const core = new THREE.Mesh(
-        new THREE.BoxGeometry(size, size, size),
-        new THREE.MeshStandardMaterial({
-            color: 0x0a1118,
-            emissive: color,
-            emissiveIntensity: 2.6,
-            roughness: 0.25,
-            metalness: 0.4,
-        }),
-    )
-    g.add(core)
-    g.add(halo(color, size * 5.2, 0.6))
-    parent.add(g)
-    return g
-}
+const PACKET_SIZE = 0.42
+
+const stageLabel = (stage: Stage) =>
+    stage === Stage.Root
+        ? 'root'
+        : stage === Stage.Internal
+          ? 'internal'
+          : stage === Stage.Leaf
+            ? 'leaf'
+            : stage === Stage.Meta
+              ? 'metapage'
+              : stage === Stage.Bucket
+                ? 'bucket'
+                : stage === Stage.Overflow
+                  ? 'overflow'
+                  : stage === Stage.Summaries
+                    ? 'summary'
+                    : stage === Stage.Prune
+                      ? 'prune'
+                      : stage === Stage.Posting
+                        ? 'posting'
+                        : 'bitmap'
 
 const despawn = (ticker: Ticker, parent: THREE.Object3D, obj: THREE.Object3D, dur = 0.3) => {
     void ticker
@@ -92,17 +105,37 @@ const STATEMENTS: Statement[] = [
     { sql: 'delete from users where id = $1', kind: 'delete', viaIndex: true, weight: 1 },
 ]
 
-export type Regime = 'default' | 'read' | 'write' | 'burst'
-
-const REGIMES: Record<Regime, { label: string; select: number; write: number; pace: number }> = {
-    default: { label: 'default', select: 1, write: 1, pace: 1 },
-    read: { label: 'read heavy', select: 4, write: 0.12, pace: 0.85 },
-    write: { label: 'write heavy', select: 0.35, write: 7, pace: 0.9 },
-    burst: { label: 'burst', select: 1, write: 1, pace: 0.3 },
+export const enum PostgresqlRegime {
+    Default = 1,
+    Read,
+    Write,
+    Burst,
 }
 
-export const REGIME_ORDER: Regime[] = ['default', 'read', 'write', 'burst']
-export const regimeLabel = (r: Regime) => REGIMES[r].label
+export const POSTGRESQL_REGIME_NAME: Record<PostgresqlRegime, string> = {
+    [PostgresqlRegime.Default]: 'default',
+    [PostgresqlRegime.Read]: 'read',
+    [PostgresqlRegime.Write]: 'write',
+    [PostgresqlRegime.Burst]: 'burst',
+}
+
+const REGIMES: Record<
+    PostgresqlRegime,
+    { label: string; select: number; write: number; pace: number }
+> = {
+    [PostgresqlRegime.Default]: { label: 'default', select: 1, write: 1, pace: 1 },
+    [PostgresqlRegime.Read]: { label: 'read heavy', select: 4, write: 0.12, pace: 0.85 },
+    [PostgresqlRegime.Write]: { label: 'write heavy', select: 0.35, write: 7, pace: 0.9 },
+    [PostgresqlRegime.Burst]: { label: 'burst', select: 1, write: 1, pace: 0.3 },
+}
+
+export const POSTGRESQL_REGIME_ORDER: PostgresqlRegime[] = [
+    PostgresqlRegime.Default,
+    PostgresqlRegime.Read,
+    PostgresqlRegime.Write,
+    PostgresqlRegime.Burst,
+]
+export const postgresqlRegimeLabel = (r: PostgresqlRegime) => REGIMES[r].label
 
 export class EngineSim {
     queries = 0
@@ -110,8 +143,6 @@ export class EngineSim {
     hits = 0
     walBytes = 0
     live = 0
-
-    indexScan = false
 
     private flushedBytes = 0
 
@@ -122,7 +153,7 @@ export class EngineSim {
 
     ambient = true
 
-    regime: Regime = 'default'
+    regime: PostgresqlRegime = PostgresqlRegime.Default
     note = 'shared_buffers · 8 KiB pages'
 
     private parked: { pod: BackendPod; packet: THREE.Group }[] = []
@@ -320,13 +351,281 @@ export class EngineSim {
         }
     }
 
+    readonly index = {
+        kind: null as PostgresqlIndexKind | null,
+        stage: null as Stage | null,
+        say: '',
+        trip: 0,
+        running: false,
+        cold: true,
+        pages: 0,
+        disk: 0,
+        hits: 0,
+        heap: 0,
+        tuples: 0,
+        packet: null as THREE.Group | null,
+        stop: null as THREE.Vector3 | null,
+    }
+
+    get indexState() {
+        return {
+            ...this.index,
+            gap:
+                this.index.packet && this.index.stop
+                    ? +this.index.packet.position.distanceTo(this.index.stop).toFixed(2)
+                    : null,
+        }
+    }
+
+    private indexNear = false
+
+    indexSubject() {
+        const packet = this.index.packet
+        if (!packet?.parent) return null
+        if (this.index.stage === Stage.Reply) return null
+        if (!this.indexNear) {
+            if (packet.position.y > BACKEND_ORIGIN.y + 2.4) return null
+            this.indexNear = true
+        }
+        const at = packet.getWorldPosition(new THREE.Vector3())
+        return {
+            id: 'index packet',
+            box: new THREE.Box3(at.clone().addScalar(-0.45), at.clone().addScalar(0.45)),
+            object: packet,
+        }
+    }
+
+    private setIndexStage(stage: Stage, at: THREE.Vector3) {
+        this.index.stage = stage
+        this.index.stop = at.clone()
+    }
+
+    private async hop(
+        trip: number,
+        packet: THREE.Group,
+        chain: QueryChain,
+        to: THREE.Vector3,
+        stage: Stage,
+        dur = 1.35,
+    ) {
+        if (trip !== this.index.trip) return
+        this.index.stage = null
+        const from = packet.position.clone()
+        const lift = Math.max(0.25, from.distanceTo(to) * 0.2)
+        const curve = pathCurve([
+            from,
+            from
+                .clone()
+                .lerp(to, 0.5)
+                .add(new THREE.Vector3(0, lift, 0)),
+            to,
+        ])
+        chain.addCurve(curve, PALETTE.violet, { speed: 0.6, opacity: 0.42 })
+        await travel(this.ticker, packet, curve, speedTime(curve) * dur)
+        if (trip !== this.index.trip) return
+        this.setIndexStage(stage, to)
+    }
+
+    private async settle(trip: number, dur: number) {
+        await this.ticker.wait(dur)
+        return trip === this.index.trip
+    }
+
+    cancelIndexRide() {
+        this.index.trip++
+        this.index.running = false
+        this.indexNear = false
+        this.index.stage = null
+        this.index.stop = null
+        if (this.index.packet) {
+            this.index.packet.parent?.remove(this.index.packet)
+            this.index.packet = null
+        }
+        this.inst.indexCompanion.release()
+    }
+
+    async runIndexQuery(kind: PostgresqlIndexKind, opts: { cold?: boolean } = {}) {
+        const cold = opts.cold !== false
+        const pod = this.inst.backends.find((b) => b.active && !b.busy) ?? this.inst.openBackend()
+        if (!pod) return
+        if (this.index.packet) {
+            this.index.packet.parent?.remove(this.index.packet)
+            this.index.packet = null
+        }
+        const trip = ++this.index.trip
+        this.indexNear = false
+        this.queries++
+        Object.assign(this.index, {
+            kind,
+            running: true,
+            cold,
+            stage: null,
+            say: '',
+            pages: 0,
+            disk: 0,
+            hits: 0,
+            heap: 0,
+            tuples: 0,
+        })
+        this.note = `index scan · ${kind === PostgresqlIndexKind.Btree ? 'btree' : kind === PostgresqlIndexKind.Gin ? 'gin' : kind === PostgresqlIndexKind.Brin ? 'brin' : 'hash'}`
+
+        const origin = pod.group.position.clone()
+        const inPort = new THREE.Vector3(origin.x, 10.35, origin.z - 0.34)
+        const outPort = new THREE.Vector3(origin.x, 10.35, origin.z + 0.34)
+        const sky = new THREE.Vector3(inPort.x, 42, inPort.z)
+
+        this.inst.indexCompanion.release()
+        const packet = makePacket(PALETTE.magenta, PACKET_SIZE, this.scene)
+        packet.position.copy(sky)
+        this.index.packet = packet
+        this.inst.pulseBackend(pod)
+        const chain = new QueryChain(this.scene)
+
+        try {
+            const inbound = pathCurve([
+                sky,
+                new THREE.Vector3(inPort.x, 26, inPort.z + 0.8),
+                new THREE.Vector3(inPort.x, 13.4, inPort.z + 0.3),
+                inPort,
+            ])
+            chain.addCurve(inbound, PALETTE.magenta, { speed: 0.7, opacity: 0.32 })
+            this.index.stage = null
+            await travel(this.ticker, packet, inbound, speedTime(inbound))
+            this.setIndexStage(Stage.Socket, inPort)
+            if (!(await this.settle(trip, 0.4))) return
+
+            const inbuf = this.inst.backendBufferExit(pod)
+            await this.hop(trip, packet, chain, inbuf, Stage.SocketIn)
+            if (!(await this.settle(trip, 0.25))) return
+
+            const nodes = pod.pipeline.nodes
+            const parse = nodes[PostgresqlNodeName.Parse].group.position.clone()
+            const plan = nodes[PostgresqlNodeName.Plan].group.position.clone()
+            const exec = nodes[PostgresqlNodeName.Exec].group.position.clone()
+
+            await this.hop(trip, packet, chain, parse, Stage.Parse)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Parse, 0.8)
+            if (!(await this.settle(trip, 0.35))) return
+
+            await this.hop(trip, packet, chain, plan, Stage.Plan)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Plan, 0.9)
+            if (!(await this.settle(trip, 0.35))) return
+
+            await this.hop(trip, packet, chain, exec, Stage.Exec)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Exec, 1)
+            if (!(await this.settle(trip, 0.45))) return
+
+            this.inst.indexCompanion.attach(kind, packet)
+
+            const descent: Stage[] =
+                kind === PostgresqlIndexKind.Btree
+                    ? [Stage.Root, Stage.Internal, Stage.Leaf]
+                    : kind === PostgresqlIndexKind.Gin
+                      ? [Stage.Root, Stage.Posting, Stage.Bitmap]
+                      : kind === PostgresqlIndexKind.Brin
+                        ? [Stage.Summaries, Stage.Prune]
+                        : [Stage.Meta, Stage.Bucket, Stage.Overflow]
+
+            for (const stage of descent) {
+                const slot = this.inst.pickBufferPage()
+                const at = this.inst.pageTop(this.inst.pages[slot])
+                await this.hop(trip, packet, chain, at, stage)
+                this.inst.indexCompanion.beat(stage)
+                this.inst.setPageActive(slot, PALETTE.violet, 1.2)
+                if (cold) this.index.disk++
+                else this.index.hits++
+                this.index.pages++
+                this.note = `${POSTGRESQL_INDEX_NAME[kind]} · ${stageLabel(stage)} page into buffer slot ${slot}`
+                if (!(await this.settle(trip, 0.5))) return
+            }
+
+            if (kind !== PostgresqlIndexKind.Brin) {
+                await this.hop(
+                    trip,
+                    packet,
+                    chain,
+                    exec.clone().add(new THREE.Vector3(0, -0.2, 0)),
+                    Stage.Tid,
+                )
+                this.inst.indexCompanion.beat(Stage.Tid)
+                if (!(await this.settle(trip, 0.45))) return
+            }
+            if (kind === PostgresqlIndexKind.Brin) {
+                this.inst.indexCompanion.beat(Stage.Heap)
+                if (!(await this.settle(trip, 0.2))) return
+            }
+
+            if (cold) {
+                const block = this.inst.pickBlockForRead()
+                const toBlock = block ? this.inst.blockTop(block) : this.paths.diskTop.clone()
+                await this.hop(trip, packet, chain, toBlock, Stage.Disk)
+                this.inst.indexCompanion.beat(Stage.Heap)
+                if (block) this.inst.touchBlocks([block], PALETTE.amber, 0.55, 1.15)
+                this.index.disk++
+                this.note = 'heap page · fetched from disk, the row is not in the index'
+                if (!(await this.settle(trip, 0.5))) return
+                const slot = this.inst.pickBufferPage()
+                const up = this.inst.pageTop(this.inst.pages[slot])
+                await this.hop(trip, packet, chain, up, Stage.Slot)
+                this.inst.indexCompanion.beat(Stage.Heap)
+                this.inst.setPageActive(slot, PALETTE.teal, 1.2)
+            } else {
+                const slot = this.inst.pickBufferPage()
+                const at = this.inst.pageTop(this.inst.pages[slot])
+                await this.hop(trip, packet, chain, at, Stage.Slot)
+                this.inst.indexCompanion.beat(Stage.Heap)
+                this.inst.setPageActive(slot, PALETTE.teal, 1.2)
+                this.index.hits++
+            }
+            this.index.heap = 1
+            this.index.tuples =
+                kind === PostgresqlIndexKind.Brin ? 2 : kind === PostgresqlIndexKind.Gin ? 2 : 1
+            this.note = `index scan · ${this.index.pages} index pages, ${this.index.heap} heap page, ${this.index.tuples} tuple${this.index.tuples > 1 ? 's' : ''}`
+            if (!(await this.settle(trip, 0.55))) return
+
+            await this.hop(trip, packet, chain, exec, Stage.Exec)
+            recolorPacket(packet, PALETTE.teal)
+            const rows = pathCurve([
+                exec,
+                new THREE.Vector3(origin.x * 0.95, 9.2, origin.z - 2.0),
+                outPort.clone(),
+            ])
+            chain.addCurve(rows, PALETTE.ice, { speed: 0.55, opacity: 0.4 })
+            await travel(this.ticker, packet, rows, speedTime(rows))
+            if (trip !== this.index.trip) return
+            this.setIndexStage(Stage.Reply, outPort.clone())
+            this.inst.indexCompanion.release()
+            this.inst.pulseBackend(pod)
+            if (!(await this.settle(trip, 0.5))) return
+
+            const out = pathCurve([
+                outPort.clone(),
+                new THREE.Vector3(outPort.x + 0.3, 13.4, outPort.z + 0.3),
+                new THREE.Vector3(outPort.x + 0.5, 26, outPort.z + 0.8),
+                new THREE.Vector3(outPort.x + 0.5, 42, outPort.z + 0.6),
+            ])
+            chain.addCurve(out, PALETTE.teal, { speed: 0.7, opacity: 0.3 })
+            await travel(this.ticker, packet, out, speedTime(out), easeOutCubic)
+            if (trip !== this.index.trip) return
+            this.indexNear = false
+            despawn(this.ticker, this.scene, packet, 0.3)
+            chain.fadeOut(this.ticker, 1.1)
+            this.index.packet = null
+            this.index.stage = null
+            this.index.running = false
+        } finally {
+            if (trip !== this.index.trip) {
+                packet.parent?.remove(packet)
+                chain.dispose()
+                this.inst.indexCompanion.release()
+            }
+        }
+    }
+
     private async querySequence(pod: BackendPod) {
         const stmt = this.pickStatement()
         const kind = stmt.kind
         const hit = kind === 'select' && Math.random() < (stmt.viaIndex ? 0.9 : 0.78)
-        this.indexScan = stmt.viaIndex
-        this.inst.indexScan = stmt.viaIndex
-        if (stmt.viaIndex) this.flows.indexToBuffer.flash(0.5)
         this.queries++
 
         const origin = pod.group.position.clone()
@@ -336,9 +635,9 @@ export class EngineSim {
 
         const bufferExit = this.inst.backendBufferExit(pod)
         const pipe = pod.pipeline.nodes
-        const parse = pipe.parse.group.position.clone()
-        const plan = pipe.plan.group.position.clone()
-        const exec = pipe.exec.group.position.clone()
+        const parse = pipe[PostgresqlNodeName.Parse].group.position.clone()
+        const plan = pipe[PostgresqlNodeName.Plan].group.position.clone()
+        const exec = pipe[PostgresqlNodeName.Exec].group.position.clone()
         const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
         packet.position.copy(bufferExit)
 
@@ -354,7 +653,7 @@ export class EngineSim {
                 opacity: 0.36,
             })
             await travel(this.ticker, packet, toParse, speedTime(toParse))
-            this.inst.pulseNode(pod, 'parse', 0.8)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Parse, 0.8)
             fToParse.flash(0.8)
 
             const parseCurve = pathCurve([
@@ -370,7 +669,7 @@ export class EngineSim {
                 opacity: 0.4,
             })
             await travel(this.ticker, packet, parseCurve, speedTime(parseCurve))
-            this.inst.pulseNode(pod, 'plan', 0.9)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Plan, 0.9)
             fParse.flash(0.8)
             await this.ticker.wait(0.08)
 
@@ -387,13 +686,13 @@ export class EngineSim {
                 opacity: 0.4,
             })
             await travel(this.ticker, packet, planCurve, speedTime(planCurve))
-            this.inst.pulseNode(pod, 'exec', 1)
+            this.inst.pulseNode(pod, PostgresqlNodeName.Exec, 1)
             fPlan.flash(0.8)
 
             const writes = kind === 'insert' || kind === 'delete'
             if (writes) {
                 const walBytesFor = kind === 'insert' ? 384 : 320
-                const walTo = this.inst.pathEnd('walBuf')
+                const walTo = this.inst.pathEnd(PostgresqlPathEnd.WalBuf)
                 const walFrom = exec.clone()
                 const walCurve = pathCurve([
                     walFrom,
@@ -584,7 +883,7 @@ export class EngineSim {
         return REGIMES[this.regime].pace
     }
 
-    setRegime(r: Regime) {
+    setRegime(r: PostgresqlRegime) {
         if (r === this.regime) return
         this.regime = r
         this.note = `workload · ${REGIMES[r].label}`
@@ -798,12 +1097,8 @@ export class EngineSim {
         if (this.scanTimer <= 0 && !this.scanning) {
             this.scanTimer = rand(6.5, 11)
             this.scanning = true
-            const viaIndex = Math.random() < 0.5
-            const flow = viaIndex ? this.flows.indexToBuffer : this.flows.heapToBuffer
-            flow.flash(0.7)
-            if (viaIndex && Math.random() < 0.5) this.flows.ginToBuffer.flash(0.6)
-            const run = viaIndex ? this.inst.scanIndex() : this.inst.scanHeap()
-            void run.then(() => {
+            this.flows.heapToBuffer.flash(0.7)
+            void this.inst.scanHeap().then(() => {
                 this.scanning = false
             })
         }
