@@ -24,6 +24,7 @@ import {
     travel,
 } from '../core/util'
 import { PostgresqlPathEnd, QueryChain, pathCurve } from './flow'
+import { LockRack, LOCK_COLOUR, type LockMode, type LockWait } from './locks'
 import { freeAt as fragmentedFree } from '../disk/fragmentation'
 import { createPostgresqlIndexCompanion } from './indexes'
 import type { PostgresqlIndexCompanionHandle } from './indexes'
@@ -47,12 +48,12 @@ import {
     FILL_BRIGHT,
     FILL_DARK,
     FLOOR_LABEL_Y,
-    MAINT_BOX,
-    MAINT_CELLS,
-    MAINT_COLS,
+    LOCK_RACK,
+    LOCK_SLOTS,
+    MAINT_CAGE,
     MAINT_DEFAULT,
-    MAINT_LAYERS,
-    MAINT_ROWS,
+    MAINT_LIFT,
+    MAINT_STACK,
     PAGE_CELL,
     PAGE_GRID,
     PAGE_TOP_Y,
@@ -62,6 +63,9 @@ import {
     SYSTEM_GREY,
     SYSTEM_RUNS,
     TABLE_REGIONS,
+    TMP_CAGE,
+    TMP_COLS,
+    TMP_ROWS,
     WAL_BUF_LEN,
     WAL_C0,
     WAL_LEN,
@@ -236,7 +240,20 @@ export class PostgresInstance {
 
     readonly walBufBlocks: THREE.Mesh[] = []
     private walBufGroup!: THREE.Group
-    readonly lockMats: THREE.MeshStandardMaterial[] = []
+    locks!: LockRack
+    private readonly lockTethers = new Map<string, THREE.Line>()
+
+    get lockHeld() {
+        return this.locks.held
+    }
+
+    get lockWaiting() {
+        return this.locks.waiting
+    }
+
+    get lockHolders() {
+        return this.locks.holders
+    }
 
     readonly dsmMats: THREE.MeshStandardMaterial[] = []
     private readonly dsmBlocks: THREE.Mesh[] = []
@@ -245,14 +262,17 @@ export class PostgresInstance {
     private dsmTarget: number[] = []
     private dsmNext = 0
     private dsmPulse = 0
+    private lockPulse = 0
 
     private cacheEdge!: OutlineBox
     private cacheSheet!: THREE.MeshBasicMaterial
     private cachePulse = 0
 
     private maintCage!: OutlineBox
+    private maintHost!: THREE.Group
     private chunks!: BlockField
     private maintChains: QueryChain[] = []
+    private tmpPages!: BlockField
     maintPass = 1
 
     get maintFill() {
@@ -303,6 +323,8 @@ export class PostgresInstance {
         this.buildBackends()
         this.scanner = this.makeScanner()
         this.vacuumDrone = this.makeVacuumDrone()
+        this.vacuumDrone.add(this.maintHost)
+        this.maintHost.position.set(0, MAINT_LIFT, 0)
 
         this.openBackend()
         this.openBackend()
@@ -323,6 +345,7 @@ export class PostgresInstance {
         this.buildDynamicSharedMemory()
         this.buildEffectiveCache()
         this.buildMaintenanceWork()
+        this.buildTempWork()
     }
 
     private buildDynamicSharedMemory() {
@@ -422,34 +445,96 @@ export class PostgresInstance {
     }
 
     private buildMaintenanceWork() {
-        const b = MAINT_BOX
-
-        // One cage, and it is the pick's outline: hovering brightens it, and so does a
-        // job spending the budget. A dashed cage is the notation for "structure drawn,
-        // no footprint of its own" — a budget has none, so there is nothing to wrap.
-        const cage = new OutlineBox(b.w, b.h, b.d, 0xc7ff5a, 0.22, { dashed: true })
-        cage.centre(b.x, b.y, b.z)
-        this.group.add(cage)
+        // The store belongs to the job, not to a coordinate in space: it is a companion on
+        // the drone, so it goes where the worker goes and is gone when the worker is. A
+        // dashed cage is the notation for a structure with no footprint of its own.
+        const host = new THREE.Group()
+        const cage = new OutlineBox(MAINT_CAGE.w, MAINT_CAGE.h, MAINT_CAGE.d, 0xc7ff5a, 0.22, {
+            dashed: true,
+        })
+        cage.centre(0, MAINT_CAGE.h / 2, 0)
+        host.add(cage)
         this.maintCage = cage
 
-        // Not pages: the blocks are slices of the budget, and what goes into them is what
-        // the job actually keeps — for a vacuum, the address of each dead tuple it has
-        // to come back to. They fill in order like disk blocks, and empty as they are used.
+        // Not pages: one plate is the address list of one heap page — a block number and a
+        // bit per slot — so the stack counts pages to revisit, not bytes copied. Pages are
+        // cubes everywhere else in the scene; an address is a slab.
         this.chunks = new BlockField({
-            cols: MAINT_COLS,
-            rows: MAINT_ROWS,
-            layers: MAINT_LAYERS,
-            size: 0.3,
-            pitchX: 0.4,
-            pitchY: 0.4,
-            pitchZ: 0.4,
-            home: new THREE.Vector3(b.x, b.y, b.z),
+            cols: 1,
+            rows: MAINT_STACK,
+            layers: 1,
+            size: 0.42,
+            sizeY: 0.028,
+            pitchX: 0,
+            pitchY: 0.054,
+            pitchZ: 0,
+            home: new THREE.Vector3(0, 0.12 + (MAINT_STACK * 0.054) / 2, 0),
             colour: 0xb6ef63,
             dark: 0x2c3d12,
         })
-        this.group.add(this.chunks.group)
+        host.add(this.chunks.group)
 
-        const lab = label(`maintenance_work_mem · ${MAINT_DEFAULT}`)
+        const lab = label(`addresses · ${MAINT_DEFAULT} budget`)
+        lab.position.set(-MAINT_CAGE.w / 2 - 0.05, MAINT_CAGE.h + 0.14, 0)
+        host.add(lab)
+
+        const pick = new THREE.Mesh(
+            new THREE.BoxGeometry(MAINT_CAGE.w, MAINT_CAGE.h, MAINT_CAGE.d),
+            new THREE.MeshBasicMaterial({ visible: false }),
+        )
+        pick.position.set(0, MAINT_CAGE.h / 2, 0)
+        host.add(pick)
+        // Nothing to show while no job is running: the budget is per operation, so it
+        // appears with the vacuum and goes with it.
+        host.visible = false
+        this.register(
+            pick,
+            {
+                title: 'maintenance_work_mem — addresses of dead tuples, one plate per page',
+                body: `The budget is ${MAINT_DEFAULT} and nothing in it is data: what a vacuum keeps is the address of each dead tuple it finds — six bytes, a block number and a slot — grouped by page, so one plate here is one heap page with dead tuples and the offsets inside it that have to go. No page is copied in and no tuple is copied in; the page itself is read into a shared buffer when the scan inspects it, and read again when the vacuum comes back to prune it. That second visit is the whole reason the list exists: without it a vacuum would have to hold every page it means to rewrite in memory at once. The list grows only as far as the heap has dead tuples to record, which is why this stack is short — a 64 MB budget is eleven million addresses and a table this size produces thousands — but fill it before the scan is done and vacuum processes what it holds and starts another pass over the heap, so a small value costs passes and never a spill. Compare the neighbours: the sort beside this one holds real tuples and does spill, to 8 KiB pages in pgsql_tmp. When the job ends the stack is released to the allocator, not to the operating system, so RSS stays where it was and the next vacuum fills the same memory again.`,
+                meta: `per operation, per worker · ${MAINT_DEFAULT} ≈ 11 M addresses · one plate = one page’s addresses`,
+                stats: () => [
+                    {
+                        label: 'store',
+                        value: `${this.maintUsed} of ${MAINT_STACK} plates`,
+                    },
+                    { label: 'plate', value: 'one page · its dead slots' },
+                    { label: 'plate bytes', value: '6 B per dead tuple' },
+                    { label: 'budget', value: MAINT_DEFAULT },
+                    { label: 'scope', value: 'one operation, one worker' },
+                    { label: 'pass', value: String(this.maintPass) },
+                ],
+            },
+            cage,
+        )
+
+        this.maintHost = host
+    }
+
+    private buildTempWork() {
+        const b = TMP_CAGE
+        // A sort that outgrows its memory does not lose the work: it writes sorted runs to
+        // files and merges them back. Those are pages, so they are blocks.
+        const cage = new OutlineBox(b.w, b.h, b.d, PALETTE.amber, 0.2, { dashed: true })
+        cage.centre(b.x, b.y, b.z)
+        this.group.add(cage)
+
+        this.tmpPages = new BlockField({
+            cols: TMP_COLS,
+            rows: TMP_ROWS,
+            layers: 1,
+            size: PAGE_GRID.bw,
+            pitchX: 0.52,
+            pitchY: 0.3,
+            pitchZ: 0.3,
+            home: new THREE.Vector3(b.x, b.y, b.z),
+            colour: PALETTE.amber,
+            dark: 0x2a1a05,
+        })
+        this.group.add(this.tmpPages.group)
+        this.tmpPages.group.visible = false
+
+        const lab = label('pgsql_tmp · sorted runs')
         lab.position.set(b.x - b.w / 2 - 0.05, b.y + b.h / 2 + 0.14, b.z)
         this.group.add(lab)
 
@@ -462,18 +547,14 @@ export class PostgresInstance {
         this.register(
             pick,
             {
-                title: 'maintenance_work_mem — addresses of dead tuples, for one job',
-                body: `Not a pool and not pages: a byte budget for the allocations one maintenance operation makes while it runs. What a vacuum keeps in it is not the tuples and not the pages — it is the address of each dead tuple, six bytes of block number and offset, so that it can come back later. That is what flies in: the heap scan records an address per dead tuple it finds, one after another, until the scan ends or the budget runs out. Then the store is read back, in the order it was written: for each recorded address vacuum locks that page, prunes the dead versions out of it and clears it in the visibility map — that is what flies back out to the page. The read-back is the whole reason the store exists: without it a vacuum would have to hold every page it means to rewrite in memory at once. Fill the budget before the heap is done and vacuum processes what it holds, then starts another scan pass — that is why a small value costs heap passes and never a temp file. The blocks are a gauge, not thirty-six allocations: at the default ${MAINT_DEFAULT} each one stands for about 1.8 MB, roughly 300,000 dead tuples, and the whole cage for about eleven million. CREATE INDEX spends the same budget differently — it sorts keys in memory, and past the ceiling the sort writes merge runs into pgsql_tmp, which are 8 KiB pages because that is the block size. Each block fades out as the address in it is used, and the store's own memory goes back when the job ends — to the allocator, not to the operating system, so the next job fills the same blocks again and RSS does not drop.`,
-                meta: `per operation, per worker · ${MAINT_DEFAULT} ≈ 11 M dead tids · gauge, not 8 allocations`,
+                title: 'pgsql_tmp — where a sort puts what it cannot hold',
+                body: `The one thing on this page that is disk and not memory: a directory inside the data directory (base/pgsql_tmp, or the tablespace’s own), where a sort that runs out of maintenance_work_mem writes what it has sorted so far and starts again on the rest. Those runs are ordinary files of ordinary BLCKSZ pages, so they are blocks here and always will be. CREATE INDEX is the job that lives here: it reads the table, builds index tuples in a tuplesort, and once the budget is gone it writes a sorted run and carries on — at the end it merges the runs into one ordered stream and writes the index in a single pass. The file is unlinked when the operation finishes, which is why this cage is empty: nothing in this scene sorts enough to spill, and a 64 MB budget sorts a very large table before it does. What makes it worth watching for is that it is invisible until it happens — the statement simply gets slower, and the disk fills while it runs; log_temp_files logs each one with its size once it is gone, and temp_file_limit can kill a query that crosses it.`,
+                meta: 'temp files on disk · BLCKSZ pages · unlinked at the end · zero here',
                 stats: () => [
-                    {
-                        label: 'store',
-                        value: `${this.maintUsed} of ${MAINT_CELLS} blocks · ≈ ${(this.maintUsed * 0.3).toFixed(1)} M tids`,
-                    },
-                    { label: 'block', value: '≈ 1.8 MB ≈ 0.3 M tids' },
-                    { label: 'budget', value: MAINT_DEFAULT },
-                    { label: 'scope', value: 'one operation, one worker' },
-                    { label: 'pass', value: String(this.maintPass) },
+                    { label: 'files', value: '0' },
+                    { label: 'block', value: 'BLCKSZ · 8 KiB' },
+                    { label: 'when', value: 'sort outgrows the budget' },
+                    { label: 'seen by', value: 'log_temp_files' },
                 ],
             },
             cage,
@@ -486,9 +567,14 @@ export class PostgresInstance {
         return chain
     }
 
+    /** The stack rides the drone, so its slots have to be read in the parent's space. */
+    private storeTop(slot: number) {
+        return this.chunks.top(slot).add(this.maintHost.position).add(this.vacuumDrone.position)
+    }
+
     private async flyTidIntoStore(page: Page8K, chunk: number) {
         const from = this.blockTop(page).add(new THREE.Vector3(0, 0.14, 0))
-        const to = this.chunks.top(chunk)
+        const to = this.storeTop(chunk)
         const tid = makePacket(PALETTE.amber, 0.13, this.group, {
             emissive: 1.9,
             haloScale: 3.0,
@@ -513,7 +599,7 @@ export class PostgresInstance {
     }
 
     private async flyTidOutOfStore(rec: { chunk: number; page: Page8K }) {
-        const from = this.chunks.top(rec.chunk)
+        const from = this.storeTop(rec.chunk)
         const to = this.blockTop(rec.page).add(new THREE.Vector3(0, 0.05, 0))
         const tid = makePacket(PALETTE.amber, 0.13, this.group, {
             emissive: 1.9,
@@ -553,7 +639,7 @@ export class PostgresInstance {
         const shellW = 26.0
         const shellD = 16.0
 
-        const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34, { dashed: true })
+        const cage = new OutlineBox(shellW, shellH, shellD, 0x3fa8cc, 0.34)
         cage.fromFloor(0, 0, 0)
         this.group.add(cage)
         this.register(cage, {
@@ -605,7 +691,7 @@ export class PostgresInstance {
             shellD / 2 - STICKER_INSET + inkSticker.x0,
         )
 
-        ;(sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
+            ; (sticker.material as THREE.MeshBasicMaterial).side = THREE.FrontSide
         this.group.add(sticker)
 
         this.motes = dustField(shellW, shellH, shellD)
@@ -741,8 +827,8 @@ export class PostgresInstance {
             kind === 'insert'
                 ? Math.min(1, page.fill + rand(0.15, 0.45))
                 : page.fill < 0.4 && Math.random() < 0.55
-                  ? 0
-                  : Math.max(0, page.fill - rand(0.25, 0.6))
+                    ? 0
+                    : Math.max(0, page.fill - rand(0.25, 0.6))
         this.setBufferFill(page, next)
         page.dirty = true
         page.base.set(PALETTE.amber)
@@ -1099,8 +1185,8 @@ export class PostgresInstance {
         const state = isHead
             ? `the head, ${Math.round(written * 100)}% written`
             : written > 0
-              ? 'written and waiting to be recycled'
-              : 'recyclable — its bytes stay until the head comes round again'
+                ? 'written and waiting to be recycled'
+                : 'recyclable — its bytes stay until the head comes round again'
         return {
             title: `WAL segment ${i} · ${mb(WAL_SEGMENT_BYTES)} contiguous`,
             body:
@@ -1354,29 +1440,128 @@ export class PostgresInstance {
     }
 
     private buildLocks() {
-        const cluster = new THREE.Group()
-        cluster.position.set(0.4, 2.5, -3.9)
-        const geo = new THREE.BoxGeometry(0.26, 0.26, 0.26)
-        for (let i = 0; i < 7; i++) {
-            const mat = glowMat(0x160a18, PALETTE.magenta, 0.35)
-            const m = new THREE.Mesh(geo, mat)
-            m.position.set(rand(-0.7, 0.7), rand(-0.3, 0.4), rand(-0.4, 0.4))
-            m.rotation.set(rand(0, 1), rand(0, 1), rand(0, 1))
-            cluster.add(m)
-            this.lockMats.push(mat)
-        }
-        this.group.add(cluster)
+        this.locks = new LockRack(this.ticker)
+        this.group.add(this.locks.group)
+
+        const b = LOCK_RACK
         const pick = new THREE.Mesh(
-            new THREE.BoxGeometry(1.8, 1.2, 1.4),
+            new THREE.BoxGeometry(b.w + 0.5, b.h + 0.5, b.d + 1.9),
             new THREE.MeshBasicMaterial({ visible: false }),
         )
-        pick.position.copy(cluster.position)
+        pick.position.set(b.x, b.y, b.z + 0.35)
         this.group.add(pick)
-        this.register(pick, {
-            title: 'Lock manager — the heavyweight lock table',
-            body: 'Every lock a transaction takes on a table, an index or another object is an entry in this hash, held in shared memory and sized up front by max_connections × max_locks_per_transaction — each cube here is one of those entries. Row locks are deliberately not in it: a row lock is a bit in the tuple header, so locking a million rows costs nothing here, while taking a lock on a thousand relations can exhaust the table and fail the statement. A request that cannot be granted waits on the same entry with granted = false, which is what pg_locks shows and what surfaces as wait_event = Lock. So contention is not a second mechanism — it is this table, with entries that are waiting rather than held. Locks last until the transaction ends, which is why one long transaction can stall every writer behind it.',
-            meta: 'lock table · shared memory · row locks live in the tuple header',
-        })
+        this.register(
+            pick,
+            {
+                title: 'Lock manager',
+                body: `One block per locked object, a pip per holder. This is the table that has no pages. Every lock a transaction takes on a table, an index or a transaction id is an entry in a hash inside the main shared memory segment, allocated once at startup from max_connections × max_locks_per_transaction and never grown afterwards. The entry is keyed by what is being locked, so it is one block per object and not one per session: three readers of the same table share one block, and each backend holding it is a pip on its front, which is what the row in pg_locks with granted = true is. The colour is the mode. The mode is what decides who may sit beside whom: AccessShare conflicts with nothing except the exclusive modes, RowExclusive still shares with readers, and AccessExclusive — ALTER TABLE, DROP, TRUNCATE — shares with nobody, which is why a statement that runs in milliseconds can hold up every SELECT on the table for as long as it has to queue for it. A backend whose mode conflicts gets no pip and does not spin: it records granted = false, joins a queue on that entry and sleeps on a semaphore, which is what surfaces as wait_event = Lock. Nothing in this queue is about rows. A row lock is a bit in the tuple header, so an UPDATE of a million rows adds no entries at all; what a second session waits on is the holder’s transaction id, one entry keyed by the transaction that covers every row it has locked. Hooks go when the transaction ends, not when the statement does, which is why one idle-in-transaction session stalls everything behind it — and after deadlock_timeout a waiter builds a wait-for graph and aborts one transaction to break a cycle. Run out of entries and the statement fails outright: out of shared memory, increase max_locks_per_transaction.`,
+                meta: 'lock table · shared memory · always sized up front · row locks live in the tuple header',
+                stats: () => [
+                    { label: 'entries', value: `${this.lockHeld} of ${LOCK_SLOTS} blocks` },
+                    { label: 'holders', value: `${this.lockHolders} pips` },
+                    {
+                        label: 'waiting',
+                        value: `${this.lockWaiting} backend${this.lockWaiting === 1 ? '' : 's'}`,
+                    },
+                    { label: 'sized by', value: 'max_connections × max_locks_per_transaction' },
+                    { label: 'released', value: 'at COMMIT, not at statement end' },
+                ],
+            },
+            this.locks.cage,
+        )
+    }
+
+    /**
+     * One entry per locked object, one pip per backend holding it. The entry is tethered to
+     * the relation on the plate, so the block on the rack is visibly *about* something.
+     */
+    holdLock(relation: string, mode: LockMode, aim?: THREE.Vector3) {
+        const { slot, created } = this.locks.acquire(relation, mode)
+        if (slot < 0 || !aim || !created) return slot
+        this.tether(relation, slot, mode, aim)
+        return slot
+    }
+
+    private tether(relation: string, slot: number, mode: LockMode, aim: THREE.Vector3) {
+        const line = new THREE.Line(
+            new THREE.BufferGeometry().setFromPoints([this.locks.slotPoint(slot), aim.clone()]),
+            new THREE.LineBasicMaterial({
+                color: LOCK_COLOUR[mode],
+                transparent: true,
+                opacity: 0.45,
+            }),
+        )
+        this.group.add(line)
+        this.lockTethers.set(relation, line)
+    }
+
+    private dropTether(relation: string) {
+        const line = this.lockTethers.get(relation)
+        if (!line) return
+        this.group.remove(line)
+        line.geometry.dispose()
+            ; (line.material as THREE.Material).dispose()
+        this.lockTethers.delete(relation)
+    }
+
+    releaseLock(relation: string) {
+        this.dropTether(relation)
+        this.locks.release(relation)
+    }
+
+    releaseLocks() {
+        for (const relation of [...this.lockTethers.keys()]) this.dropTether(relation)
+        this.locks.releaseAll()
+    }
+
+    /** A statement asking for a lock: granted now, or refused and left to queue. */
+    lockAsk(relation: string, mode: LockMode, aim?: THREE.Vector3) {
+        const before = this.locks.fits(relation, mode)
+        const { slot, created, granted } = this.locks.acquire(relation, mode)
+        if (granted && created && aim) this.tether(relation, slot, mode, aim)
+        return { granted, slot, wasFree: before }
+    }
+
+    /** One backend's hook goes; when the last one does, the entry drains and its tether with it. */
+    lockDrop(relation: string) {
+        this.locks.unlock(relation)
+        if (this.locks.held === 0 || !this.locks.locked(relation)) this.dropTether(relation)
+    }
+
+    lockFits(relation: string, mode: LockMode) {
+        return this.locks.fits(relation, mode)
+    }
+
+    lockQueuePoint(index = 0) {
+        return this.locks.queuePoint(index)
+    }
+
+    lockSlotOf(relation: string) {
+        return this.locks.slotOf(relation)
+    }
+
+    /** A refusal flashes the cage, so the queue is noticed even with the camera wide. */
+    pulseLockCage() {
+        this.lockPulse = 1
+    }
+
+    parkLock(mode: LockMode, target: number) {
+        return this.locks.park(mode, target)
+    }
+
+    admitLock(wait: LockWait, relation = 'relation') {
+        return this.locks.admit(wait, relation)
+    }
+
+    clearLocks() {
+        for (const relation of [...this.lockTethers.keys()]) this.dropTether(relation)
+        this.locks.clear()
+    }
+
+    lockRackBox() {
+        // Layout coords are the instance's own; the cage is placed by setOrigin, so the
+        // subject the camera frames has to be moved into world space like every other box.
+        return this.locks.bounds.translate(POSTGRES_ORIGIN)
     }
 
     private buildBackends() {
@@ -1500,7 +1685,7 @@ export class PostgresInstance {
     }
 
     closeIdleBackendsTo(keep: number) {
-        while (this.activeBackendCount > keep && this.closeBackend()) {}
+        while (this.activeBackendCount > keep && this.closeBackend()) { }
     }
 
     acquireBackend(): BackendPod | null {
@@ -1574,40 +1759,40 @@ export class PostgresInstance {
             text: string
             info: Info
         }[] = [
-            {
-                name: PostgresqlNodeName.Parse,
-                z: PROCESS.zParse,
-                color: PALETTE.cyan,
-                text: 'PARSER',
-                info: {
-                    title: 'Parser + rewriter',
-                    body: 'The SQL text becomes a parse tree, syntax is checked, and the rewriter expands views and rules before planning.',
-                    meta: 'raw_parser · rewrite',
+                {
+                    name: PostgresqlNodeName.Parse,
+                    z: PROCESS.zParse,
+                    color: PALETTE.cyan,
+                    text: 'PARSER',
+                    info: {
+                        title: 'Parser + rewriter',
+                        body: 'The SQL text becomes a parse tree, syntax is checked, and the rewriter expands views and rules before planning.',
+                        meta: 'raw_parser · rewrite',
+                    },
                 },
-            },
-            {
-                name: PostgresqlNodeName.Plan,
-                z: PROCESS.zPlan,
-                color: PALETTE.violet,
-                text: 'PLANNER',
-                info: {
-                    title: 'Planner / optimizer',
-                    body: 'A cost-based optimizer enumerates access paths — seq scan, index scan, nested loop, hash join — estimates rows from statistics, and keeps the cheapest plan.',
-                    meta: 'pg_planner · cost model',
+                {
+                    name: PostgresqlNodeName.Plan,
+                    z: PROCESS.zPlan,
+                    color: PALETTE.violet,
+                    text: 'PLANNER',
+                    info: {
+                        title: 'Planner / optimizer',
+                        body: 'A cost-based optimizer enumerates access paths — seq scan, index scan, nested loop, hash join — estimates rows from statistics, and keeps the cheapest plan.',
+                        meta: 'pg_planner · cost model',
+                    },
                 },
-            },
-            {
-                name: PostgresqlNodeName.Exec,
-                z: PROCESS.zExec,
-                color: PALETTE.teal,
-                text: 'EXECUTOR',
-                info: {
-                    title: 'Executor',
-                    body: 'Walks the plan tree tuple by tuple, evaluating quals, joins and aggregates. Every page request goes through the buffer manager. Rows do not go to a separate stage: the executor hands them to the connection protocol as it produces them, so the answer streams out of the same port the query came in on.',
-                    meta: 'executor · volcano model · rows stream to the client',
+                {
+                    name: PostgresqlNodeName.Exec,
+                    z: PROCESS.zExec,
+                    color: PALETTE.teal,
+                    text: 'EXECUTOR',
+                    info: {
+                        title: 'Executor',
+                        body: 'Walks the plan tree tuple by tuple, evaluating quals, joins and aggregates. Every page request goes through the buffer manager. Rows do not go to a separate stage: the executor hands them to the connection protocol as it produces them, so the answer streams out of the same port the query came in on.',
+                        meta: 'executor · volcano model · rows stream to the client',
+                    },
                 },
-            },
-        ]
+            ]
 
         const nodes = {} as Record<PostgresqlNodeName, PipelineNode>
         for (const def of defs) {
@@ -1756,7 +1941,7 @@ export class PostgresInstance {
         const to = pageX(PAGE_GRID.cols - 1) + 0.6
         await this.ticker.add(1.1, (k) => {
             beam.position.x = from + (to - from) * k
-            ;(beam.material as THREE.MeshBasicMaterial).opacity = 0.1 + 0.55 * Math.sin(k * Math.PI)
+                ; (beam.material as THREE.MeshBasicMaterial).opacity = 0.1 + 0.55 * Math.sin(k * Math.PI)
         })
         beam.visible = false
         if (this.dsmTarget.length === DSM_SEGMENTS) this.dsmTarget[slot] = 0
@@ -2077,9 +2262,7 @@ export class PostgresInstance {
             })
         }
 
-        this.lockMats.forEach((m, i) => {
-            m.emissiveIntensity = 0.25 + 0.3 * breathe(time, 1.7, i)
-        })
+        this.locks.update(dt, time)
 
         this.dsmPulse = Math.max(0, this.dsmPulse - dt * 0.9)
         this.maintChains = this.maintChains.filter((c) => {
@@ -2106,6 +2289,8 @@ export class PostgresInstance {
         }
 
         this.maintCage?.brighten(0.5 * this.maintFill)
+        this.lockPulse = Math.max(0, this.lockPulse - dt * 0.7)
+        this.locks.cage.brighten(0.6 * this.lockPulse)
 
         for (const b of this.backends) {
             b.pulse = Math.max(0, b.pulse - dt * 2.2)
@@ -2125,9 +2310,9 @@ export class PostgresInstance {
                     n.group.position.set(
                         n.home.x + Math.sin(time * 0.42 + phase) * 0.05,
                         n.home.y +
-                            Math.sin(time * 0.75 + phase * 1.3) * 0.09 +
-                            Math.sin(time * 1.9 + phase) * 0.03 +
-                            n.pulse * 0.12,
+                        Math.sin(time * 0.75 + phase * 1.3) * 0.09 +
+                        Math.sin(time * 1.9 + phase) * 0.03 +
+                        n.pulse * 0.12,
                         n.home.z + Math.cos(time * 0.5 + phase) * 0.05,
                     )
                     n.group.rotation.y += dt * 0.12
@@ -2188,6 +2373,8 @@ export class PostgresInstance {
         } else {
             this.vacuumDrone.rotation.y += dt * 2.4
         }
+        // The store exists only while the worker is running an operation.
+        this.maintHost.visible = this.droneBusy
         WORLD_ANCHOR.vacuum.copy(this.vacuumDrone.position).add(POSTGRES_ORIGIN)
     }
 

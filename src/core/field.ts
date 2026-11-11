@@ -11,6 +11,12 @@ export interface FieldOptions {
     pitchY: number
     pitchZ: number
 
+    /** A slab instead of a cube: the shape says "not a page" before any label does. */
+    sizeY?: number
+
+    /** Emissive at full fill. Lower it when a field must not bloom. */
+    glow?: number
+
     home: THREE.Vector3
     colour: number
     dark?: number
@@ -28,12 +34,14 @@ export class BlockField {
     readonly rows: number
     readonly layers: number
     readonly size: number
+    readonly sizeY: number
     private readonly home0: THREE.Vector3
     private readonly pitchX: number
     private readonly pitchY: number
     private readonly pitchZ: number
     private readonly dark: THREE.Color
-    private readonly bright: THREE.Color
+    private readonly brights: THREE.Color[] = []
+    private readonly glow: number
     private readonly meshes: THREE.Mesh[] = []
     private readonly mats: THREE.MeshStandardMaterial[] = []
     private readonly fill: number[] = []
@@ -44,14 +52,15 @@ export class BlockField {
         this.rows = opts.rows
         this.layers = opts.layers
         this.size = opts.size
+        this.sizeY = opts.sizeY ?? opts.size
         this.pitchX = opts.pitchX
         this.pitchY = opts.pitchY
         this.pitchZ = opts.pitchZ
         this.home0 = opts.home.clone()
         this.dark = new THREE.Color(opts.dark ?? 0x101a12)
-        this.bright = new THREE.Color(opts.colour)
+        this.glow = opts.glow ?? 0.6
 
-        const geo = new THREE.BoxGeometry(opts.size, opts.size, opts.size)
+        const geo = new THREE.BoxGeometry(opts.size, this.sizeY, opts.size)
         for (let i = 0; i < this.capacity; i++) {
             const mat = new THREE.MeshStandardMaterial({
                 color: this.dark.clone(),
@@ -68,6 +77,7 @@ export class BlockField {
             this.mats.push(mat)
             this.fill.push(0)
             this.held.push(false)
+            this.brights.push(new THREE.Color(opts.colour))
             this.set(i, 0)
         }
     }
@@ -92,7 +102,7 @@ export class BlockField {
     }
 
     top(i: number): THREE.Vector3 {
-        return this.slot(i).add(new THREE.Vector3(0, this.size / 2 + 0.12, 0))
+        return this.slot(i).add(new THREE.Vector3(0, this.sizeY / 2 + 0.12, 0))
     }
 
     claim(): number | null {
@@ -127,8 +137,15 @@ export class BlockField {
         mesh.scale.setScalar(0.7 + 0.3 * f)
         mat.opacity = 0.35 + 0.65 * f
         mat.depthWrite = f > 0.5
-        mat.color.copy(this.dark).lerp(this.bright, f)
-        mat.emissiveIntensity = 0.15 + 0.6 * f
+        mat.color.copy(this.dark).lerp(this.brights[i], f)
+        mat.emissiveIntensity = 0.15 + this.glow * f
+    }
+
+    /** Recolours one slot, so slots in the same lattice can carry different meanings. */
+    tint(i: number, colour: number) {
+        if (i < 0 || i >= this.capacity) return
+        this.brights[i].set(colour)
+        this.set(i, this.fill[i])
     }
 
     grow(i: number, to: number, dur: number, ticker: Ticker): Promise<void> {

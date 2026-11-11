@@ -200,6 +200,13 @@ export function setLabelEnabled(obj: CSS2DObject, on: boolean) {
     obj.visible = on
 }
 
+/** Labels are registered globally, so one that rides a temporary object has to be unhooked. */
+export function releaseLabel(obj: CSS2DObject) {
+    lodLabels.delete(obj)
+    obj.parent?.remove(obj)
+    obj.element.remove()
+}
+
 export function updateLabelLOD(camera: THREE.Camera) {
     for (const obj of lodLabels) {
         obj.getWorldPosition(lodWorld)

@@ -229,14 +229,36 @@ export const CACHE_GHOST = { x: 3.6, y: 1.05, z: 3.8, w: 3.8, d: 2.8 }
 
 export const EFFECTIVE_CACHE_SIZE = '4 GB'
 
-export const MAINT_BOX = { x: -8.5, y: 4.55, z: DISK_FIELD.cz, w: 1.7, h: 1.35, d: 1.3 }
-
-export const MAINT_COLS = 4
-export const MAINT_ROWS = 3
-export const MAINT_LAYERS = 3
-export const MAINT_CELLS = MAINT_COLS * MAINT_ROWS * MAINT_LAYERS
-
 export const MAINT_DEFAULT = '64 MB'
+
+// Where a sort spills. Not memory: a directory of temp files inside the data directory,
+// holding real 8 KiB pages, so it gets pages and a dashed cage, and sits over the plate.
+export const TMP_CAGE = { x: -8.5, y: 4.35, z: DISK_FIELD.cz, w: 1.7, h: 1.2, d: 1.3 }
+
+export const TMP_COLS = 3
+export const TMP_ROWS = 2
+export const TMP_SLOTS = TMP_COLS * TMP_ROWS
+
+// The vacuum work store rides the process that owns it: a dashed companion over the drone,
+// one plate per heap page that has dead tuples to come back to.
+export const MAINT_STACK = 12
+export const MAINT_CAGE = { w: 0.8, h: 1.05, d: 0.8 }
+export const MAINT_LIFT = 1.15
+
+// The lock table is not pages and not a pool: a fixed hash allocated with the rest of the
+// main shared segment, drawn beside the pool it shares that segment with.
+export const LOCK_RACK = {
+    x: 3.35,
+    y: BUFFER_Y,
+    z: ANCHOR.bufferCenter.z,
+    w: 1.26,
+    h: 0.98,
+    d: 0.52,
+}
+
+export const LOCK_COLS = 4
+export const LOCK_ROWS = 3
+export const LOCK_SLOTS = LOCK_COLS * LOCK_ROWS
 
 export const WORLD_ANCHOR = Object.fromEntries(
     Object.entries(ANCHOR).map(([k, v]) => [k, v.clone()]),

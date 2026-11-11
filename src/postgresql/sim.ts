@@ -9,13 +9,16 @@ import {
 import type { BackendPod } from './instance'
 import { PostgresqlPathEnd, QueryChain, pathCurve } from './flow'
 import type { FlowSet, Paths } from './flow'
+import type { LockMode, LockWait } from './locks'
 import {
     Ticker,
     easeInOutCubic,
     easeInQuad,
     easeOutCubic,
+    label,
     rand,
     randInt,
+    releaseLabel,
     speedTime,
     travel,
 } from '../core/util'
@@ -47,6 +50,10 @@ export interface SimStats {
     checkpointing: boolean
     vacuuming: boolean
     compacting: boolean
+
+    locksHeld: number
+    locksHolding: number
+    locksWaiting: number
 }
 
 const RPS_WINDOW = 2
@@ -238,6 +245,11 @@ export class EngineSim {
             checkpointing: this.checkpointing,
             vacuuming: this.vacuuming,
             compacting: this.compacting,
+            locksHeld: this.inst.lockHeld,
+            locksHolding: this.inst.lockHolders,
+            // A refused statement is a waiter even though it is the packet itself parked, not
+            // a separate token on the rack.
+            locksWaiting: this.inst.lockWaiting + this.lockGates.length,
         }
     }
 
@@ -306,6 +318,51 @@ export class EngineSim {
         const pod = this.pickPod()
         if (!pod) return
         void this.send(pod)
+    }
+
+    // ---- the locks story: statements that really take a lock --------------------------
+    // A statement is refused at the executor, not at the socket: the parser and planner run
+    // to completion, and the packet stops when the relation it wants is already held in a
+    // mode that does not share. It parks at the rack until the entry is released.
+    private lockStory: { relation: string; aim: THREE.Vector3 } | null = null
+    private lockGates: { relation: string; mode: LockMode; open: () => void }[] = []
+
+    async runStatementLock(mode: LockMode, opts: { hold?: boolean; tag?: string } = {}) {
+        if (!this.lockStory) return
+        const pod = this.inst.backends.find((b) => b.active && !b.busy) ?? this.inst.openBackend()
+        if (!pod) return
+        // Claim the pod here: `querySequence` is normally reached through `serve`, which is
+        // what marks a backend busy, and three statements must not land on one backend.
+        pod.busy = true
+        try {
+            await this.querySequence(pod, { mode, hold: opts.hold ?? false, tag: opts.tag })
+            this.completions.push(this.clock)
+        } finally {
+            pod.busy = false
+        }
+    }
+
+    private lockGate(relation: string, mode: LockMode) {
+        return new Promise<void>((open) => this.lockGates.push({ relation, mode, open }))
+    }
+
+    /** Three readers of the same table: separate statements, one shared entry. */
+    async runLockedReaders(n: number) {
+        for (let i = 0; i < n; i++) {
+            void this.runStatementLock('AccessShare', { hold: true, tag: `S${i + 1}` })
+            await this.ticker.wait(0.3)
+        }
+    }
+
+    /** Called after any hook is released: whoever fits now is let through. */
+    private wakeLockGates() {
+        const aim = this.lockStory?.aim
+        for (const gate of [...this.lockGates]) {
+            if (!this.inst.lockFits(gate.relation, gate.mode)) continue
+            this.lockGates.splice(this.lockGates.indexOf(gate), 1)
+            if (aim) this.inst.lockAsk(gate.relation, gate.mode, aim)
+            gate.open()
+        }
     }
 
     private async send(pod: BackendPod) {
@@ -451,6 +508,46 @@ export class EngineSim {
             this.index.packet = null
         }
         this.inst.indexCompanion.release()
+    }
+
+    /** Lock-table helpers for the locks story: nothing here runs ambient. */
+    holdLock(relation: string, mode: LockMode, aim?: THREE.Vector3) {
+        return this.inst.holdLock(relation, mode, aim)
+    }
+
+    setLockStory(relation: string, aim: THREE.Vector3) {
+        this.lockStory = { relation, aim }
+    }
+
+    clearLockStory() {
+        this.lockStory = null
+        for (const gate of this.lockGates.splice(0)) gate.open()
+    }
+
+    releaseLocks() {
+        this.inst.releaseLocks()
+        this.wakeLockGates()
+    }
+
+    parkLock(mode: LockMode, target: number) {
+        return this.inst.parkLock(mode, target)
+    }
+
+    admitLock(wait: LockWait, relation?: string) {
+        return this.inst.admitLock(wait, relation)
+    }
+
+    clearLocks() {
+        this.inst.clearLocks()
+        this.wakeLockGates()
+    }
+
+    /** Rows changing: pulse the pages that hold them, with no lock-table entry at all. */
+    touchRows(count: number) {
+        for (let i = 0; i < count; i++) {
+            const block = this.inst.pickBlockForRead()
+            if (block) this.inst.touchBlocks([block], PALETTE.magenta, 0.6, 1.3)
+        }
     }
 
     async runIndexQuery(kind: PostgresqlIndexKind, opts: { cold?: boolean } = {}) {
@@ -632,7 +729,10 @@ export class EngineSim {
         }
     }
 
-    private async querySequence(pod: BackendPod) {
+    private async querySequence(
+        pod: BackendPod,
+        want?: { mode: LockMode; hold: boolean; tag?: string },
+    ) {
         const stmt = this.pickStatement()
         const kind = stmt.kind
         const hit = kind === 'select' && Math.random() < (stmt.viaIndex ? 0.9 : 0.78)
@@ -642,6 +742,9 @@ export class EngineSim {
         const outPort = new THREE.Vector3(origin.x, 10.35, origin.z + 0.34)
         const chain = new QueryChain(this.scene)
         this.chains.push(chain)
+        // Transaction-scoped: a hook taken here is dropped when the statement ends, unless the
+        // story keeps the transaction open so the holders can be seen at all.
+        let held: string | null = null
 
         const bufferExit = this.inst.backendBufferExit(pod)
         const pipe = pod.pipeline.nodes
@@ -650,6 +753,13 @@ export class EngineSim {
         const exec = pipe[PostgresqlNodeName.Exec].group.position.clone()
         const packet = makePacket(PALETTE.magenta, 0.42, this.scene)
         packet.position.copy(bufferExit)
+        // Identity, not colour: the palette already means stage (and mode on the rack), so a
+        // statement that has to be followed gets a tag instead of its own hue.
+        const tag = want?.tag ? label(want.tag, 'tag companion') : null
+        if (tag) {
+            tag.position.set(0, 0.42, 0)
+            packet.add(tag)
+        }
 
         try {
             const toParse = pathCurve([
@@ -698,6 +808,48 @@ export class EngineSim {
             await travel(this.ticker, packet, planCurve, speedTime(planCurve))
             this.inst.pulseNode(pod, PostgresqlNodeName.Exec, 1)
             fPlan.flash(0.8)
+
+            // A statement is refused here, at the executor, not on the way in: the parse and
+            // the plan already happened, and what stops is the relation being opened in a
+            // mode that does not share with the one already held. The packet itself parks.
+            const wantLock = want
+            if (wantLock && this.lockStory) {
+                const { relation, aim } = this.lockStory
+                // The statement packet is a query, and a query on this rack would dwarf the
+                // entry it is arguing about: bring it down to pip size for the exchange.
+                const fullScale = packet.scale.clone()
+                const core = packet.userData.core as THREE.Mesh | undefined
+                const coreMat = core?.material as THREE.MeshStandardMaterial | undefined
+                const fullGlow = coreMat?.emissiveIntensity ?? 2.4
+                packet.scale.setScalar(0.24)
+                if (coreMat) coreMat.emissiveIntensity = 0.55
+                if (!this.inst.lockAsk(relation, wantLock.mode, aim).granted) {
+                    const spot = this.inst.lockQueuePoint(0)
+                    const away = pathCurve([
+                        packet.position.clone(),
+                        packet.position
+                            .clone()
+                            .lerp(spot, 0.5)
+                            .add(new THREE.Vector3(0.7, 0.9, 0.3)),
+                        spot,
+                    ])
+                    this.note = `${wantLock.mode} on ${relation} refused · granted = false · wait_event = Lock`
+                    this.inst.pulseLockCage()
+                    await travel(this.ticker, packet, away, speedTime(away))
+                    await this.lockGate(relation, wantLock.mode)
+                    const back = pathCurve([
+                        spot,
+                        spot.clone().add(new THREE.Vector3(0.6, 0.8, 0.3)),
+                        exec.clone(),
+                    ])
+                    this.note = `${wantLock.mode} on ${relation} granted · the statement runs`
+                    await travel(this.ticker, packet, back, speedTime(back))
+                }
+                packet.scale.copy(fullScale)
+                if (coreMat) coreMat.emissiveIntensity = fullGlow
+                // hold means the transaction stays open, so the pip outlives the statement.
+                if (!wantLock.hold) held = relation
+            }
 
             const writes = kind === 'insert' || kind === 'delete'
             if (writes) {
@@ -886,7 +1038,12 @@ export class EngineSim {
             despawn(this.ticker, this.scene, out, 0.3)
         } finally {
             if (packet.parent && !packet.userData.despawning) packet.parent.remove(packet)
+            if (tag) releaseLabel(tag)
             chain.fadeOut(this.ticker, 1.25)
+            if (held) {
+                this.inst.lockDrop(held)
+                this.wakeLockGates()
+            }
         }
     }
 

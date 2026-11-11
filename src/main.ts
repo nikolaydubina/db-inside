@@ -603,6 +603,7 @@ const storyScene: StoryScene = {
     walRun: () => instance.walRunBox(),
     walBuffers: () => instance.walBuffersBox(),
     walHead: () => ({ id: `wal head`, box: instance.walHeadBox() }),
+    lockRack: () => ({ id: 'lock table', box: instance.lockRackBox() }),
     redisRide: () => {
         const p = redisSim.packetSubject()
         if (!p) return null
@@ -632,6 +633,7 @@ const story = createStory({
         redisSim.ambient = false
         hud.setRegime(PostgresqlRegime.Default)
         instance.closeIdleBackendsTo(1)
+        instance.clearLocks()
         redisSim.suspendPubSub()
         hud.closePanels()
         storyActive = true
@@ -639,6 +641,7 @@ const story = createStory({
     },
     onExit: () => {
         sim.cancelIndexRide()
+        instance.clearLocks()
         sim.ambient = true
         redisSim.ambient = true
         redisSim.resumePubSub()

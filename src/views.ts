@@ -3,7 +3,8 @@ import {
     WORLD_ANCHOR as ANCHOR,
     CACHE_GHOST,
     DSM_CAGE,
-    MAINT_BOX,
+    LOCK_RACK,
+    TMP_CAGE,
     PAGE_GRID,
     POSTGRES_ORIGIN,
     PROCESS,
@@ -177,6 +178,15 @@ export const VIEWS: ViewDef[] = [
         pose: () => shot(ANCHOR.bufferCenter, [0.8, 9.2, 5.8], 36),
     },
     {
+        id: 'postgresql-locks',
+        label: 'locks',
+        entity: 'the lock table',
+        hint: 'one block per held lock, and the queue of backends parked outside',
+
+        pose: () =>
+            shot(L(LOCK_RACK.x, LOCK_RACK.y, LOCK_RACK.z), [8.6, 8.4, 11.2], 42, [0, -2.2, 0.6]),
+    },
+    {
         id: 'postgresql-dev-shm',
         label: 'dev/shm',
         entity: 'dynamic shared memory',
@@ -210,9 +220,15 @@ export const VIEWS: ViewDef[] = [
         id: 'postgresql-maintenance-work',
         label: 'maintenance work',
         entity: 'maintenance_work_mem',
-        hint: 'the working set of one maintenance job: fills while it runs, drains when it ends',
-        pose: () =>
-            shot(L(MAINT_BOX.x, MAINT_BOX.y, MAINT_BOX.z), [2.4, 4.8, 6.6], 34, [0, -0.6, 0]),
+        hint: 'the address store one maintenance job keeps: a companion on the worker',
+        pose: () => shot(ANCHOR.vacuum, [2.6, 4.0, 6.2], 32, [0, 0.6, 0]),
+    },
+    {
+        id: 'postgresql-pgsql-tmp',
+        label: 'pgsql_tmp',
+        entity: 'temp files a sort spills into',
+        hint: 'disk, not memory: sorted runs as BLCKSZ pages, unlinked when the job ends',
+        pose: () => shot(L(TMP_CAGE.x, TMP_CAGE.y, TMP_CAGE.z), [2.2, 3.6, 5.6], 32, [0, -0.4, 0]),
     },
     {
         id: 'postgresql-pages',

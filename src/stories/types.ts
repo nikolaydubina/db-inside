@@ -17,6 +17,9 @@ export type StoryFacts = Pick<
     | 'walBytes'
     | 'walSegments'
     | 'walPending'
+    | 'locksHeld'
+    | 'locksHolding'
+    | 'locksWaiting'
 > & {
     rdKeys: number
     rdOps: number
@@ -65,6 +68,8 @@ export interface StoryScene {
     walBuffers(): THREE.Box3
 
     walHead(): StorySubject | null
+
+    lockRack(): StorySubject | null
 
     redisRide?: () => StorySubject | null
 

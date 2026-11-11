@@ -55,14 +55,16 @@ A story is a list of cards; each card frames the subject, issues the work, and f
 clock on the exact instant its caption describes. The cards live with their engine:
 
 ```
-src/stories/postgresql/  queue, wal, btree, gin, brin, hash
+src/stories/postgresql/  queue, wal, btree, gin, brin, hash, locks
 src/stories/redis/       pubsub, traversal, zset, hash, inline, raw
 ```
 
 The dashed cage that rides above the packet is a **companion**: a structure that has no footprint
 of its own but is the thing the statement is looking at right now. `src/core/companion.ts` carries
 it on the packet's marker, `src/core/packet.ts` is the cube itself — the same object both engines
-use, red on the way in and green on the way out.
+use, red on the way in and green on the way out. The autovacuum work store uses the same notation on
+a process instead of a packet: a companion over the drone, holding a stack of plated addresses, and
+present only while the job is.
 
 ```js
 __test.plan('btree')        // cards, their freeze stages and what each one waits for
@@ -170,10 +172,8 @@ Things the scene does not show yet. The first block is already listed in the Sto
       `pg_multixact/members`, which has its own wraparound hazard.
 
 **Missing structure**
-- [ ] **locks and waiting** — the biggest omission. A blocked query waits on a lock with no visual at
-      all; the lock manager exists only as an invisible pick target.
-- [ ] **`work_mem` and spills** — sorts, hash joins and `pgsql_tmp` temp files are not represented, so
-      execution looks allocation-free.
+- [ ] **`work_mem` and spills during execution** — `pgsql_tmp` now has a cage, but no query in
+      the scene sorts or hashes enough to write into it, so the spill path is still only a label.
 - [ ] **MVCC horizon** — dead tuples are drawn, but `xmin`/snapshots/freezing are not, which is what
       the "transaction that never ends" story needs.
 - [ ] **TOAST** — out-of-line storage for wide values (the `jsonb` in `products`) is not drawn.
@@ -201,14 +201,14 @@ Things the scene does not show yet. The first block is already listed in the Sto
       memory copy, not a disk read, and the drawing has no second level.
 - [ ] **checkpoint spikes** — `full_page_writes` writes whole pages to WAL right after a checkpoint, so
       WAL volume and write latency jump for a few seconds. Nobody expects it until they see it.
-- [ ] **deadlock** — two transactions each holding what the other wants; the detector kills one. This
-      is the story the lock manager is needed for.
+- [ ] **deadlock** — two transactions each holding what the other wants; the detector kills one.
+      The rack and the queue are drawn now; the wait-for graph and the victim are not.
 
 **Stories that need no new geometry**
 - [ ] **a table insert, end to end** — parse → plan → exec → buffer slot → WAL record → flush. The
       single clearest walk through everything already drawn.
-- [ ] **locks and transactions** — `BEGIN … UPDATE … COMMIT`, and the second session blocked on the
-      same row.
+- [ ] **locks and transactions** — `BEGIN … UPDATE … COMMIT` across two sessions, with the second
+      one waiting on the holder’s transaction id, and the rollback that releases everything.
 - [ ] **a rollback** — the same write, then `ROLLBACK`: dead tuple, WAL record, nothing durable to keep.
 
 **Correctness / polish**

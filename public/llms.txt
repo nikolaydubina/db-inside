@@ -17,9 +17,9 @@ buffers, wal_buffers, aof_buf) float above the disk blocks they become.
 - `/postgresql/<subject>` and `/redis/<subject>` — a named shot of one thing.
   `?db-panel=postgresql|redis` opens that engine's card; the path does not.
 
-PostgreSQL subjects: `disk`, `tables`, `wal`, `wal-buffers`, `buffers`, `dev-shm`,
-`os-cache`, `pipeline`, `maintenance-work`, `free-space`, `pages`, `autovacuum`,
-`table-users`, `table-products`, `table-metrics`.
+PostgreSQL subjects: `disk`, `tables`, `wal`, `wal-buffers`, `buffers`, `locks`,
+`dev-shm`, `os-cache`, `pipeline`, `maintenance-work`, `pgsql-tmp`, `free-space`, `pages`,
+`autovacuum`, `table-users`, `table-products`, `table-metrics`.
 
 Redis subjects: `keys`, `skew`, `zset`, `hash`, `list`, `disk`, `aof`, `pubsub`.
 
@@ -34,8 +34,18 @@ fsync; backend ports, one process per connection, each with its input buffer.
 The three memory facts a pool does not explain: `/dev/shm` with one dynamic shared
 memory segment per parallel query (its tmpfs size is a hard limit, not a slowdown), the
 OS page cache the planner is told about through `effective_cache_size` (a number, and
-nothing is allocated for it), and `maintenance_work_mem` as the working set of one
-maintenance job — per worker, spilling to `pgsql_tmp` when it runs out.
+nothing is allocated for it), and `maintenance_work_mem` — a companion that rides the
+autovacuum drone and is visible only while a job runs, holding one plate per heap page
+with dead tuples to revisit: addresses, never pages. `pgsql_tmp` is the opposite and
+gets its own dashed cage: disk, where a sort that outgrows the budget writes sorted
+runs as BLCKSZ pages (empty here — nothing in this scene spills).
+
+Locks are their own structure: a dashed rack beside the shared buffers, one block per
+locked object with a pip per backend holding it, coloured by mode and tethered to the
+relation it protects, with a queue of backends parked outside when the mode they want
+does not share. The `locks` story walks three readers sharing one entry, an `ALTER TABLE`
+waiting behind them, the commit that lets it through, and then a row lock that never
+touches the rack at all.
 
 Index lookups are stories rather than scenery: a statement physically walks socket →
 parser → planner → executor, then descends a B-tree, a GIN, a BRIN or a hash index
