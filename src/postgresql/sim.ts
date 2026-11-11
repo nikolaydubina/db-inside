@@ -75,6 +75,7 @@ const stageLabel = (stage: Stage) =>
                         : 'bitmap'
 
 const despawn = (ticker: Ticker, parent: THREE.Object3D, obj: THREE.Object3D, dur = 0.3) => {
+    obj.userData.despawning = true
     void ticker
         .add(dur, (k) => {
             obj.scale.setScalar(Math.max(0.001, 1 - k))
@@ -829,8 +830,7 @@ export class EngineSim {
                     speed: 0.5,
                     opacity: 0.42,
                 })
-                const packetCore = packet.children[0] as THREE.Mesh
-                ;(packetCore.material as THREE.MeshStandardMaterial).emissive.setHex(PALETTE.amber)
+                recolorPacket(packet, PALETTE.amber)
                 this.inst.liftFromDisk(pageIdx)
                 await travel(this.ticker, packet, up, speedTime(up))
                 fUp.flash(0.8)
@@ -879,6 +879,7 @@ export class EngineSim {
             await travel(this.ticker, out, outbound, speedTime(outbound), easeOutCubic)
             despawn(this.ticker, this.scene, out, 0.3)
         } finally {
+            if (packet.parent && !packet.userData.despawning) packet.parent.remove(packet)
             chain.fadeOut(this.ticker, 1.25)
         }
     }
