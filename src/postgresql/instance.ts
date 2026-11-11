@@ -1,5 +1,7 @@
 import * as THREE from 'three'
 import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js'
+import { BlockField } from '../core/field'
+import { makePacket } from '../core/packet'
 import {
     Ticker,
     OutlineBox,
@@ -19,8 +21,9 @@ import {
     rand,
     randInt,
     slotLattice,
+    travel,
 } from '../core/util'
-import { PostgresqlPathEnd } from './flow'
+import { PostgresqlPathEnd, QueryChain, pathCurve } from './flow'
 import { freeAt as fragmentedFree } from '../disk/fragmentation'
 import { createPostgresqlIndexCompanion } from './indexes'
 import type { PostgresqlIndexCompanionHandle } from './indexes'
@@ -48,6 +51,7 @@ import {
     MAINT_CELLS,
     MAINT_COLS,
     MAINT_DEFAULT,
+    MAINT_LAYERS,
     MAINT_ROWS,
     PAGE_CELL,
     PAGE_GRID,
@@ -247,10 +251,17 @@ export class PostgresInstance {
     private cachePulse = 0
 
     private maintCage!: OutlineBox
-    private readonly maintCells: THREE.MeshStandardMaterial[] = []
-    private maintUsed = 0
+    private chunks!: BlockField
+    private maintChains: QueryChain[] = []
     maintPass = 1
-    maintFill = 0
+
+    get maintFill() {
+        return this.chunks ? this.chunks.used / Math.max(1, this.chunks.capacity) : 0
+    }
+
+    get maintUsed() {
+        return this.chunks ? this.chunks.used : 0
+    }
 
     readonly indexCompanion: PostgresqlIndexCompanionHandle
 
@@ -421,18 +432,22 @@ export class PostgresInstance {
         this.group.add(cage)
         this.maintCage = cage
 
-        // Not pages: the cells are allocations — chunks the job pallocs as it goes, in
-        // whatever sizes it asks for. They are claimed in order and handed back in one
-        // reset, which is why the next job claims the same ones again.
-        const geo = new THREE.BoxGeometry(0.3, 0.3, 0.3)
-        for (let i = 0; i < MAINT_CELLS; i++) {
-            const mat = glowMat(0x101a12, 0xc7ff5a, 0.12)
-            const cell = new THREE.Mesh(geo, mat)
-            cell.position.copy(this.maintCellHome(i))
-            this.group.add(cell)
-            this.maintCells.push(mat)
-        }
-        this.maintFill = 0
+        // Not pages: the blocks are slices of the budget, and what goes into them is what
+        // the job actually keeps — for a vacuum, the address of each dead tuple it has
+        // to come back to. They fill in order like disk blocks, and empty as they are used.
+        this.chunks = new BlockField({
+            cols: MAINT_COLS,
+            rows: MAINT_ROWS,
+            layers: MAINT_LAYERS,
+            size: 0.3,
+            pitchX: 0.4,
+            pitchY: 0.4,
+            pitchZ: 0.4,
+            home: new THREE.Vector3(b.x, b.y, b.z),
+            colour: 0xb6ef63,
+            dark: 0x2c3d12,
+        })
+        this.group.add(this.chunks.group)
 
         const lab = label(`maintenance_work_mem · ${MAINT_DEFAULT}`)
         lab.position.set(b.x - b.w / 2 - 0.05, b.y + b.h / 2 + 0.14, b.z)
@@ -447,11 +462,15 @@ export class PostgresInstance {
         this.register(
             pick,
             {
-                title: 'maintenance_work_mem — bytes, not pages, for the life of one job',
-                body: `Not a pool and not pages: a byte budget for the allocations one maintenance operation makes while it runs — palloc chunks from the process heap, in whatever sizes the job asks for. The cells are those chunks; the drone claims one each time it records a dead tuple it will have to come back to. Nothing here is 4 KiB or 8 KiB and nothing here is a file: the only pages are on the far side of a spill. CREATE INDEX sorts the keys it is about to index, and past this ceiling the sort stops being memory and writes merge runs into pgsql_tmp, which are 8 KiB pages because that is the block size. VACUUM has no file to spill into: when its store is full it throws the store away and walks the heap again, which is why too small a value turns one pass into several. Every operation gets the full amount and every autovacuum worker gets its own, so four tables vacuumed at once can take four times this. At the end of the job the whole thing is reset in one go — released to the allocator, not to the operating system, and left where it is, so the next job claims the same bytes in the same order and RSS does not drop. The default is ${MAINT_DEFAULT}, small for a large index build — which is why raising it is the standard fix for a slow CREATE INDEX.`,
-                meta: `per operation, per worker · default ${MAINT_DEFAULT} · chunks, not pages · reset, not freed`,
+                title: 'maintenance_work_mem — addresses of dead tuples, for one job',
+                body: `Not a pool and not pages: a byte budget for the allocations one maintenance operation makes while it runs. What a vacuum keeps in it is not the tuples and not the pages — it is the address of each dead tuple, six bytes of block number and offset, so that it can come back later. That is what flies in: the heap scan records an address per dead tuple it finds, one after another, until the scan ends or the budget runs out. Then the store is read back, in the order it was written: for each recorded address vacuum locks that page, prunes the dead versions out of it and clears it in the visibility map — that is what flies back out to the page. The read-back is the whole reason the store exists: without it a vacuum would have to hold every page it means to rewrite in memory at once. Fill the budget before the heap is done and vacuum processes what it holds, then starts another scan pass — that is why a small value costs heap passes and never a temp file. The blocks are a gauge, not thirty-six allocations: at the default ${MAINT_DEFAULT} each one stands for about 1.8 MB, roughly 300,000 dead tuples, and the whole cage for about eleven million. CREATE INDEX spends the same budget differently — it sorts keys in memory, and past the ceiling the sort writes merge runs into pgsql_tmp, which are 8 KiB pages because that is the block size. Each block fades out as the address in it is used, and the store's own memory goes back when the job ends — to the allocator, not to the operating system, so the next job fills the same blocks again and RSS does not drop.`,
+                meta: `per operation, per worker · ${MAINT_DEFAULT} ≈ 11 M dead tids · gauge, not 8 allocations`,
                 stats: () => [
-                    { label: 'chunks held', value: `${this.maintUsed} of ${MAINT_CELLS}` },
+                    {
+                        label: 'store',
+                        value: `${this.maintUsed} of ${MAINT_CELLS} blocks · ≈ ${(this.maintUsed * 0.3).toFixed(1)} M tids`,
+                    },
+                    { label: 'block', value: '≈ 1.8 MB ≈ 0.3 M tids' },
                     { label: 'budget', value: MAINT_DEFAULT },
                     { label: 'scope', value: 'one operation, one worker' },
                     { label: 'pass', value: String(this.maintPass) },
@@ -461,33 +480,71 @@ export class PostgresInstance {
         )
     }
 
-    maintCellHome(i: number): THREE.Vector3 {
-        const b = MAINT_BOX
-        const col = i % MAINT_COLS
-        const row = Math.floor(i / MAINT_COLS)
-        return new THREE.Vector3(
-            b.x + (col - (MAINT_COLS - 1) / 2) * 0.46,
-            b.y - (MAINT_ROWS - 1) * 0.21 + row * 0.42,
-            b.z,
-        )
+    private maintChain() {
+        const chain = new QueryChain(this.group)
+        this.maintChains.push(chain)
+        return chain
     }
 
-    claimMaintenanceChunk(): number | null {
-        if (this.maintUsed >= this.maintCells.length) return null
-        const i = this.maintUsed++
-        this.maintCells[i].emissiveIntensity = 1.9
-        this.maintFill = this.maintUsed / this.maintCells.length
-        return i
+    private async flyTidIntoStore(page: Page8K, chunk: number) {
+        const from = this.blockTop(page).add(new THREE.Vector3(0, 0.14, 0))
+        const to = this.chunks.top(chunk)
+        const tid = makePacket(PALETTE.amber, 0.13, this.group, {
+            emissive: 1.9,
+            haloScale: 3.0,
+            haloOpacity: 0.55,
+        })
+        tid.position.copy(from)
+        const curve = pathCurve([
+            from,
+            from
+                .clone()
+                .lerp(to, 0.45)
+                .add(new THREE.Vector3(0.7, 1.35, 0.3)),
+            to,
+        ])
+        const chain = this.maintChain()
+        const flow = chain.addCurve(curve, PALETTE.amber, { speed: 0.55, opacity: 0.42 })
+        await travel(this.ticker, tid, curve, 0.3, easeInOutCubic)
+        flow.flash(0.8)
+        this.group.remove(tid)
+        chain.fadeOut(this.ticker, 0.45)
+        await this.chunks.grow(chunk, 1, 0.18, this.ticker)
     }
 
-    resetMaintenanceChunks() {
-        this.maintUsed = 0
-        this.maintFill = 0
-        for (const m of this.maintCells) m.emissiveIntensity = 0.12
-    }
-
-    dimMaintenanceChunks(k: number) {
-        for (const m of this.maintCells) m.emissiveIntensity = 0.12 + 1.78 * Math.max(0, k)
+    private async flyTidOutOfStore(rec: { chunk: number; page: Page8K }) {
+        const from = this.chunks.top(rec.chunk)
+        const to = this.blockTop(rec.page).add(new THREE.Vector3(0, 0.05, 0))
+        const tid = makePacket(PALETTE.amber, 0.13, this.group, {
+            emissive: 1.9,
+            haloScale: 3.0,
+            haloOpacity: 0.55,
+        })
+        tid.position.copy(from)
+        await this.chunks.grow(rec.chunk, 0, 0.16, this.ticker)
+        const curve = pathCurve([
+            from,
+            from
+                .clone()
+                .lerp(to, 0.55)
+                .add(new THREE.Vector3(-0.5, 1.1, -0.2)),
+            to,
+        ])
+        const chain = this.maintChain()
+        const flow = chain.addCurve(curve, PALETTE.amber, { speed: 0.55, opacity: 0.42 })
+        await travel(this.ticker, tid, curve, 0.26, easeInOutCubic)
+        flow.flash(0.8)
+        this.group.remove(tid)
+        chain.fadeOut(this.ticker, 0.45)
+        // the revisit: this page is pruned, and the address that led here is dropped
+        rec.page.dead = false
+        void this.ticker.add(0.45, (k) => {
+            const base = this.fillHex(rec.page)
+            this.tmpColorC.setHex(0xc7ff5a).lerp(this.tmpColorA.setHex(base), k)
+            if (k >= 0.999) this.tmpColorC.setHex(base)
+            this.paintBlock(rec.page, this.tmpColorC.getHex())
+        })
+        this.chunks.release(rec.chunk)
     }
 
     private buildShell() {
@@ -1800,44 +1857,37 @@ export class PostgresInstance {
         this.droneBusy = true
         const drone = this.vacuumDrone
 
-        this.resetMaintenanceChunks()
+        this.chunks.reset()
         this.maintPass = 1
 
-        for (const p of dead) {
-            const over = p.home.clone().add(new THREE.Vector3(0, 2.2, 0))
-            const from = drone.position.clone()
-            await this.ticker.add(0.26, (k) => {
-                drone.position.lerpVectors(from, over, easeInOutCubic(k))
-            })
-            p.dead = false
-            void this.ticker.add(0.5, (k) => {
-                const base = this.fillHex(p)
-                this.tmpColorC.setHex(0xc7ff5a).lerp(this.tmpColorA.setHex(base), k)
-                if (k >= 0.999) this.tmpColorC.setHex(base)
-                this.paintBlock(p, this.tmpColorC.getHex())
-            })
-
-            // The tuple it just found has to be remembered until the page can be
-            // revisited, so the drone puts it in a chunk before moving on.
-            let chunk = this.claimMaintenanceChunk()
-            if (chunk === null) {
-                // Store full: VACUUM throws it away and starts another pass over the heap.
-                this.maintPass++
-                this.resetMaintenanceChunks()
-                chunk = this.claimMaintenanceChunk() ?? 0
+        const pending = dead.slice()
+        while (pending.length > 0) {
+            // Pass one — walk the heap and record where the dead tuples are.
+            const records: { chunk: number; page: Page8K }[] = []
+            while (pending.length > 0) {
+                const p = pending[0]
+                const over = p.home.clone().add(new THREE.Vector3(0, 2.2, 0))
+                const from = drone.position.clone()
+                await this.ticker.add(0.16, (k) => {
+                    drone.position.lerpVectors(from, over, easeInOutCubic(k))
+                })
+                const chunk = this.chunks.claim()
+                // Store full: this pass ends here, and another scan follows after the
+                // addresses it does hold have been used.
+                if (chunk === null) break
+                pending.shift()
+                records.push({ chunk, page: p })
+                await this.flyTidIntoStore(p, chunk)
             }
-            const at = this.maintCellHome(chunk).add(new THREE.Vector3(0, 0.62, 0))
-            const toChunk = drone.position.clone()
-            await this.ticker.add(0.2, (k) => {
-                drone.position.lerpVectors(toChunk, at, easeInOutCubic(k))
-            })
-            await this.ticker.wait(0.05)
+
+            // Pass two — read the store back, page by page, and prune what it points at.
+            for (const rec of records) await this.flyTidOutOfStore(rec)
+            if (pending.length > 0) this.maintPass++
         }
+
         this.deadCount = 0
-        // One reset at the end of the job, not a chunk at a time: the context is
-        // destroyed whole and the allocator keeps the bytes for the next job.
-        await this.ticker.add(0.4, (k) => this.dimMaintenanceChunks(1 - k))
-        this.resetMaintenanceChunks()
+        // The store's own memory is released here, with the job: back to the allocator,
+        // not to the operating system, so the next job claims the same bytes again.
         await this.ticker.wait(0.25)
         this.droneBusy = false
         return dead.length
@@ -2032,6 +2082,10 @@ export class PostgresInstance {
         })
 
         this.dsmPulse = Math.max(0, this.dsmPulse - dt * 0.9)
+        this.maintChains = this.maintChains.filter((c) => {
+            c.update(dt)
+            return !c.disposed
+        })
         let dsmLit = 0
         for (const v of this.dsmLive) dsmLit = Math.max(dsmLit, v)
         this.dsmCage?.brighten(0.4 * dsmLit)

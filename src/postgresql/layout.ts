@@ -229,11 +229,12 @@ export const CACHE_GHOST = { x: 3.6, y: 1.05, z: 3.8, w: 3.8, d: 2.8 }
 
 export const EFFECTIVE_CACHE_SIZE = '4 GB'
 
-export const MAINT_BOX = { x: -8.5, y: 4.55, z: DISK_FIELD.cz, w: 1.7, h: 1.3, d: 1.2 }
+export const MAINT_BOX = { x: -8.5, y: 4.55, z: DISK_FIELD.cz, w: 1.7, h: 1.35, d: 1.3 }
 
-export const MAINT_COLS = 3
+export const MAINT_COLS = 4
 export const MAINT_ROWS = 3
-export const MAINT_CELLS = MAINT_COLS * MAINT_ROWS
+export const MAINT_LAYERS = 3
+export const MAINT_CELLS = MAINT_COLS * MAINT_ROWS * MAINT_LAYERS
 
 export const MAINT_DEFAULT = '64 MB'
 

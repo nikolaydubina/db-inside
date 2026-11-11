@@ -51,6 +51,10 @@ export interface SimStats {
 
 const RPS_WINDOW = 2
 
+// Autovacuum's default trigger is 50 rows + 20% of the table; a demo table is small, so
+// this is the same rule at demo scale.
+const AUTOVACUUM_AFTER = 10
+
 const PACKET_SIZE = 0.42
 
 const stageLabel = (stage: Stage) =>
@@ -1064,8 +1068,16 @@ export class EngineSim {
 
         this.deadTimer -= dt
         if (this.deadTimer <= 0) {
-            this.deadTimer = rand(3.2, 6.5)
-            this.inst.markDeadTuples(randInt(1, 2))
+            this.deadTimer = rand(2.8, 5.5)
+            this.inst.markDeadTuples(randInt(2, 3))
+        }
+
+        // Autovacuum fires on its own, the way it does on a real server: once enough dead
+        // rows have collected, a worker picks the table up. Nothing schedules it — the
+        // threshold does — and that is also why the store is empty between jobs instead
+        // of sitting half full.
+        if (this.ambient && !this.vacuuming && this.inst.deadTuples >= AUTOVACUUM_AFTER) {
+            void this.vacuum()
         }
 
         if (this.inst.walBuffered > 0.02) {
